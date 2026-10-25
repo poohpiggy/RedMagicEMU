@@ -20,7 +20,10 @@ import java.util.concurrent.ConcurrentHashMap
  * Когда памяти мало, убиваем самый неважный и самый толстый процесс, как это делал бы lowmemorykiller.
  */
 /** [ramMb] > 0: guest RAM budget; background apps are killed when the guest's total RSS exceeds it. */
-class GuestLmk(private val root: File, private val lowRam: Boolean, private val log: (String) -> Unit, private val ramMb: Int = 0) {
+class GuestLmk(private val root: File, private val lowRam: Boolean, private val log: (String) -> Unit, private val ramMb: Int = 0,
+               /** open32 only: the cpu cgroup sockets (dev/cpuctl). Elsewhere the file must stay absent: libcutils
+                *  of a qemu-run firmware sees it, cannot open a socket and 6.0 zygote aborts at start (code 137) */
+               private val cgroupSockets: Boolean = false) {
     private val adj = ConcurrentHashMap<Int, Int>()
     @Volatile private var running = false
     private var server: LocalServerSocket? = null
@@ -38,12 +41,18 @@ class GuestLmk(private val root: File, private val lowRam: Boolean, private val 
             Thread({ readFifo() }, "lmk-fifo").apply { isDaemon = true; start() }
         }.onFailure { log("lmk: FIFO not created: $it") }
         runCatching { serveLmkd() }.onFailure { log("lmk: lmkd socket failed: $it") }
+        if (cgroupSockets) for (bg in listOf(false, true)) runCatching { serveCgroup(bg) }.onFailure { log("lmk: cpuctl socket failed: $it") }
+        else for (p in listOf("dev/cpuctl/tasks", "dev/cpuctl/bg_non_interactive/tasks")) runCatching {   // sockets left by older builds
+            val f = File(root, p)
+            if (android.system.OsConstants.S_ISSOCK(Os.lstat(f.path).st_mode)) f.delete()
+        }
         Thread({ loop() }, "lmk").apply { isDaemon = true; start() }
     }
 
     fun stop() {
         running = false
         runCatching { server?.close() }; runCatching { bound?.close() }
+        cgSocks.forEach { runCatching { it.close() } }; cgSocks.clear()
         // разбудить читателя FIFO
         runCatching { File(fifo.absolutePath).appendText("\n") }
         adj.clear()
@@ -72,7 +81,9 @@ class GuestLmk(private val root: File, private val lowRam: Boolean, private val 
         if (p.size < 3) return
         val pid = p[0].toIntOrNull() ?: return
         val v = p[2].toIntOrNull() ?: return
-        adj[pid] = if (p[1] == "s") scoreToAdj(v) else v
+        val a = if (p[1] == "s") scoreToAdj(v) else v
+        adj[pid] = a
+        renice(pid, a)
     }
 
     /**
@@ -115,12 +126,84 @@ class GuestLmk(private val root: File, private val lowRam: Boolean, private val 
                 val bb = java.nio.ByteBuffer.wrap(buf, 0, n)
                 if (n < 8) continue
                 when (bb.int) {
-                    1 -> if (n >= 16) { val pid = bb.int; bb.int; adj[pid] = lmkdAdj(bb.int) }
-                    2 -> adj.remove(bb.int)
+                    1 -> if (n >= 16) { val pid = bb.int; bb.int; val raw = bb.int; adj[pid] = lmkdAdj(raw); renice(pid, oldScale(raw)) }
+                    2 -> { val pid = bb.int; adj.remove(pid); demoted.remove(pid) }
                 }
             }
         } catch (_: Exception) {
         } finally { runCatching { c.close() } }
+    }
+
+    // ---------------------------------------------------------------- приоритеты
+
+    /**
+     * The phone's kernel puts background apps into a cgroup with a small CPU share; a guest's background apps had the
+     * same priority as the one on screen, and the dozen apps a boot (or a broadcast) wakes took the screen down for
+     * half a minute. Every thread of a background process (service, previous, cached) gets a low priority, and the
+     * priorities the guest had set come back when the process returns to the foreground.
+     */
+    private val demoted = ConcurrentHashMap<Int, HashMap<Int, Int>>()
+
+    /** the old -17..15 scale for both kinds of lmkd values: 7.0+ sends oom_score_adj (service 500, cached 900+) */
+    private fun oldScale(v: Int): Int = when {
+        v in -17..16 -> v
+        v < 0 -> -17
+        v >= 900 -> CACHED
+        v >= 500 -> SERVICE
+        else -> v / 100         // foreground 0, visible 100, perceptible 200, backup 300, heavy 400
+    }
+
+    /**
+     * The firmware's own cpu cgroup moves (libcutils set_sched_policy, see cg_open in the kernel): each datagram is a
+     * thread id. AMS puts there exactly what a phone keeps behind the screen, including the apps a boot's broadcasts
+     * wake (their adj says "foreground" while a receiver runs, so the lmkd values alone miss them). Once these arrive
+     * they decide, and the lmkd values no longer touch priorities.
+     */
+    private val cgSocks = java.util.Collections.synchronizedList(ArrayList<LocalSocket>())
+    @Volatile private var cgroups = false
+    private val bgSaved = ConcurrentHashMap<Int, Int>()
+
+    private fun serveCgroup(bg: Boolean) {
+        val f = File(root, if (bg) "dev/cpuctl/bg_non_interactive/tasks" else "dev/cpuctl/tasks")
+        f.parentFile?.mkdirs(); f.delete()
+        val ls = LocalSocket(LocalSocket.SOCKET_DGRAM)
+        ls.bind(LocalSocketAddress(f.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM))
+        runCatching { Os.chmod(f.absolutePath, "666".toInt(8)) }
+        cgSocks += ls
+        Thread({
+            val buf = ByteArray(64)
+            val inp = ls.inputStream
+            while (running) {
+                val n = runCatching { inp.read(buf) }.getOrDefault(-1)
+                if (n < 0) break
+                val tid = String(buf, 0, n).trim().toIntOrNull() ?: continue
+                cgroups = true
+                runCatching {
+                    if (bg) {
+                        val cur = android.os.Process.getThreadPriority(tid)
+                        bgSaved.putIfAbsent(tid, cur)
+                        if (cur < 15) android.os.Process.setThreadPriority(tid, 15)
+                    } else bgSaved.remove(tid)?.let { android.os.Process.setThreadPriority(tid, it) }
+                }
+            }
+        }, if (bg) "cpuctl-bg" else "cpuctl-fg").apply { isDaemon = true; start() }
+    }
+
+    private fun renice(pid: Int, a: Int) = runCatching {
+        // (only firmwares whose cpu cgroup moves reach us, open32: elsewhere priorities stay as they always were)
+        if (!cgroups || (a < CACHED && !demoted.containsKey(pid))) return@runCatching
+        val want = when { a >= CACHED -> 19; a >= SERVICE -> 10; else -> null }
+        val tids = File("/proc/$pid/task").list()?.mapNotNull { it.toIntOrNull() } ?: return@runCatching
+        if (want != null) {
+            val saved = demoted.getOrPut(pid) { HashMap() }
+            for (t in tids) {
+                if (t !in saved) saved[t] = runCatching { android.os.Process.getThreadPriority(t) }.getOrDefault(0)
+                runCatching { android.os.Process.setThreadPriority(t, want) }
+            }
+        } else {
+            val saved = demoted.remove(pid) ?: return@runCatching
+            for (t in tids) runCatching { android.os.Process.setThreadPriority(t, saved[t] ?: 0) }
+        }
     }
 
     // ---------------------------------------------------------------- убийца
@@ -167,6 +250,8 @@ class GuestLmk(private val root: File, private val lowRam: Boolean, private val 
     companion object {
         /** HIDDEN_APP_MIN_ADJ (≤4.3) = CACHED_APP_MIN_ADJ (4.4+) = 9 */
         const val CACHED = 9
+        /** SERVICE_ADJ (old scale): started services and everything less important than them run at a low priority */
+        const val SERVICE = 5
         const val MAX_CACHED = 10
         const val MIN_HOST_MB = 1500L
     }

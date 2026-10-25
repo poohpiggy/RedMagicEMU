@@ -48,6 +48,44 @@ class PropService(private val paths: VmPaths, private val log: (String) -> Unit)
         if (cmd == 1) apply(name, value) else log("props: unknown command $cmd")
     }
 
+    /**
+     * Pre-1.0 libc (M5) ignores ANDROID_PROPERTY_WORKSPACE: __system_properties_init connects to the abstract
+     * socket "property_service" and takes the area fd (SCM_RIGHTS) plus its size (4 bytes). Without it every
+     * guest process sees no properties (no net.*.dns1 → "Unknown host"). A setprop may follow on the same socket.
+     */
+    @Volatile private var oldServer: android.net.LocalServerSocket? = null
+
+    fun serveAbstract() {
+        if (oldServer != null) return
+        runCatching {
+            val s = android.net.LocalServerSocket("property_service")
+            oldServer = s
+            Thread({
+                while (true) {
+                    val c = try { s.accept() } catch (e: Exception) { break }
+                    Thread({
+                        runCatching {
+                            val f = paths.props
+                            android.os.ParcelFileDescriptor.open(f, android.os.ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
+                                c.setFileDescriptorsForSend(arrayOf(pfd.fileDescriptor))
+                                c.outputStream.write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(f.length().toInt()).array())
+                                c.outputStream.flush()
+                            }
+                            c.soTimeout = 2000
+                            val body = ByteArray(128)
+                            DataInputStream(c.inputStream).readFully(body)
+                            val cmd = ByteBuffer.wrap(body).order(ByteOrder.LITTLE_ENDIAN).getInt(0)
+                            if (cmd == 1) apply(cstr(body, 4, 32), cstr(body, 36, 92))
+                        }
+                        runCatching { c.close() }
+                    }, "props-abstract-client").start()
+                }
+            }, "props-abstract").start()
+        }.onFailure { log("props: abstract property_service: ${it.message}") }
+    }
+
+    fun stopAbstract() { runCatching { oldServer?.close() }; oldServer = null }
+
     /** Разворачивает область из шаблона образа и подмешивает сохранённые persist.*. */
     @Synchronized
     fun prepare(overrides: Map<String, String>, defaults: Map<String, String> = emptyMap(), size: Int = PropArea.SIZE): Boolean {

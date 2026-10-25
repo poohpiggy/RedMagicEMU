@@ -52,6 +52,13 @@ class Importer(
     private var bytes = 0L
     private var gotSystem = false
     @Volatile var cancelled = false
+    /** a path another process can open for the file being imported (payload-dumper-go reads it), null if none */
+    private var topInput: String? = null
+
+    private fun inputPath(fd: Int): String? = runCatching {
+        val real = Os.readlink("/proc/self/fd/$fd")
+        if (real.startsWith("/") && File(real).canRead()) real else "/proc/${Os.getpid()}/fd/$fd"
+    }.getOrNull()
 
     fun import(uri: Uri, name: String): GuestImage {
         val id = ImageStore.newId(ctx)
@@ -64,6 +71,7 @@ class Importer(
             pfd.use {
                 val ch = FileInputStream(pfd.fileDescriptor).channel
                 val seekable = runCatching { ch.position(0); ch.size() > 0 }.getOrDefault(false)
+                topInput = if (seekable) inputPath(pfd.fd) else null
                 if (seekable) handle(ChannelSource(ch), ch, name, 0)
                 else {
                     val t = spill(FileInputStream(pfd.fileDescriptor), "whole")
@@ -106,11 +114,10 @@ class Importer(
                 if (ch != null) importSevenZ(ch, name, depth) else throw IOException("7z without random access")
             }
             h.size > 7 && String(h, 0, 6, Charsets.ISO_8859_1) == "Rar!\u001a\u0007" -> {
-                if (h[6].toInt() == 1) throw IOException("RAR5 archives are not supported yet: repack \"$name\" as ZIP or 7z")
-                importRar(src, name, depth)
+                if (h[6].toInt() == 1) importRar5(src, name, depth) else importRar(src, name, depth)
             }
             PacFile.probe(h) -> if (ch != null) importPac(src, ch) else throw IOException("pac without random access")
-            PayloadReader.probe(h) -> importPayload(src)
+            PayloadReader.probe(h) -> importPayload(src, if (depth == 0) topInput else null)
             SinImage.probe(h) || SinImage.probeOld(h) && name.endsWith(".sin", true) -> importSin(streamOf(src), name.substringAfterLast('/'))
             SparseSource.probe(src) || Ext4Reader.probe(src) || SuperImage.probe(src) || ErofsReader.probe(src) -> importImage(src, "system")
             // (the content first: forum rootfs ".tar" files are gzip-compressed)
@@ -144,6 +151,18 @@ class Importer(
         val t = spill(b, inner.substringAfterLast('/'))
         try { FileChannel.open(t.toPath(), StandardOpenOption.READ).use { c -> handle(ChannelSource(c), c, inner, depth + 1) } }
         finally { t.delete() }
+    }
+
+    /** RAR 5: junrar cannot read it, the bundled 7-Zip can; a nested or unseekable one is copied out first */
+    private fun importRar5(src: RandomSource, name: String, depth: Int) {
+        var whole: File? = null
+        val input = (if (depth == 0) topInput else null) ?: File(tmp, "${System.nanoTime()}-whole.rar").also { f ->
+            whole = f; streamOf(src).use { i -> f.outputStream().use { o -> i.copyTo(o, 1 shl 20) } }
+        }.absolutePath
+        try {
+            val dir = try { extractWith7z(input, name) } catch (e: IOException) { throw IOException("RAR5 \"$name\": 7-Zip failed (${e.message})") }
+            try { importExtracted(dir, name, depth) } finally { dir.deleteRecursively() }
+        } finally { whole?.delete() }
     }
 
     /** RAR 4 (junrar): entries handled like those of a zip, via temporary files. */
@@ -236,10 +255,12 @@ class Importer(
                     gotSystem = true
                 }
                 base.equals("boot.img", true) -> zip.getInputStream(e).use { takeBoot(it.readBytes()) }
+                // SDK emulator images (0.9 beta, M3/M5, 1.x): ramdisk.img is a bare gzip cpio
+                base.equals("ramdisk.img", true) && e.size < 16_000_000 -> zip.getInputStream(e).use { takeBoot(it.readBytes()) }
                 base.equals("recovery.img", true) && e.size < 64_000_000 -> zip.getInputStream(e).use { recovery = it.readBytes() }
                 base.matches(SYSTEM_IMAGE) ->
                     withEntrySource(zip, e) { importImage(it, "system") }
-                base.equals("payload.bin", true) -> withEntrySource(zip, e) { importPayload(it) }
+                base.equals("payload.bin", true) -> withEntrySource(zip, e) { importPayload(it, if (depth == 0 && !n.contains('/')) topInput else null) }
                 // Sony .ftf: system.sin is the system partition, kernel.sin the kernel with the ramdisk
                 base.matches(Regex("(?i)(system|kernel|boot)\\.sin")) && !(gotSystem && base.startsWith("system", true)) ->
                     zip.getInputStream(e).use { importSin(it, base) }
@@ -300,6 +321,85 @@ class Importer(
 
     /** 7z: entries are read in order (solid archives cannot seek); interesting ones are unpacked like their zip twins */
     private fun importSevenZ(ch: FileChannel, name: String, depth: Int) {
+        // the bundled 7-Zip decodes LZMA natively, ~10x the Java decoder (MiFlash Redmi 3: 31 s against 5+ min)
+        val input = if (depth == 0) topInput else null
+        if (input != null && !File(ctx.filesDir, "7z.off").exists()) {
+            val dir = runCatching { extractWith7z(input, name) }.onFailure { log("7-Zip: ${it.message}; built-in reader") }.getOrNull()
+            if (dir != null) {
+                try { importExtracted(dir, name, depth) } finally { dir.deleteRecursively() }
+                return
+            }
+        }
+        importSevenZJava(ch, name, depth)
+    }
+
+    /** the whole archive into a temporary directory, minus partitions an emulator never uses */
+    private fun extractWith7z(input: String, name: String): File {
+        val bin = File(ctx.applicationInfo.nativeLibraryDir, "libsevenzip.so")
+        if (!bin.canExecute()) throw IOException("not bundled")
+        val out = File(tmp, "7z-${System.nanoTime()}").apply { deleteRecursively(); mkdirs() }
+        val skip = listOf("userdata*.img", "cache.img", "NON-HLOS.bin", "modem*", "MODEM*", "CP_*", "*.mbn", "persist.img")
+        val cmd = runner(bin) + listOf("x", "-y", "-bsp1", "-bb0", "-mmt=on", "-o${out.absolutePath}") + skip.map { "-xr!$it" } + input
+        onProgress("Unpacking $name (7-Zip)", -1f)
+        val t0 = System.currentTimeMillis()
+        val code = runTool(cmd) { l -> Regex("""(\d+)%""").findAll(l).lastOrNull()?.let { onProgress("Unpacking $name (7-Zip)", it.groupValues[1].toInt() / 100f * 0.6f) } }
+        if (code != 0) { out.deleteRecursively(); throw IOException("exit $code") }
+        log("7-Zip: unpacked in ${(System.currentTimeMillis() - t0) / 1000} s")
+        return out
+    }
+
+    /** the same choices as for the entries of a 7z read by the Java decoder, on files 7-Zip has written out */
+    private fun importExtracted(dir: File, name: String, depth: Int) {
+        val nested = ArrayList<Pair<File, String>>()
+        dir.walkTopDown().filter { it.isFile }.forEach { f ->
+            if (cancelled) throw IOException("cancelled")
+            val n = f.relativeTo(dir).invariantSeparatorsPath
+            val base = f.name
+            when {
+                n.contains("__MACOSX/") || base.startsWith("._") -> {}
+                n.startsWith("system/") -> { f.inputStream().use { writeFile(n, it, null) }; gotSystem = true }
+                base.equals("boot.img", true) -> takeBoot(f.readBytes())
+                base.equals("recovery.img", true) && f.length() < 64_000_000 -> recovery = f.readBytes()
+                base.matches(SYSTEM_IMAGE) -> nested.add(f to "system")
+                base.matches(Regex("""(?i)(system|kernel|boot)\.sin""")) -> f.inputStream().use { importSin(it, base) }
+                base.matches(Regex("""(?i).*\.(zip|tar|tar\.md5|md5|tgz|tar\.gz)""")) && f.length() > 20_000_000 &&
+                    !base.startsWith("MODEM") && !base.startsWith("CP_") && !base.contains("CSC") -> nested.add(f to "archive")
+            }
+        }
+        for ((f, kind) in nested) FileChannel.open(f.toPath(), StandardOpenOption.READ).use { c ->
+            val src = ChannelSource(c)
+            if (kind == "system") importImage(src, "system") else handle(src, c, f.name, depth + 1)
+        }
+        if (!gotSystem && nested.isEmpty()) log("no system found in archive $name")
+    }
+
+    /** a bundled static Linux tool, under pdgwrap (the sandbox's seccomp filter would kill it) */
+    private fun runner(bin: File): List<String> {
+        val wrap = File(ctx.applicationInfo.nativeLibraryDir, "libpdgwrap.so")
+        return (if (wrap.canExecute()) listOf(wrap.absolutePath) else emptyList()) + bin.absolutePath
+    }
+
+    private fun runTool(cmd: List<String>, onLine: (String) -> Unit): Int {
+        val pb = ProcessBuilder(cmd).redirectErrorStream(true)
+        pb.environment()["GLIBC_TUNABLES"] = "glibc.pthread.rseq=0"
+        val p = pb.start()
+        val r = p.inputStream.bufferedReader()
+        val buf = CharArray(4096)
+        while (true) {
+            val k = r.read(buf); if (k < 0) break
+            if (cancelled) p.destroyForcibly()
+            val chunk = String(buf, 0, k)
+            chunk.lineSequence().filter { it.startsWith("pdgwrap:") }.forEach { log(it) }
+            onLine(chunk)
+        }
+        val code = p.waitFor()
+        if (cancelled) throw IOException("cancelled")
+        return code
+    }
+
+    private fun importSevenZJava(ch: FileChannel, name: String, depth: Int) {
+        // the format probe left the channel at byte 1100, and SevenZFile reads its signature from where it stands
+        ch.position(0)
         SevenZFile.builder().setSeekableByteChannel(ch).get().use { z ->
             val nested = ArrayList<Pair<File, String>>()
             while (true) {
@@ -551,15 +651,25 @@ class Importer(
     }
 
     /** A full A/B OTA: every partition with files of the firmware is taken out of payload.bin in turn and read. */
-    private fun importPayload(src: RandomSource) {
+    private fun importPayload(src: RandomSource, input: String? = null) {
         log("OTA payload.bin")
-        val extra = PayloadReader.partitionNames(src).map { it.removeSuffix("_a") }.filter { it.matches(SKIN_PARTITION) }.distinct()
-        for ((part, mount) in listOf("system" to "system", "vendor" to "vendor", "odm" to "odm",
-                "product" to "system/product", "system_ext" to "system/system_ext") + extra.map { it to it }) {
-            val img = File(tmp, "${System.nanoTime()}-$part.img")
+        val names = PayloadReader.partitionNames(src).map { it.removeSuffix("_a") }.toSet()
+        val extra = names.filter { it.matches(SKIN_PARTITION) }.distinct()
+        val wanted = (listOf("system" to "system", "vendor" to "vendor", "odm" to "odm",
+            "product" to "system/product", "system_ext" to "system/system_ext") + extra.map { it to it }).filter { it.first in names }
+        if ("system" !in names) throw IOException("payload.bin without a system partition")
+        // payload-dumper-go decompresses every operation in parallel: several times faster than the reader below
+        // (files/pdg.off: the built-in reader only, to compare)
+        val dumped = input?.takeIf { !File(ctx.filesDir, "pdg.off").exists() }?.let { runCatching { dumpWithGo(it, wanted.map { w -> w.first }) }.onFailure { e -> log("payload-dumper-go: ${e.message}; built-in reader") }.getOrNull() }
+        for ((part, mount) in wanted) {
+            val img = dumped?.let { File(it, "$part.img") }?.takeIf { it.isFile } ?: File(tmp, "${System.nanoTime()}-$part.img").also { f ->
+                val t0 = System.currentTimeMillis()
+                val ok = PayloadReader.extractPartition(src, part, f) { p -> onProgress("Extracting $part from payload.bin", p) }
+                log("payload.bin: $part by the built-in reader in ${(System.currentTimeMillis() - t0) / 1000} s")
+                if (!ok) { f.delete(); if (part == "system") throw IOException("payload.bin without a system partition") }
+            }
+            if (!img.isFile) continue
             try {
-                val ok = PayloadReader.extractPartition(src, part, img) { p -> onProgress("Extracting $part from payload.bin", p) }
-                if (!ok) { if (part == "system") throw IOException("payload.bin without a system partition"); continue }
                 FileChannel.open(img.toPath(), StandardOpenOption.READ).use { c ->
                     if (part == "system") importImage(ChannelSource(c), mount)
                     else runCatching { importImage(ChannelSource(c), mount) }.onFailure { log("payload.bin: $part skipped: ${it.message}") }
@@ -568,6 +678,39 @@ class Importer(
                 img.delete()
             }
         }
+        dumped?.deleteRecursively()
+    }
+
+    /** runs the bundled payload-dumper-go (libpayloaddumper.so) on [input]; the directory with <part>.img files */
+    private fun dumpWithGo(input: String, parts: List<String>): File {
+        val bin = File(ctx.applicationInfo.nativeLibraryDir, "libpayloaddumper.so")
+        if (!bin.canExecute()) throw IOException("not bundled")
+        val out = File(tmp, "pdg-${System.nanoTime()}").apply { deleteRecursively() }
+        // run under pdgwrap: the sandbox's seccomp filter kills a static glibc/Go binary on calls bionic never makes;
+        // the wrapper turns those into ENOSYS
+        val wrap = File(ctx.applicationInfo.nativeLibraryDir, "libpdgwrap.so")
+        val cmd = (if (wrap.canExecute()) listOf(wrap.absolutePath) else emptyList()) + listOf(bin.absolutePath, "-o", out.absolutePath, "-p", parts.joinToString(","),
+            "-c", Runtime.getRuntime().availableProcessors().toString(), "-no-verify", "-no-fec", input)
+        onProgress("Extracting ${parts.joinToString(", ")} (payload-dumper-go)", -1f)
+        val t0 = System.currentTimeMillis()
+        val pb = ProcessBuilder(cmd).redirectErrorStream(true)
+        // a static glibc binary: glibc registers rseq at start, which the app sandbox's seccomp filter kills (SIGSYS, exit 159)
+        pb.environment()["GLIBC_TUNABLES"] = "glibc.pthread.rseq=0"
+        val p = pb.start()
+        val tail = ArrayDeque<String>()
+        p.inputStream.bufferedReader().forEachLine { l ->
+            if (cancelled) p.destroyForcibly()
+                if (l.startsWith("pdgwrap:")) log(l)
+            tail.addLast(l.take(200)); if (tail.size > 6) tail.removeFirst()
+        }
+        val code = p.waitFor()
+        if (cancelled) { out.deleteRecursively(); throw IOException("cancelled") }
+        if (code != 0 || !File(out, "system.img").isFile) {
+            out.deleteRecursively()
+            throw IOException("exit $code: ${tail.joinToString(" | ")}")
+        }
+        log("payload-dumper-go: ${parts.size} partitions in ${(System.currentTimeMillis() - t0) / 1000} s")
+        return out
     }
 
     private fun importExt4(src: RandomSource, mount: String) {

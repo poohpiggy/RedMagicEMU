@@ -53,7 +53,9 @@ private val RESOLUTIONS = listOf(
     Res("720×1280", 720, 1280, 320),
 )
 
-private val RAM_STEPS = listOf(0, 256, 512, 768, 1024, 1536, 2048, 3072, 4096)
+private val DISK_STEPS = listOf(0, 2048, 4096, 8192, 16384, 32768, 65536, 131072)
+
+private val RAM_STEPS = listOf(0, 256, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384)
 
 @Composable
 fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings) -> Unit) {
@@ -112,9 +114,21 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings) -
                 headlineContent = { Text(stringResource(R.string.vs_ram)) },
                 supportingContent = {
                     Column {
-                        Text(if (s.ramMb == 0) stringResource(R.string.vs_ram_auto) else "${s.ramMb} MB")
+                        Text(if (s.ramMb == 0) stringResource(R.string.vs_ram_auto) else if (s.ramMb >= 1024 && s.ramMb % 1024 == 0) "${s.ramMb / 1024} GB" else "${s.ramMb} MB")
                         Slider(value = ramIdx.toFloat(), onValueChange = { s = s.copy(ramMb = RAM_STEPS[it.toInt()]) },
                             valueRange = 0f..RAM_STEPS.lastIndex.toFloat(), steps = RAM_STEPS.size - 2)
+                    }
+                },
+                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            )
+            val diskIdx = DISK_STEPS.indexOf(s.diskMb).coerceAtLeast(0)
+            ListItem(
+                headlineContent = { Text(stringResource(R.string.vs_disk)) },
+                supportingContent = {
+                    Column {
+                        Text(if (s.diskMb == 0) stringResource(R.string.vs_ram_auto) else "${s.diskMb / 1024} GB")
+                        Slider(value = diskIdx.toFloat(), onValueChange = { s = s.copy(diskMb = DISK_STEPS[it.toInt()]) },
+                            valueRange = 0f..DISK_STEPS.lastIndex.toFloat(), steps = DISK_STEPS.size - 2)
                     }
                 },
                 colors = ListItemDefaults.colors(containerColor = Color.Transparent),

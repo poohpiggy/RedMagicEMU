@@ -40,6 +40,7 @@ enum {
     NR_setresgid = 149, NR_getresgid = 150, NR_setfsuid = 151, NR_setfsgid = 152, NR_getgroups = 158, NR_setgroups = 159,
     NR_prctl = 167, NR_getpid = 172, NR_getuid = 174, NR_geteuid = 175, NR_getgid = 176, NR_getegid = 177, NR_gettid = 178,
     NR_socket = 198, NR_socketpair = 199, NR_bind = 200, NR_connect = 203, NR_getsockname = 204, NR_sendto = 206, NR_setsockopt = 208, NR_getsockopt = 209,
+#define BIG_MAP 0x1000000u
     NR_shutdown = 210, NR_sendmsg = 211, NR_recvmsg = 212, NR_munmap = 215, NR_execve = 221, NR_mmap = 222, NR_mprotect = 226,
     NR_renameat2 = 276, NR_memfd_create = 279, NR_statx = 291,
 };
@@ -1149,6 +1150,17 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
         return S3(nr, a[0], a[1], a[2]);
     case NR_mmap:
         if (a[2] == 1 && is_binder_fd((int)a[4])) return binder_mmap((u64)a[0], (u64)a[1], a[3]);
+        if (!a[0] && (int)a[4] == -1 && (u64)a[1] >= BIG_MAP && !(a[3] & 0x10)) {
+            // ART 16 (QPR1+) relocates its boot image by the reservation's address and checks that the delta is
+            // a multiple of kElfSegmentAlignment (16 KB): a 4 KB-page host hands out 4 KB-aligned addresses (#47)
+            const u64 al = 0x10000, len = ((u64)a[1] + 0xfff) & ~0xfffUL;
+            long r = S6(nr, 0, len + al, a[2], a[3], -1, 0);
+            if (r < 0 && r > -4096) return r;
+            u64 b = (u64)r, at = (b + al - 1) & ~(al - 1);
+            if (at > b) S2(NR_munmap, b, at - b);
+            if (b + len + al > at + len) S2(NR_munmap, at + len, b + len + al - (at + len));
+            return (long)at;
+        }
         if (g_is32 && a[2] == 1 && g_props[0] && (int)a[4] >= 0 && !gles2_for_32()) {
             // 32-bit programs only have the GLES 1 renderer: in their (private) view of the property area the
             // "GLES 2 is there" flag reads 0, so their windows are drawn without hwui. Only that page is a copy.
@@ -1212,8 +1224,12 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
             u32 note[3], len = at[1], *info = (u32 *)*(u64 *)(at + 2);
             if (!info) return 0;
             for (u32 i = 0; i < len; i++) ((u8 *)info)[i] = 0;
-            if (S4(NR_pread64, at[0], note, sizeof note, 0) == (long)sizeof note && len >= 20) {
-                info[0] = note[0]; info[1] = 1; info[2] = note[1]; info[3] = note[2]; info[4] = 1;   // type, id, key, value, max
+            u32 note4[4] = { 0, 0, 0, 0 };
+            long nl = S4(NR_pread64, at[0], note4, sizeof note4, 0);
+            if (nl >= 12 && len >= 20) {
+                note[0] = note4[0]; note[1] = note4[1]; note[2] = note4[2];
+                info[0] = note[0]; info[1] = 1; info[2] = note[1]; info[3] = note[2];   // type, id, key, value, max
+                info[4] = nl >= 16 && note4[3] ? note4[3] : 1;
             }
             // (16: a map with no note - timeInState.bpf describes its maps in BTF - still has an id: bpfLock() takes
             // the id 0 for impossible and aborts, in system_server's battery statistics thread)
@@ -1224,15 +1240,24 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
             return S4(NR_openat, AT_FDCWD, "/dev/null", 02000002 /*O_RDWR|O_CLOEXEC*/, 0);
         case 1: {                                   // MAP_LOOKUP_ELEM: { fd, key, value }. An array map has every key
             // (BpfNetMaps reads the configuration array and takes a missing entry for a null pointer): zeros
-            u32 note[3];
-            if (at && a[2] >= 24 && S4(NR_pread64, at[0], note, sizeof note, 0) == (long)sizeof note
-                && (note[0] == 2 || note[0] == 6) && note[2] && note[2] <= 4096) {
+            // (a walk key by key over an array ends at its size: with no end, libnetworkstats of 16 QPR2 spins on
+            // system_server's main thread until the watchdog kills it)
+            u32 note[4] = { 0, 0, 0, 0 };
+            long nl = at && a[2] >= 24 ? S4(NR_pread64, at[0], note, sizeof note, 0) : -1;
+            if (nl >= 12 && (note[0] == 2 || note[0] == 6) && note[2] && note[2] <= 4096) {
+                const u32 *key = (const u32 *)*(u64 *)(at + 2);
+                if (nl >= 16 && note[3] && key && *key >= note[3]) return -ENOENT;
                 u8 *v = (u8 *)*(u64 *)(at + 4);
                 if (v) { for (u32 i = 0; i < note[2]; i++) v[i] = 0; return 0; }
             }
             return -ENOENT;
         }
         case 3: case 4: return -ENOENT;             // MAP_DELETE_ELEM, MAP_GET_NEXT_KEY
+        case 24: case 25:                           // MAP_LOOKUP_BATCH, MAP_LOOKUP_AND_DELETE_BATCH: { in, out, keys,
+            // values, count, ... }. libnetworkstats of 16 QPR2 reads the stats maps in batches and asks again while
+            // the call succeeds: an untouched count spun system_server's main thread until the watchdog
+            if (at && a[2] >= 36) at[8] = 0;
+            return -ENOENT;
         case 16:                                    // PROG_QUERY: one program attached (13 aborts when the programs
             if (at && a[2] >= 28) {                 // it has just attached to the cgroup are not reported back)
                 u32 *ids = (u32 *)*(u64 *)(at + 4);
@@ -1588,7 +1613,7 @@ static const u8 trapped[] = {
     NR_close, NR_getsockopt, NR_sendto, NR_sendmsg, NR_getsockname, NR_socket, NR_dup3, NR_writev, 92 /* personality */, 107 /* timer_create */, 119 /* sched_setscheduler */,
 };
 
-enum { L_TRAP = 240, L_ALLOW, L_SIG, L_MMAP, L_NR, L_PRCTL, L_ALL, L_MADV, L_N };
+enum { L_TRAP = 240, L_ALLOW, L_SIG, L_MMAP, L_NR, L_PRCTL, L_ALL, L_MADV, L_MMAP_BIG, L_N };
 
 static void install_filter(void) {
     static struct bpf f[160];
@@ -1631,8 +1656,14 @@ static void install_filter(void) {
     f[n++] = LD(24); f[n++] = JEQ(0, 0, L_TRAP);
     f[n++] = LD(28); f[n++] = JEQ(0, L_ALLOW, L_TRAP);
     AT(L_MMAP);                                                 // read-only file mappings: the binder buffer is one
-    f[n++] = LD(32); f[n++] = JEQ(1, 0, L_ALLOW);
+    f[n++] = LD(32); f[n++] = JEQ(1, 0, L_MMAP_BIG);
     f[n++] = LD(48); f[n++] = JEQ(0xffffffffu, L_ALLOW, L_TRAP);
+    AT(L_MMAP_BIG);                                             // anonymous, no address, >= 16 MB: aligned to 64 KB (#47)
+    f[n++] = LD(48); f[n++] = JEQ(0xffffffffu, 0, L_ALLOW);
+    f[n++] = LD(16); f[n++] = JEQ(0, 0, L_ALLOW);
+    f[n++] = LD(20); f[n++] = JEQ(0, 0, L_ALLOW);
+    f[n++] = LD(28); f[n++] = JEQ(0, 0, L_TRAP);
+    f[n++] = LD(24); f[n++] = JGE(BIG_MAP, L_TRAP, L_ALLOW);
     AT(L_TRAP); f[n++] = RET(TRAP);
     AT(L_ALLOW); f[n++] = RET(ALLOW);
 #undef AT

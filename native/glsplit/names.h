@@ -421,9 +421,12 @@ static const char *const kNames[] = {
 #define IDX_eglCreateContext 5
 #define IDX_eglCreateImageKHR 6
 #define IDX_eglCreatePbufferSurface 8
+#define IDX_eglCreateSyncKHR 10
 #define IDX_eglCreateWindowSurface 11
 #define IDX_eglGetConfigAttrib 16
+#define IDX_eglGetConfigs 17
 #define IDX_eglGetProcAddress 23
+#define IDX_eglInitialize 28
 #define IDX_eglMakeCurrent 30
 #define IDX_eglQuerySurface 34
 #define IDX_eglSwapBuffers 39
@@ -431,6 +434,7 @@ static const char *const kNames[] = {
 #define IDX_glBindTexture 61
 #define IDX_glBufferData 74
 #define IDX_glBufferSubData 75
+#define IDX_glCompileShader 97
 #define IDX_glDeleteBuffers 109
 #define IDX_glDeleteTextures 119
 #define IDX_glDisableVertexAttribArray 130
@@ -439,6 +443,11 @@ static const char *const kNames[] = {
 #define IDX_glEGLImageTargetTexture2DOES 142
 #define IDX_glEnableVertexAttribArray 145
 #define IDX_glGenBuffers 164
+#define IDX_glGetProgramInfoLog 207
+#define IDX_glGetProgramiv 208
+#define IDX_glGetShaderInfoLog 215
+#define IDX_glGetShaderiv 218
+#define IDX_glLinkProgram 271
 #define IDX_glLoadIdentity 272
 #define IDX_glMatrixMode 281
 #define IDX_glOrthof 289

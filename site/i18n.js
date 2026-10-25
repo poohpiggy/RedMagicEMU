@@ -141,7 +141,7 @@ window.AEMU_I18N = {
    "start_title": "Quick start",
    "steps": [
     "Download the APK from <a href=\"https://github.com/uxazu/aemulator/releases\" target=\"_blank\" rel=\"noopener\">Releases</a> and install it.",
-    "Find a firmware on the <a href=\"https://aeforum.uxazuu.space/\" target=\"_blank\" rel=\"noopener\">forum</a> and download it to your phone.",
+    "Find a firmware on the <a href=\"https://forum.aemulator.fun/\" target=\"_blank\" rel=\"noopener\">forum</a> and download it to your phone.",
     "Open AEmulator → <b>Add firmware</b> and pick the file. Import takes a few minutes.",
     "Press <b>Start</b>. The first boot is slower: the system optimises its apps.",
     "Use the ⋮ menu for volume, power button and logs; the ⚙️ button opens app settings and language."
@@ -214,7 +214,7 @@ window.AEMU_I18N = {
    "start_title": "Быстрый старт",
    "steps": [
     "Скачайте APK из <a href=\"https://github.com/uxazu/aemulator/releases\" target=\"_blank\" rel=\"noopener\">Releases</a> и установите.",
-    "Найдите прошивку на <a href=\"https://aeforum.uxazuu.space/\" target=\"_blank\" rel=\"noopener\">форуме</a> и скачайте её на телефон.",
+    "Найдите прошивку на <a href=\"https://forum.aemulator.fun/\" target=\"_blank\" rel=\"noopener\">форуме</a> и скачайте её на телефон.",
     "Откройте AEmulator → <b>Добавить прошивку</b> и выберите файл. Импорт занимает несколько минут.",
     "Нажмите <b>Запустить</b>. Первая загрузка дольше: система оптимизирует приложения.",
     "Меню ⋮ — громкость, кнопка питания и журнал; кнопка ⚙️ — настройки приложения и язык."
@@ -287,7 +287,7 @@ window.AEMU_I18N = {
    "start_title": "Швидкий старт",
    "steps": [
     "Завантажте APK з <a href=\"https://github.com/uxazu/aemulator/releases\" target=\"_blank\" rel=\"noopener\">Releases</a> і встановіть.",
-    "Знайдіть прошивку на <a href=\"https://aeforum.uxazuu.space/\" target=\"_blank\" rel=\"noopener\">форумі</a> і завантажте її на телефон.",
+    "Знайдіть прошивку на <a href=\"https://forum.aemulator.fun/\" target=\"_blank\" rel=\"noopener\">форумі</a> і завантажте її на телефон.",
     "Відкрийте AEmulator → <b>Додати прошивку</b> й виберіть файл. Імпорт триває кілька хвилин.",
     "Натисніть <b>Запустити</b>. Перше завантаження довше: система оптимізує застосунки.",
     "Меню ⋮ — гучність, кнопка живлення й журнал; кнопка ⚙️ — налаштування й мова."
@@ -360,7 +360,7 @@ window.AEMU_I18N = {
    "start_title": "Schnellstart",
    "steps": [
     "APK unter <a href=\"https://github.com/uxazu/aemulator/releases\" target=\"_blank\" rel=\"noopener\">Releases</a> herunterladen und installieren.",
-    "Such dir im <a href=\"https://aeforum.uxazuu.space/\" target=\"_blank\" rel=\"noopener\">Forum</a> eine Firmware aus und lade sie aufs Handy.",
+    "Such dir im <a href=\"https://forum.aemulator.fun/\" target=\"_blank\" rel=\"noopener\">Forum</a> eine Firmware aus und lade sie aufs Handy.",
     "AEmulator öffnen → <b>Firmware hinzufügen</b> und die Datei wählen. Der Import dauert einige Minuten.",
     "<b>Starten</b> drücken. Der erste Start dauert länger: Das System optimiert Apps.",
     "Menü ⋮ für Lautstärke, Ein/Aus und Protokoll; ⚙️ öffnet Einstellungen und Sprache."
@@ -433,7 +433,7 @@ window.AEMU_I18N = {
    "start_title": "Démarrage rapide",
    "steps": [
     "Téléchargez l’APK depuis <a href=\"https://github.com/uxazu/aemulator/releases\" target=\"_blank\" rel=\"noopener\">Releases</a> et installez-le.",
-    "Trouvez une ROM sur le <a href=\"https://aeforum.uxazuu.space/\" target=\"_blank\" rel=\"noopener\">forum</a> et téléchargez-la sur le téléphone.",
+    "Trouvez une ROM sur le <a href=\"https://forum.aemulator.fun/\" target=\"_blank\" rel=\"noopener\">forum</a> et téléchargez-la sur le téléphone.",
     "Ouvrez AEmulator → <b>Ajouter une ROM</b> et choisissez le fichier. L’import prend quelques minutes.",
     "Appuyez sur <b>Démarrer</b>. Le premier démarrage est plus long : le système optimise les applis.",
     "Menu ⋮ pour le volume, le bouton marche et le journal ; ⚙️ ouvre les paramètres et la langue."
@@ -506,7 +506,7 @@ window.AEMU_I18N = {
    "start_title": "Inicio rápido",
    "steps": [
     "Descarga el APK desde <a href=\"https://github.com/uxazu/aemulator/releases\" target=\"_blank\" rel=\"noopener\">Releases</a> e instálalo.",
-    "Busca un firmware en el <a href=\"https://aeforum.uxazuu.space/\" target=\"_blank\" rel=\"noopener\">foro</a> y descárgalo en el teléfono.",
+    "Busca un firmware en el <a href=\"https://forum.aemulator.fun/\" target=\"_blank\" rel=\"noopener\">foro</a> y descárgalo en el teléfono.",
     "Abre AEmulator → <b>Añadir firmware</b> y elige el archivo. La importación tarda unos minutos.",
     "Pulsa <b>Iniciar</b>. El primer arranque es más lento: el sistema optimiza las apps.",
     "Menú ⋮ para volumen, botón de encendido y registro; ⚙️ abre ajustes e idioma."
@@ -579,7 +579,7 @@ window.AEMU_I18N = {
    "start_title": "Início rápido",
    "steps": [
     "Baixe o APK em <a href=\"https://github.com/uxazu/aemulator/releases\" target=\"_blank\" rel=\"noopener\">Releases</a> e instale.",
-    "Encontre um firmware no <a href=\"https://aeforum.uxazuu.space/\" target=\"_blank\" rel=\"noopener\">fórum</a> e baixe no celular.",
+    "Encontre um firmware no <a href=\"https://forum.aemulator.fun/\" target=\"_blank\" rel=\"noopener\">fórum</a> e baixe no celular.",
     "Abra o AEmulator → <b>Adicionar firmware</b> e escolha o arquivo. A importação leva alguns minutos.",
     "Toque em <b>Iniciar</b>. A primeira inicialização é mais lenta: o sistema otimiza os apps.",
     "Menu ⋮ para volume, botão liga/desliga e registro; ⚙️ abre configurações e idioma."
@@ -652,7 +652,7 @@ window.AEMU_I18N = {
    "start_title": "Avvio rapido",
    "steps": [
     "Scarica l’APK da <a href=\"https://github.com/uxazu/aemulator/releases\" target=\"_blank\" rel=\"noopener\">Releases</a> e installalo.",
-    "Trova un firmware sul <a href=\"https://aeforum.uxazuu.space/\" target=\"_blank\" rel=\"noopener\">forum</a> e scaricalo sul telefono.",
+    "Trova un firmware sul <a href=\"https://forum.aemulator.fun/\" target=\"_blank\" rel=\"noopener\">forum</a> e scaricalo sul telefono.",
     "Apri AEmulator → <b>Aggiungi firmware</b> e scegli il file. L’importazione richiede qualche minuto.",
     "Premi <b>Avvia</b>. Il primo avvio è più lento: il sistema ottimizza le app.",
     "Menu ⋮ per volume, tasto di accensione e registro; ⚙️ apre impostazioni e lingua."
@@ -725,7 +725,7 @@ window.AEMU_I18N = {
    "start_title": "Szybki start",
    "steps": [
     "Pobierz APK z <a href=\"https://github.com/uxazu/aemulator/releases\" target=\"_blank\" rel=\"noopener\">Releases</a> i zainstaluj.",
-    "Znajdź firmware na <a href=\"https://aeforum.uxazuu.space/\" target=\"_blank\" rel=\"noopener\">forum</a> i pobierz je na telefon.",
+    "Znajdź firmware na <a href=\"https://forum.aemulator.fun/\" target=\"_blank\" rel=\"noopener\">forum</a> i pobierz je na telefon.",
     "Otwórz AEmulator → <b>Dodaj firmware</b> i wybierz plik. Import trwa kilka minut.",
     "Naciśnij <b>Uruchom</b>. Pierwszy start trwa dłużej: system optymalizuje aplikacje.",
     "Menu ⋮ — głośność, przycisk zasilania i dziennik; ⚙️ — ustawienia i język."
@@ -798,7 +798,7 @@ window.AEMU_I18N = {
    "start_title": "Hızlı başlangıç",
    "steps": [
     "APK’yı <a href=\"https://github.com/uxazu/aemulator/releases\" target=\"_blank\" rel=\"noopener\">Releases</a> sayfasından indirip kurun.",
-    "<a href=\"https://aeforum.uxazuu.space/\" target=\"_blank\" rel=\"noopener\">Forumda</a> bir yazılım bul ve telefonuna indir.",
+    "<a href=\"https://forum.aemulator.fun/\" target=\"_blank\" rel=\"noopener\">Forumda</a> bir yazılım bul ve telefonuna indir.",
     "AEmulator’ı açın → <b>Yazılım ekle</b> ve dosyayı seçin. İçe aktarma birkaç dakika sürer.",
     "<b>Başlat</b>’a basın. İlk açılış daha uzundur: sistem uygulamaları optimize eder.",
     "⋮ menüsü: ses, güç düğmesi ve günlük; ⚙️ ayarları ve dili açar."
@@ -871,7 +871,7 @@ window.AEMU_I18N = {
    "start_title": "البدء السريع",
    "steps": [
     "نزّل ملف APK من <a href=\"https://github.com/uxazu/aemulator/releases\" target=\"_blank\" rel=\"noopener\">Releases</a> وثبّته.",
-    "ابحث عن برنامج ثابت في <a href=\"https://aeforum.uxazuu.space/\" target=\"_blank\" rel=\"noopener\">المنتدى</a> ونزّله إلى هاتفك.",
+    "ابحث عن برنامج ثابت في <a href=\"https://forum.aemulator.fun/\" target=\"_blank\" rel=\"noopener\">المنتدى</a> ونزّله إلى هاتفك.",
     "افتح AEmulator ← <b>إضافة برنامج ثابت</b> واختر الملف. يستغرق الاستيراد بضع دقائق.",
     "اضغط <b>تشغيل</b>. الإقلاع الأول أبطأ: النظام يحسّن التطبيقات.",
     "القائمة ⋮ للصوت وزر التشغيل والسجل؛ وزر ⚙️ للإعدادات واللغة."
@@ -944,7 +944,7 @@ window.AEMU_I18N = {
    "start_title": "شروع سریع",
    "steps": [
     "فایل APK را از <a href=\"https://github.com/uxazu/aemulator/releases\" target=\"_blank\" rel=\"noopener\">Releases</a> دانلود و نصب کنید.",
-    "فرم‌ویری را در <a href=\"https://aeforum.uxazuu.space/\" target=\"_blank\" rel=\"noopener\">انجمن</a> پیدا کنید و روی گوشی دانلود کنید.",
+    "فرم‌ویری را در <a href=\"https://forum.aemulator.fun/\" target=\"_blank\" rel=\"noopener\">انجمن</a> پیدا کنید و روی گوشی دانلود کنید.",
     "AEmulator را باز کنید ← <b>افزودن فرم‌ویر</b> و فایل را انتخاب کنید. درون‌ریزی چند دقیقه طول می‌کشد.",
     "<b>اجرا</b> را بزنید. بوت اول کندتر است: سیستم برنامه‌ها را بهینه می‌کند.",
     "منوی ⋮ برای صدا، دکمهٔ پاور و گزارش؛ دکمهٔ ⚙️ برای تنظیمات و زبان."
@@ -1017,7 +1017,7 @@ window.AEMU_I18N = {
    "start_title": "जल्दी शुरुआत",
    "steps": [
     "<a href=\"https://github.com/uxazu/aemulator/releases\" target=\"_blank\" rel=\"noopener\">Releases</a> से APK डाउनलोड करके इंस्टॉल करें।",
-    "<a href=\"https://aeforum.uxazuu.space/\" target=\"_blank\" rel=\"noopener\">फ़ोरम</a> पर फ़र्मवेयर खोजें और फ़ोन पर डाउनलोड करें।",
+    "<a href=\"https://forum.aemulator.fun/\" target=\"_blank\" rel=\"noopener\">फ़ोरम</a> पर फ़र्मवेयर खोजें और फ़ोन पर डाउनलोड करें।",
     "AEmulator खोलें → <b>फ़र्मवेयर जोड़ें</b> और फ़ाइल चुनें। आयात में कुछ मिनट लगते हैं।",
     "<b>चलाएँ</b> दबाएँ। पहला बूट धीमा होता है: सिस्टम ऐप्स ऑप्टिमाइज़ करता है।",
     "⋮ मेनू में वॉल्यूम, पावर बटन और लॉग; ⚙️ से सेटिंग्स और भाषा।"
@@ -1090,7 +1090,7 @@ window.AEMU_I18N = {
    "start_title": "Mulai cepat",
    "steps": [
     "Unduh APK dari <a href=\"https://github.com/uxazu/aemulator/releases\" target=\"_blank\" rel=\"noopener\">Releases</a> lalu pasang.",
-    "Cari firmware di <a href=\"https://aeforum.uxazuu.space/\" target=\"_blank\" rel=\"noopener\">forum</a> lalu unduh ke ponsel.",
+    "Cari firmware di <a href=\"https://forum.aemulator.fun/\" target=\"_blank\" rel=\"noopener\">forum</a> lalu unduh ke ponsel.",
     "Buka AEmulator → <b>Tambah firmware</b> lalu pilih file. Impor butuh beberapa menit.",
     "Tekan <b>Mulai</b>. Boot pertama lebih lambat: sistem mengoptimalkan aplikasi.",
     "Menu ⋮ untuk volume, tombol daya, dan log; ⚙️ membuka setelan dan bahasa."
@@ -1163,7 +1163,7 @@ window.AEMU_I18N = {
    "start_title": "Bắt đầu nhanh",
    "steps": [
     "Tải APK từ <a href=\"https://github.com/uxazu/aemulator/releases\" target=\"_blank\" rel=\"noopener\">Releases</a> và cài đặt.",
-    "Tìm firmware trên <a href=\"https://aeforum.uxazuu.space/\" target=\"_blank\" rel=\"noopener\">diễn đàn</a> và tải về điện thoại.",
+    "Tìm firmware trên <a href=\"https://forum.aemulator.fun/\" target=\"_blank\" rel=\"noopener\">diễn đàn</a> và tải về điện thoại.",
     "Mở AEmulator → <b>Thêm firmware</b> và chọn tệp. Việc nhập mất vài phút.",
     "Nhấn <b>Chạy</b>. Lần khởi động đầu chậm hơn: hệ thống tối ưu ứng dụng.",
     "Menu ⋮ để chỉnh âm lượng, nút nguồn và nhật ký; ⚙️ mở cài đặt và ngôn ngữ."
@@ -1236,7 +1236,7 @@ window.AEMU_I18N = {
    "start_title": "快速开始",
    "steps": [
     "从 <a href=\"https://github.com/uxazu/aemulator/releases\" target=\"_blank\" rel=\"noopener\">Releases</a> 下载并安装 APK。",
-    "在<a href=\"https://aeforum.uxazuu.space/\" target=\"_blank\" rel=\"noopener\">论坛</a>找到固件并下载到手机。",
+    "在<a href=\"https://forum.aemulator.fun/\" target=\"_blank\" rel=\"noopener\">论坛</a>找到固件并下载到手机。",
     "打开 AEmulator →<b>添加固件</b>并选择文件。导入需要几分钟。",
     "点击<b>启动</b>。首次启动较慢：系统正在优化应用。",
     "⋮ 菜单可调音量、电源键和日志；⚙️ 打开设置与语言。"
@@ -1309,7 +1309,7 @@ window.AEMU_I18N = {
    "start_title": "クイックスタート",
    "steps": [
     "<a href=\"https://github.com/uxazu/aemulator/releases\" target=\"_blank\" rel=\"noopener\">Releases</a> から APK をダウンロードしてインストール。",
-    "<a href=\"https://aeforum.uxazuu.space/\" target=\"_blank\" rel=\"noopener\">フォーラム</a>でファームウェアを探し、スマホにダウンロードします。",
+    "<a href=\"https://forum.aemulator.fun/\" target=\"_blank\" rel=\"noopener\">フォーラム</a>でファームウェアを探し、スマホにダウンロードします。",
     "AEmulator を開き →<b>ファームウェアを追加</b>でファイルを選択。インポートには数分かかります。",
     "<b>起動</b>をタップ。初回はアプリ最適化のため時間がかかります。",
     "⋮ メニューで音量・電源ボタン・ログ、⚙️ で設定と言語。"
@@ -1382,7 +1382,7 @@ window.AEMU_I18N = {
    "start_title": "빠른 시작",
    "steps": [
     "<a href=\"https://github.com/uxazu/aemulator/releases\" target=\"_blank\" rel=\"noopener\">Releases</a>에서 APK를 받아 설치합니다.",
-    "<a href=\"https://aeforum.uxazuu.space/\" target=\"_blank\" rel=\"noopener\">포럼</a>에서 펌웨어를 찾아 휴대폰에 내려받으세요.",
+    "<a href=\"https://forum.aemulator.fun/\" target=\"_blank\" rel=\"noopener\">포럼</a>에서 펌웨어를 찾아 휴대폰에 내려받으세요.",
     "AEmulator → <b>펌웨어 추가</b>에서 파일을 고릅니다. 가져오기는 몇 분 걸립니다.",
     "<b>시작</b>을 누릅니다. 첫 부팅은 앱 최적화로 더 오래 걸립니다.",
     "⋮ 메뉴에서 볼륨·전원 버튼·로그, ⚙️에서 설정과 언어."

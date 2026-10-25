@@ -211,4 +211,9 @@
     <string name="m_vnc_started">VNC: %1$s, password %2$s</string>
     <string name="as_led">Notification light</string>
     <string name="as_led_sub">Show the guest phone’s LED above its screen</string>
+    <string name="m_apps">Firmware apps</string>
+    <string name="m_apps_none">No app to launch</string>
+    <string name="vs_disk">Internal storage</string>
+    <string name="m_apps_search">Search apps</string>
+    <string name="powered_off">Guest powered off</string>
 </resources>

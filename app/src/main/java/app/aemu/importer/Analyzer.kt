@@ -29,8 +29,10 @@ class Analyzer(private val ctx: Context, private val paths: VmPaths, private val
             ?.let { PropArea.parseProps(it.readText()) } ?: LinkedHashMap()
         val all = LinkedHashMap<String, String>().apply { putAll(deflt); build.forEach { (k, v) -> if (!(k.startsWith("ro.") && containsKey(k))) put(k, v) } }
 
-        val api = all["ro.build.version.sdk"]?.toIntOrNull() ?: guessApi(all["ro.build.version.release"])
-        val release = all["ro.build.version.release"] ?: "?"
+        // pre-1.0 SDKs (M3, M5) have no API level at all: they run as the first one
+        val api = all["ro.build.version.sdk"]?.toIntOrNull()
+            ?: (if (preReleaseName(all["ro.build.id"]) != null) 1 else guessApi(all["ro.build.version.release"]))
+        val release = preReleaseName(all["ro.build.id"]) ?: all["ro.build.version.release"] ?: "?"
         // who made it: a generic system image (10+, "missi" of Xiaomi) leaves the brand, the model and the skin's
         // version to the product, vendor and odm partitions. Only for the name shown; the rest reads what init reads.
         val ident = LinkedHashMap(all)
@@ -52,6 +54,8 @@ class Analyzer(private val ctx: Context, private val paths: VmPaths, private val
 
         // init.rc и его import’ы лежат в корне рамдиска
         val rcFiles = (root.listFiles()?.filter { it.isFile && it.name.endsWith(".rc") }?.sortedBy { if (it.name == "init.rc") 0 else 1 } ?: emptyList()) +
+            // M3/M5 keep it in /etc
+            listOfNotNull(File(root, "etc/init.rc").takeIf { it.isFile && !File(root, "init.rc").isFile }) +
             InitPlan.hwRcFiles(root, all) +
             (File(root, "system/etc/init").listFiles()?.filter { it.name.endsWith(".rc") } ?: emptyList())
         val rc = InitPlan.parse(rcFiles, all)
@@ -86,6 +90,10 @@ class Analyzer(private val ctx: Context, private val paths: VmPaths, private val
         val density = all["ro.sf.lcd_density"]?.toIntOrNull() ?: 240
         val engine = Engine.forApi(api)
         val settings = when {
+            // 0.9-1.1 knew one screen, the G1's HVGA (Mms aborts on any other: "Unsupported display type")
+            api < 3 -> VmSettings(width = 320, height = 480, density = 160, fbHz = 60, touchHz = 60, open32 = true, mtMode = 4)
+            // 1.5-3.2: 32-bit firmwares run on the open engine (open32) only
+            api < 14 && !abi.startsWith("arm64") -> VmSettings(width = 480, height = 800, density = 240, fbHz = 60, touchHz = 60, open32 = true)
             engine == Engine.GB || api < 14 -> VmSettings(width = 480, height = 800, density = 240, fbHz = 60, touchHz = 60)
             // 540×960 — лучший баланс скорости и чёткости под эмуляцией; поменять можно в настройках
             density <= 160 -> VmSettings(width = 480, height = 800, density = 240)
@@ -201,7 +209,8 @@ class Analyzer(private val ctx: Context, private val paths: VmPaths, private val
         val man = (p["ro.product.manufacturer"] ?: p["ro.product.brand"] ?: "").lowercase()
         fun has(path: String) = File(root, path).exists()
         val brand = (p["ro.product.brand"] ?: "").lowercase()
-        val api = p["ro.build.version.sdk"]?.toIntOrNull() ?: guessApi(p["ro.build.version.release"])
+        val api = p["ro.build.version.sdk"]?.toIntOrNull()
+            ?: (if (preReleaseName(p["ro.build.id"]) != null) 1 else guessApi(p["ro.build.version.release"]))
         return when {
             // HyperOS keeps the ro.miui.* props of MIUI, so it is checked first
             p.containsKey("ro.mi.os.version.name") || p.containsKey("ro.mi.os.version.code") -> "HyperOS " + (p["ro.mi.os.version.name"] ?: "")
@@ -341,4 +350,15 @@ class Analyzer(private val ctx: Context, private val paths: VmPaths, private val
             if (dropped > 0) android.util.Log.w("aemu", "props dropped: $dropped")
         }
     }
+
+/** Pre-1.0 SDKs call themselves 1.0 in ro.build.version.release; ro.build.id tells them apart (0.9_r1, m5-rc15, m3-rc37a). */
+internal fun preReleaseName(id: String?): String? {
+    val v = id?.trim()?.lowercase() ?: return null
+    return when {
+        v.startsWith("0.9") -> "0.9 Beta"
+        Regex("^m[0-9]+-rc[0-9a-z]+").containsMatchIn(v) -> v.substringBefore('-').uppercase() + " " + v.substringAfter('-')
+        v.startsWith("wb") -> v.uppercase()
+        else -> null
+    }
+}
 }

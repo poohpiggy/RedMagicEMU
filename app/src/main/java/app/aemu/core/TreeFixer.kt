@@ -26,6 +26,8 @@ class TreeFixer(
     private val root get() = paths.root
     private val engine get() = img.engine
     private val kernel get() = Kernel64.forApi(img.api)
+    /** a whole 32-bit firmware on the arm64 kernel (open32): its programs draw and sound through the 4.4 engine's guest files */
+    private val kk32 get() = engine == Engine.N64 && img.abi != "arm64-v8a"
 
     // ---------------------------------------------------------------- однократно после импорта
 
@@ -102,11 +104,54 @@ class TreeFixer(
             d.listFiles()?.forEach { f -> if (f.isFile) { if (f.canWrite()) { f.setWritable(false, false); n++ } } else if (f.isDirectory) lock(f) }
             d.setWritable(false, false)
         }
-        File(sys, "framework").listFiles()?.filter { it.isDirectory && (it.name == "oat" || it.name == "arm" || it.name == "arm64") }?.forEach { lock(it) }
+        val dirs = ArrayList<File>()
+        File(sys, "framework").listFiles()?.filter { it.isDirectory && (it.name == "oat" || it.name == "arm" || it.name == "arm64") }?.let { dirs += it }
         for (top in listOf("app", "priv-app")) File(sys, top).listFiles()?.forEach { app ->
-            File(app, "oat").takeIf { it.isDirectory }?.let { lock(it) }
+            File(app, "oat").takeIf { it.isDirectory }?.let { dirs += it }
         }
+        keepOat(dirs)
+        dirs.forEach { lock(it) }
         if (n > 0) log("oat files write-protected: $n")
+    }
+
+    /**
+     * The host's ART Service (Android 14+) cleans up at night, idle and charging: artd walks the data directories of
+     * every app for odex, vdex and art files in `oat/<isa>` directories it does not know and deletes them as root, so
+     * the write protection does not stop it. The image tree matches that pattern, and a firmware with stripped jars
+     * then died next boot (ClassNotFoundException: SystemServer, zygote 137). The files are moved under a name the
+     * cleanup does not look at and a relative symlink is left in their place (apps may not make hard links); a link
+     * the cleanup removed is put back before each boot.
+     */
+    private fun keepOat(dirs: List<File>) {
+        val sys = File(root, "system")
+        val keep = File(sys, OAT_KEEP)
+        val base = sys.path.length + 1
+        var moved = 0; var restored = 0
+        fun target(f: File) = "../".repeat(f.path.substring(base).count { it == '/' }) + OAT_KEEP + "/" + f.path.substring(base).replace('/', '#')
+        fun walk(d: File) {
+            d.listFiles()?.forEach { f ->
+                if (isLink(f)) return@forEach
+                if (f.isDirectory) { walk(f); return@forEach }
+                val k = File(keep, f.path.substring(base).replace('/', '#'))
+                runCatching {
+                    keep.mkdirs(); d.setWritable(true, true)
+                    Os.rename(f.path, k.path); Os.symlink(target(f), f.path); moved++
+                }
+            }
+        }
+        dirs.forEach { walk(it) }
+        keep.listFiles()?.forEach { k ->
+            val f = File(sys, k.name.replace('#', '/'))
+            if (f.exists() || isLink(f)) return@forEach
+            val parents = generateSequence(f.parentFile) { it.parentFile }.takeWhile { it.path.length > sys.path.length }.toList()
+            runCatching {
+                parents.forEach { it.setWritable(true, true) }
+                f.parentFile?.mkdirs()
+                Os.symlink(target(f), f.path); restored++
+            }
+        }
+        if (moved > 0) log("oat files moved out of the host's ART cleanup: $moved")
+        if (restored > 0) log("oat links removed by the phone's nightly ART cleanup restored: $restored")
     }
 
     fun fixup(owners: Boolean = true) {
@@ -115,6 +160,8 @@ class TreeFixer(
         protectOat()
         fixThemeXml()
         parkWhetstone()
+        parkGmsUpdate()
+        frpPartition()
         parkQcomServices()
         swapMtkAudioHal()
         eglConfig(img.settings.gpu)
@@ -141,6 +188,7 @@ class TreeFixer(
         scriptShebangs()
         samsungEfs()
         keyLayout()
+        pixelFlingerNoCodegen()
         for (n in LOGS) File(root, "dev/log/$n").let { if (!it.isFile) { it.parentFile?.mkdirs(); it.createNewFile() } }
         makeFb()
     }
@@ -254,9 +302,59 @@ class TreeFixer(
      * unmapped), so Home and Recents did nothing on many firmwares. A layout under the device's own name is looked up
      * first by every version from 2.3 on and gives the navigation bar the same codes everywhere.
      */
+    /**
+     * 0.9 SDK libpixelflinger: the scanline code it generates at run time faults under qemu-arm (SurfaceFlinger dies on
+     * the first blended window). pick_scanline already has the way out it takes when generation fails: the generic C
+     * scanline. Its codegen branch is replaced with that fallback; done only when the original bytes are there.
+     */
+    private fun pixelFlingerNoCodegen() {
+        if (img.api >= 3) return
+        val f = File(root, "system/lib/libpixelflinger.so")
+        if (!f.isFile) return
+        run tpl@{
+            val d = f.readBytes()
+            val bb = java.nio.ByteBuffer.wrap(d).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            fun w(at: Int) = bb.getInt(at)
+            fun isLdrPc(x: Int, rd: Int) = (x and 0xfffff000.toInt()) == (0xe59f0000.toInt() or (rd shl 12))
+            val n = d.size / 4 * 4
+            // the fallback: ldr r12,[sp,#0x1c]; ldr r2/r0/r3,=…; add r1/r2/lr; str lr,[r10,#0x47c]; str r1,[r10,#0x480]; str r2,[r10,#0x478]
+            val tail = intArrayOf(0xe08c1002.toInt(), 0xe08c2000.toInt(), 0xe08ce003.toInt(), 0xe58ae47c.toInt(), 0xe58a1480.toInt(), 0xe58a2478.toInt())
+            val fb = (0 until n - 40 step 4).firstOrNull { a ->
+                w(a) == 0xe59dc01c.toInt() && isLdrPc(w(a + 4), 2) && isLdrPc(w(a + 8), 0) && isLdrPc(w(a + 12), 3) &&
+                    tail.indices.all { w(a + 16 + it * 4) == tail[it] }
+            } ?: return@tpl
+            // the code generation path: ldr r12,[sp,#0x1c]; ldr r1,=…; ldr lr,=…; ldr r11,=… (before the fallback)
+            val cg = (0 until fb step 4).lastOrNull { a ->
+                w(a) == 0xe59dc01c.toInt() && isLdrPc(w(a + 4), 1) && isLdrPc(w(a + 8), 14) && isLdrPc(w(a + 12), 11)
+            } ?: return@tpl
+            // its epilogue: add sp,sp,#316; pop {r4-r11,pc}
+            val ep = (cg until fb step 4).firstOrNull { w(it) == 0xe28ddf4f.toInt() && w(it + 4) == 0xe8bd8ff0.toInt() } ?: return@tpl
+            val out = IntArray(11)
+            out[0] = 0xe59dc01c.toInt()
+            for (k in 1..3) {                       // the same literals, addressed from the new place
+                val x = w(fb + k * 4); val lit = fb + k * 4 + 8 + (x and 0xfff)
+                val off = lit - (cg + k * 4 + 8)
+                if (off !in 0..0xfff) return@tpl
+                out[k] = (x and 0xfffff000.toInt()) or off
+            }
+            for (k in tail.indices) out[4 + k] = tail[k]
+            out[10] = 0xea000000.toInt() or (((ep - (cg + 40 + 8)) / 4) and 0xffffff)
+            out.forEachIndexed { k, x -> bb.putInt(cg + k * 4, x) }
+            f.writeBytes(d)
+            log("libpixelflinger: run-time code generation off (pre-1.0)")
+        }
+    }
+
     private fun keyLayout() {
         val f = File(root, "system/usr/keylayout/dhd-touch.kl")
         val vf = File(root, "vendor/usr/keylayout/dhd-touch.kl")
+        // pre-1.0 (M5): the firmware's own qwerty.kl says which labels exist and what each scan code is (139 = SOFT_LEFT,
+        // its Menu); an unknown label (MENU, SEARCH) makes the parser drop the whole file
+        val oldKl: Map<String, String>? = if (img.api < 3) runCatching {
+            File(root, "system/usr/keylayout/qwerty.kl").readLines().mapNotNull { l ->
+                val t = l.trim().split(Regex("\\s+")); if (t.size >= 3 && t[0] == "key") t[1] to t[2] else null
+            }.toMap()
+        }.getOrNull()?.takeIf { it.isNotEmpty() } else null
         val text = buildString {
             append("# AEmulator: navigation bar and hardware keys of the emulator\n")
             append("key ${InputService.KEY_HOME} HOME WAKE\n")
@@ -267,7 +365,7 @@ class TreeFixer(
             append("key ${InputService.KEY_POWER} POWER WAKE\n")
             append("key ${InputService.KEY_VOLUMEDOWN} VOLUME_DOWN WAKE\n")
             append("key ${InputService.KEY_VOLUMEUP} VOLUME_UP WAKE\n")
-            append("key 113 VOLUME_MUTE\n")
+            if (img.api >= 11) append("key 113 VOLUME_MUTE\n")   // unknown before 3.0: 0.9-2.3 drop the whole file
             append("key 212 CAMERA\n")
             append("key 103 DPAD_UP\nkey 108 DPAD_DOWN\nkey 105 DPAD_LEFT\nkey 106 DPAD_RIGHT\nkey 232 DPAD_CENTER\n")
             // APP_SWITCH exists from 3.0; older layouts reject unknown labels and drop the whole file
@@ -276,6 +374,19 @@ class TreeFixer(
                 append("key 254 APP_SWITCH\n")
                 append("key 187 APP_SWITCH\n")
             }
+        }.let { t ->
+            if (oldKl == null) t else t.lines().mapNotNull { l ->
+                val f = l.trim().split(Regex("\\s+"))
+                if (l.startsWith("#") || f.size < 3) return@mapNotNull l
+                val lab = oldKl[f[1]] ?: f[2].takeIf { it in oldKl.values } ?: return@mapNotNull null
+                (listOf(f[0], f[1], lab) + f.drop(3)).joinToString(" ")
+            }.let { ours ->
+                // plus the rest of the firmware's keyboard (letters, digits, CALL/ENDCALL…): typing from the host keyboard
+                val have = ours.mapNotNull { it.trim().split(Regex("\\s+")).getOrNull(1) }.toSet()
+                ours + runCatching { File(root, "system/usr/keylayout/qwerty.kl").readLines() }.getOrDefault(emptyList())
+                    .filter { l -> val f = l.trim().split(Regex("\\s+")); f.size >= 3 && f[0] == "key" && f[1] !in have }
+                    .map { it.trim() }
+            }.joinToString("\n") + "\n"
         }.let {
             // 5.0 dropped the WAKE flags from the layout syntax: an unknown flag makes the guest reject the whole file
             if (img.api >= 21) it.replace(" WAKE_DROPPED", "").replace(" WAKE", "") else it
@@ -291,6 +402,12 @@ class TreeFixer(
                 runCatching { target.parentFile?.mkdirs(); target.writeText(text); target.setReadable(true, false) }
                     .onFailure { log("key layout (${target.name}): ${it.message}") }
             }
+        }
+        // pre-1.0 drops every key of a keyboard without its own character map (M5: no dhd-touch.kcm.bin, no keys)
+        if (img.api < 3) runCatching {
+            val kc = File(root, "system/usr/keychars")
+            val own = File(kc, "dhd-touch.kcm.bin"); val q = File(kc, "qwerty.kcm.bin")
+            if (!own.isFile && q.isFile) q.copyTo(own)
         }
         // In Generic.kl and qwerty.kl: ensure HOME, BACK, MENU, and APP_SWITCH are properly mapped
         for (dir in listOf(File(root, "system/usr/keylayout"), File(root, "vendor/usr/keylayout"))) {
@@ -403,6 +520,14 @@ class TreeFixer(
         if (kernel.treble && !ownVendor) layers += kernel.gsiAssets
         val files = LinkedHashMap<String, String>()         // file name to the asset it comes from: later layers win
         for (dir in layers) for (n in runCatching { EngineAssets.list(ctx, dir) }.getOrNull().orEmpty()) files[n] = "$dir/$n"
+        // a whole 32-bit firmware on this kernel (open32) runs every program through qemu-arm: arm64 files would replace its own
+        if (img.abi != "arm64-v8a") files.keys.removeAll { "#lib64#" in it || it == "system#bin#surfaceflinger" }
+        // A GSI gets the codec store stand-in (aemu-omxstore: IOmxStore with no IOmx, what main_codecservice.cpp does
+        // with vendor.media.omx=0); the engine's OMX service would register the same store, and on a GSI it cannot
+        // link anyway (10: no 64-bit libavservices_minijail_vendor, 14: no libgui in the vendor namespace) - it
+        // exited 1 at every boot.
+        if (kernel.treble && !ownVendor && files.keys.any { it.endsWith("#aemu-omxstore.rc") })
+            files.keys.removeAll { it.startsWith("vendor#bin#hw#android.hardware.media.omx@") || it.startsWith("vendor#etc#init#android.hardware.media.omx@") }
         // ...and what such a firmware keeps its own of comes back from where an earlier start put it aside
         if (ownVendor) for (n in kernel.firmwareOwn) {
             val parked = File(root, "system/.aemu-parked/$n")
@@ -449,6 +574,16 @@ class TreeFixer(
             val dst = File(root, parked.name.replace('#', '/'))
             dst.delete()
             if (parked.renameTo(dst)) log("${dst.name}: the firmware's own file is back")
+        }
+        // On a GSI the whole vendor side is the engine's: a vendor file some kernel ships but this one no longer does
+        // (an earlier app build put it there) goes, else its service keeps starting from the stale .rc
+        if (kernel.treble && !ownVendor && img.abi == "arm64-v8a") {
+            val anyLayer = anyKernel + Kernel64.entries.flatMap { k -> runCatching { EngineAssets.list(ctx, k.gsiAssets) }.getOrNull().orEmpty().asList() }
+            for (n in anyLayer) {
+                if (!n.startsWith("vendor#") || n in shipped) continue
+                val f = File(root, n.replace('#', '/'))
+                if (f.isFile && f.delete()) log("${f.name}: no longer shipped by this kernel, removed")
+            }
         }
         // Samsung's libgui (see the gralloc rule below) is not the library AOSP's SurfaceFlinger was built against:
         // the consumer side of the buffer queue is laid out differently and the first queued frame crashes in it.
@@ -624,6 +759,15 @@ class TreeFixer(
                 jar.setReadable(true, false); copied++
             }
         }.onFailure { log("aemu-stubs.jar: ${it.message}") }
+        // pre-1.0 dalvik reads only dex 013: its own tool runner (native/gueststubs/build013.sh)
+        if (img.api < 3) runCatching {
+            val jar = File(root, "system/framework/aemu-run013.jar")
+            val bytes = EngineAssets.open(ctx, "engines/kk/aemu-run013.jar").use { it.readBytes() }
+            if (!jar.isFile || !jar.readBytes().contentEquals(bytes)) {
+                jar.writeBytes(bytes)
+                jar.setReadable(true, false); copied++
+            }
+        }.onFailure { log("aemu-run013.jar: ${it.message}") }
         if (copied > 0) log("engine n64 files updated: $copied")
         // qemu-arm (the firmware's 32-bit programs) asks for the lowest mappable address; the phone hides the real file
         runCatching { File(root, "proc/sys/vm").mkdirs(); File(root, "proc/sys/vm/mmap_min_addr").writeText("65536") }
@@ -713,7 +857,8 @@ class TreeFixer(
         "camera", "gps", "fingerprint", "gxfingerprint", "consumerir", "bluetooth", "nfc", "vibrator", "keystore", "gatekeeper")
 
     private fun installEngineFiles() {
-        val copies = when (engine) {
+        if (kk32) installNative64()
+        val copies = when (if (kk32) Engine.KK else engine) {
             Engine.KK -> listOf(
                 "libashmemshim.so" to "system/lib/libashmemshim.so",
                 "libGLES.so" to "system/lib/egl/libGLES_bridge.so",
@@ -727,7 +872,7 @@ class TreeFixer(
                 "gralloc.default.so" to "system/lib/hw/gralloc.default.so",
             )
             Engine.N64 -> return installNative64()
-        }
+        } + (if (kk32) listOf("aemu-noshot.apk" to "vendor/overlay/aemu-noshot.apk") else emptyList())   // no task thumbnails (tools/noshot-overlay)
         File(root, "system/bin/fbpaint").delete()
         // a static network debugging tool shipped by older versions; nothing runs it
         File(root, "system/bin/netprobe").delete()
@@ -779,7 +924,8 @@ class TreeFixer(
                 "@camera.default.so" to "system/lib/hw/camera.default.so")) {
             val dst = File(root, to)
             // gralloc движка — только если в прошивке своего нет
-            if (from == "gralloc.default.so" && dst.isFile) continue
+            // (open32: the 7.x default gralloc keeps its base as a 64-bit field, a handle the GL server does not read)
+            if (from == "gralloc.default.so" && dst.isFile && !kk32) continue
             // «@» — общий для всех движков файл
             // звуковой HAL стенда разложен под AudioFlinger HTC; остальным 4.2+ — вариант с раскладкой AOSP.
             // У Samsung свой audio_stream_out (лишние слоты) — с ним AOSP-вариант роняет mediaserver,
@@ -795,7 +941,7 @@ class TreeFixer(
                 img.api >= 16 -> "audio.primary.aosp.so"
                 else -> from
             }
-            val asset = if (name.startsWith("@")) "engines/common/${name.drop(1)}" else "engines/${engine.id}/$name"
+            val asset = if (name.startsWith("@")) "engines/common/${name.drop(1)}" else "engines/${if (kk32) "kk" else engine.id}/$name"
             val size = runCatching { EngineAssets.size(ctx, asset) }.getOrDefault(-1L)
             // одинаковый размер ещё не значит тот же файл (правки движка на месте, варианты HAL) — сверяем CRC
             if (dst.isFile && size >= 0 && dst.length() == size && sameContent(asset, dst)) continue
@@ -924,7 +1070,7 @@ class TreeFixer(
         val cfg = File(dir, "egl.cfg")
         val cfgRom = File(dir, "egl.cfg.rom")
         if (!cfgRom.isFile && cfg.isFile) cfg.copyTo(cfgRom, overwrite = true)
-        when (engine) {
+        when (if (kk32) Engine.KK else engine) {
             Engine.N64 -> {}
             Engine.GB -> cfg.writeText(if (gpu) "0 0 dhd\n" else "0 0 android\n")
             Engine.KK -> {
@@ -936,12 +1082,19 @@ class TreeFixer(
                 val swOff = File(dir, "libGLES_android.so.sw")
                 val names = listOf("libGLES.so", "libGLES_aemu.so", "libGLES_android.so", "libEGL_aemu.so", "libGLESv1_CM_aemu.so", "libGLESv2_aemu.so")
                 if (gpu && bridge.isFile) {
-                    if (!swOff.isFile && sw.isFile && sw.length() != splitSize() && sw.length() != assetSize(OPEN_GL)) sw.renameTo(swOff)
+                    // 2.x libEGL loads libGLES_android.so as implementation 0 next to the hardware one: with the bridge
+                    // on both names its config table held only one of them and every eglChooseConfig of the other
+                    // failed (EGL_BAD_CONFIG: RenderScript live wallpapers, Launcher2). There it stays the firmware's
+                    // own software renderer, as on the phone.
+                    val own = img.api < 14
+                    if (own) { if (swOff.isFile) { sw.delete(); swOff.renameTo(sw) } }
+                    else if (!swOff.isFile && sw.isFile && sw.length() != splitSize() && sw.length() != assetSize(OPEN_GL)) sw.renameTo(swOff)
                     // test switch: a file "glopen" in the image's directory puts the open bridge (native/glbridge,
                     // armv7) on those names; it stands in front of the shim, which keeps the compositor and hwui
                     val open = openGl32()
                     val asset = if (open) OPEN_GL else "engines/kk/libGLES_split.so"
-                    val all = names + (if (img.api >= 24) listOf("libGLES_emulation.so") else emptyList())
+                    val all = names.filter { !(own && it == "libGLES_android.so") } +
+                        (if (img.api >= 24) listOf("libGLES_emulation.so") else emptyList())
                     runCatching {
                         for (n in all) installAsset(asset, File(dir, n))
                         val shim = File(dir, "libGLES_split.so")
@@ -1219,7 +1372,9 @@ class TreeFixer(
     private fun bpfMapNotes() {
         if (engine != Engine.N64 || !kernel.bpfMapNotes) return
         val dir = File(root, "dev/.aemu-bpf")
-        if (dir.isDirectory) return
+        // notes of before 24.10 had no max entries (12 bytes): made again
+        if (dir.isDirectory && dir.listFiles()?.all { it.length() >= 16L } != false) return
+        if (dir.isDirectory) dir.deleteRecursively()
         val tmp = File(root, "dev/.aemu-bpf.tmp").apply { deleteRecursively(); mkdirs() }
         val objects = (listOf(File(root, "system/etc/bpf")) + (File(root, "apex").listFiles()?.map { File(it, "etc/bpf") } ?: emptyList()))
             .flatMap { d -> d.walkTopDown().maxDepth(3).filter { it.isFile && (it.name.endsWith(".o") || it.name.endsWith(".bpf")) }.toList() }
@@ -1245,7 +1400,7 @@ class TreeFixer(
                 val names = (0 until symCount).map { symOff + it * 24 }.filter { (b.getShort(it + 6).toInt() and 0xffff) == sec }.map { str(strtab, b.getInt(it)) }.toSet()
                 val at = b.getLong(sh(btf) + 0x18).toInt(); val size = b.getLong(sh(btf) + 0x20).toInt()
                 for ((name, note) in btfMapNotes(java.nio.ByteBuffer.wrap(b.array(), at, size).slice().order(java.nio.ByteOrder.LITTLE_ENDIAN), names)) {
-                    val out = java.nio.ByteBuffer.allocate(12).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    val out = java.nio.ByteBuffer.allocate(16).order(java.nio.ByteOrder.LITTLE_ENDIAN)
                     note.forEach { out.putInt(it) }
                     File(tmp, "map_${o.name.removeSuffix(".bpf")}_$name").writeBytes(out.array())
                     n++
@@ -1265,9 +1420,10 @@ class TreeFixer(
                 if ((b.getShort(s + 6).toInt() and 0xffff) != maps) continue
                 val name = str(strtab, b.getInt(s))
                 val at = b.getLong(s + 8)
-                if (name.isEmpty() || at + 12 > mapsSize) continue
-                val note = java.nio.ByteBuffer.allocate(12).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                for (k in 0 until 3) note.putInt(b.getInt(mapsOff + at.toInt() + k * 4))
+                if (name.isEmpty() || at + 16 > mapsSize) continue
+                // type, key size, value size, max entries (an array map walked key by key ends at max entries)
+                val note = java.nio.ByteBuffer.allocate(16).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                for (k in 0 until 4) note.putInt(b.getInt(mapsOff + at.toInt() + k * 4))
                 var file = "map_${obj}_$name"
                 if (pinned) {       // struct bpf_map_def: 12 words, create_location[n], pin_location[n], name_idx
                     val size = b.getLong(s + 16)
@@ -1363,7 +1519,7 @@ class TreeFixer(
             var t = ref(id)
             while (kind(t) in listOf(8, 9, 10, 11)) t = ref(t)
             if (name !in names || kind(t) != 4) continue
-            val note = IntArray(3)
+            val note = IntArray(4)
             for (m in 0 until (b.getInt(types[t] + 4) and 0xffff)) {
                 val e = types[t] + 12 + m * 12
                 val type = b.getInt(e + 4)
@@ -1371,6 +1527,7 @@ class TreeFixer(
                     "type" -> note[0] = count(type)
                     "key_size" -> note[1] = count(type)
                     "value_size" -> note[2] = count(type)
+                    "max_entries" -> note[3] = count(type)
                     "key" -> if (kind(type) == 2) note[1] = sizeOf(ref(type))
                     "value" -> if (kind(type) == 2) note[2] = sizeOf(ref(type))
                 }
@@ -1457,6 +1614,8 @@ class TreeFixer(
             "usb/type" to "USB", "usb/online" to "0",
         )
         for ((rel, v) in bat) File(base, rel).let { if (!it.isFile) { it.parentFile?.mkdirs(); it.writeText(v + "\n") } }
+        // a level left at 0 (battery menu, or a sys/ copied from a dump) shuts the guest down again at every boot
+        File(base, "battery/capacity").let { f -> if ((runCatching { f.readText().trim().toInt() }.getOrNull() ?: 0) < 5) f.writeText("100\n") }
         healthdRelativeSysfs(base)
         personalityNoop()
         parkNfc()
@@ -1466,8 +1625,8 @@ class TreeFixer(
         // узлы питания, которые открывает libhardware_legacy именно этой прошивки (Samsung: dvfslock_ctrl…):
         // если хоть один не откроется, библиотека считает экран выключенным и система не принимает касания
         runCatching {
-            val lib = File(root, "system/lib/libhardware_legacy.so")
-            if (lib.isFile) {
+            // (0.9-1.x keep the power code in libhardware.so)
+            for (lib in listOf(File(root, "system/lib/libhardware_legacy.so"), File(root, "system/lib/libhardware.so"))) if (lib.isFile) {
                 val text = String(lib.readBytes(), Charsets.ISO_8859_1)
                 for (m in Regex("/sys/(power|android_power)/[a-z_0-9]+").findAll(text)) {
                     val rel = m.value.removePrefix("/")
@@ -1686,10 +1845,16 @@ class TreeFixer(
         // qemu reports smem_len = two 32-bit pages (TWRP draws BGRA_8888); mmap past the file end would SIGBUS
         val need = w.toLong() * h * 4 * 2
         val f = paths.fb
+        // the geometry file even when fb0 is already right (an image the old engine made has fb0 but not this file:
+        // the kernel then assumes 720x1280, the guest maps past the file end and loops on SIGBUS)
+        // pre-1.0 (M3) SurfaceFlinger refuses a display that is not 16 bits: the kernel reports RGB565 when told so
+        val g = if (img.api < 3) "$w $h 16" else "$w $h"
+        val geom = File(root, "dhd.fbgeom")
+        if (runCatching { geom.readText().trim() }.getOrNull() != g) runCatching { geom.writeText("$g\n") }
         if (f.isFile && f.length() == need) return
         f.parentFile?.mkdirs()
         RandomAccessFile(f, "rw").use { it.setLength(need) }
-        runCatching { File(root, "dhd.fbgeom").writeText("$w $h\n") }
+        runCatching { File(root, "dhd.fbgeom").writeText("$g\n") }
         log("framebuffer: ${w}x$h")
     }
 
@@ -1697,6 +1862,55 @@ class TreeFixer(
      * Владельцы файлов приложений в /data/data: ядро телефона не даёт менять uid, поэтому qemu
      * подставляет их по таблице dhd.owners (dev, ino → uid, gid). Берём uid из packages.xml.
      */
+    /**
+     * ro.frp.pst names the factory-reset-protection partition. Without it PersistentDataBlockService fails every read
+     * (FileNotFoundException), and what keeps its state there breaks: MIUI FindDevice answers its provider with null
+     * and Mi Cloud (com.miui.cloudservice) crashes on the null cursor. A blank file of a real partition's size stands in.
+     */
+    private fun frpPartition() {
+        val path = listOf("default.prop", "system/build.prop", "vendor/build.prop", "system/vendor/build.prop").firstNotNullOfOrNull { n ->
+            runCatching { File(root, n).readLines() }.getOrNull()?.firstOrNull { it.startsWith("ro.frp.pst=") }?.substringAfter('=')?.trim()
+        }?.takeIf { it.startsWith("/dev/") } ?: return
+        val f = File(root, path.removePrefix("/"))
+        // a 0-byte file (the /dev tree rebuilt with empty placeholders) makes 7.1 seek to -1 and kill system_server
+        if (f.length() >= (512L shl 10)) return
+        runCatching {
+            f.parentFile?.mkdirs()
+            // the first 32 bytes are SHA-256 of the block with those 32 bytes zeroed (PersistentDataBlockService.computeDigest):
+            // a valid block is not reformatted - formatting truncates the file and then sizes it with BLKGETSIZE64,
+            // which a plain file fails (7.1: position(-1), system_server dies)
+            val size = 512 shl 10
+            val sum = java.security.MessageDigest.getInstance("SHA-256").digest(ByteArray(size))
+            java.io.RandomAccessFile(f, "rw").use { it.setLength(0); it.setLength(size.toLong()); it.seek(0); it.write(sum) }
+            log("FRP partition $path created (blank, 512 KB)")
+        }.onFailure { log("FRP partition $path: ${it.message}") }
+    }
+
+    /**
+     * A current GmsCore update (Play installs it on its own once the guest has network) on Android 6 and older:
+     * its modules are not loaded when system_server binds the geofence provider, the call fails with
+     * IllegalStateException "Service without Chimera impl", which GeofenceProxy does not catch - system_server
+     * dies a second after boot, every boot (Redmi 4 MIUI 9). The update is moved aside; PackageManager then goes
+     * back to the GmsCore of /system.
+     */
+    private fun parkGmsUpdate() {
+        if (img.api > 23) return
+        val pkgs = runCatching { File(root, "data/system/packages.xml").readText() }.getOrNull() ?: return
+        if (!pkgs.contains("<updated-package name=\"com.google.android.gms\"")) return
+        val upd = File(root, "data/app").listFiles { f -> f.name.startsWith("com.google.android.gms-") }?.toList().orEmpty()
+        if (upd.isEmpty()) return
+        val dir = File(root, "data/.aemu-parked").apply { mkdirs() }
+        for (d in upd) {
+            val to = File(dir, d.name)
+            to.deleteRecursively()
+            if (d.renameTo(to)) log("GmsCore update ${d.name} set aside (Android ${img.api} keeps the GmsCore of /system)")
+        }
+        // the data of the newer version breaks the older one (IllegalArgumentException in gms.persistent): a downgrade
+        // starts with empty data, as on a phone
+        val data = File(root, "data/data/com.google.android.gms")
+        if (data.isDirectory) { val to = File(dir, "data-com.google.android.gms"); to.deleteRecursively(); data.renameTo(to) }
+    }
+
     fun seedOwners() {
         val stamp = File(root, "dhd.owners.seeded")
         val done = if (stamp.isFile) stamp.readLines().filter { it.isNotBlank() }.toMutableSet() else mutableSetOf()
@@ -1938,7 +2152,7 @@ class TreeFixer(
             val link = File(root, "system/framework/aemu-owners.jar")
             if (!isLink(link)) { link.delete(); Os.symlink(paths.owners.absolutePath, link.path) }
         }
-        if (img.api < 21) return
+        if (img.api < 21 && !img.settings.open32) return      // open32 4.4: the same watchdog abort
         val parked = File(root, "system/.aemu-parked").apply { mkdirs() }
         for (dir in listOf("system/app", "system/priv-app")) File(root, dir).listFiles()?.filter { it.name.startsWith("Nfc") }?.forEach { f ->
             val dst = File(parked, f.relativeTo(root).path.replace('/', '#'))
@@ -1975,6 +2189,8 @@ class TreeFixer(
 
     companion object {
         private const val OPEN_GL = "engines/kk/libGLES_aemu.so"
+        /** hard links of the precompiled code, out of reach of the host's ART cleanup (see keepOat) */
+        const val OAT_KEEP = ".aemu-oat-keep"
         /** Мастера первого запуска: Samsung, Google, AOSP, MIUI, HTC, Sony */
         val SETUP_WIZARDS = listOf(
             "com.sec.android.app.SecSetupWizard", "com.google.android.setupwizard", "com.android.provision",

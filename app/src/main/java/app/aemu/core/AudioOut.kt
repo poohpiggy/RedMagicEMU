@@ -60,12 +60,15 @@ class AudioOut(
 
     private fun pump() {
         val min = runCatching { AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT) }.getOrDefault(0)
-        val bufSize = maxOf(min * 4, 64 * 1024)
+        // latency is this buffer plus the channel's: 64 KB each was ~0.7 s behind the picture (forum: "sound lags")
+        val bufSize = maxOf(min * 2, 8 * 1024)
         val buf = ByteArray(4096)
         var track: AudioTrack? = null
         while (!stop) {
             val ins = runCatching { FileInputStream(fifo) }.getOrNull()
             if (ins == null) { Thread.sleep(500); continue }
+            // the guest's HAL writes as fast as the channel takes it: a 64 KB pipe alone held ~340 ms of sound
+            runCatching { android.system.Os.fcntlInt(ins.fd, 1031 /*F_SETPIPE_SZ*/, 16 * 1024) }
             if (track == null) {
                 track = runCatching {
                     AudioTrack.Builder()
@@ -73,6 +76,7 @@ class AudioOut(
                         .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(rate).setChannelMask(AudioFormat.CHANNEL_OUT_STEREO).build())
                         .setBufferSizeInBytes(bufSize)
                         .setTransferMode(AudioTrack.MODE_STREAM)
+                        .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
                         .build().also { it.play() }
                 }.onFailure { log("audio: output failed to open: ${it.message}") }.getOrNull()
             }

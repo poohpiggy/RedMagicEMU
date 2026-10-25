@@ -362,7 +362,142 @@ static long bwrite_read(struct bth *t, struct bwr *w) {
     return bread(t, w);
 }
 
+// ------------------------------------------------------------------ the old 32-bit protocol (BINDER_IPC_32BIT)
+// A whole 32-bit firmware (its libbinder built for a 32-bit kernel) speaks binder version 7: pointers, cookies and
+// sizes are 32-bit, so flat objects are 16 bytes instead of 24. Its programs run under qemu-arm (or aemu32) with
+// guest addresses equal to ours; the stream is widened to the version 8 one binderd64 knows, and narrowed back on
+// the way in. Every peer of such a firmware is 32-bit, so the parcels come out exactly as they went in.
+typedef unsigned long ul;
+static int g_b32;                               // AEMU64_B32: the firmware's binder is the 32-bit one
+// qemu-arm's guest_base for a static program linked below the lowest address the phone maps (healthd at 0x8000):
+// the guest's pointers are this much below ours
+static u32 g_gbase;
+#define G(x) ((ul)(x) + g_gbase)
+
+#define BINDER_WRITE_READ32 0xc0186201u
+struct bwr32 { u32 write_size, write_consumed, write_buffer, read_size, read_consumed, read_buffer; };
+struct btd32 { u32 target, cookie, code, flags; int sender_pid; u32 sender_euid; u32 data_size, offsets_size, buffer, offsets; };
+
+static int bobj(u32 type) {                     // a flat_binder_object: binder, weak binder, handle, weak handle, fd
+    return type == 0x73622a85u || type == 0x77622a85u || type == 0x73682a85u || type == 0x77682a85u || type == T_FD;
+}
+
+static void bmove(char *d, const char *s, u64 n) { while (n--) *d++ = *s++; }   // forward, overlap allowed when d <= s
+
+// 32-bit parcel -> 64-bit parcel at out: each object grows by 8 bytes; returns the new data size, offsets after it
+static u64 bwiden(const struct btd32 *d, char *out, u64 *offs) {
+    const char *src = (const char *)G(d->buffer); const u32 *o32 = (const u32 *)G(d->offsets);
+    u64 s = 0, at = 0, n = d->offsets_size / 4;
+    for (u64 i = 0; i < n; i++) {
+        u64 o = o32[i];
+        if (o < s || o + 16 > d->data_size || !bobj(*(const u32 *)(src + o))) { offs[i] = at + (o - s); continue; }   // left as it is
+        memcpy(out + at, src + s, o - s); at += o - s;
+        const u32 *b = (const u32 *)(src + o); u32 *w = (u32 *)(out + at);
+        w[0] = b[0]; w[1] = b[1]; w[2] = b[2]; w[3] = 0; w[4] = b[3]; w[5] = 0;
+        offs[i] = at; at += 24; s = o + 16;
+    }
+    memcpy(out + at, src + s, d->data_size - s);
+    return at + d->data_size - s;
+}
+
+// a delivered 64-bit parcel, narrowed in place; the offsets become 32-bit words at the same place
+static void bnarrow(char *buf, u64 *size, u64 *offs, u64 n) {
+    u64 s = 0, at = 0;
+    for (u64 i = 0; i < n; i++) {
+        u64 o = offs[i];
+        if (o < s || o + 24 > *size || !bobj(*(u32 *)(buf + o))) { ((u32 *)offs)[i] = (u32)(at + (o - s)); continue; }
+        bmove(buf + at, buf + s, o - s); at += o - s;
+        u32 *b = (u32 *)(buf + o), v[4] = { b[0], b[1], b[2], b[4] };
+        memcpy(buf + at, v, 16);
+        ((u32 *)offs)[i] = (u32)at; at += 16; s = o + 24;
+    }
+    bmove(buf + at, buf + s, *size - s);
+    *size = at + *size - s;
+}
+
+static long bwrite_read32(struct bth *t, struct bwr32 *w) {
+    // the 64-bit stream: small commands in place, a transaction's widened parcel in its own mapping
+    u32 cmds[512]; u32 nc = 0;
+    char *p = (char *)G(w->write_buffer) + w->write_consumed, *end = (char *)G(w->write_buffer) + w->write_size;
+    long r = 0;
+    char *big = 0; u64 bigsz = 0;
+    struct btd d64;
+    while (p + 4 <= end && nc + 20 < 512) {
+        u32 cmd = *(u32 *)p, sz = (cmd >> 16) & 0x3fff, *a = (u32 *)(p + 4);
+        if (p + 4 + sz > end) break;
+        switch (cmd) {
+        case 0x40286300u: case 0x40286301u: {   // BC_TRANSACTION, BC_REPLY: one per write is what libbinder sends
+            const struct btd32 *d = (const struct btd32 *)a;
+            u64 n = d->offsets_size / 4, need = A8(d->data_size + 8 * n) + 8 * n + 16;
+            if (big) S2(NR_munmap, big, bigsz);
+            bigsz = (need + 4095) & ~4095UL;
+            big = (char *)S6(NR_mmap, 0, bigsz, 3, 0x22, -1, 0);
+            if ((ul)big >= (ul)-4095) return -ENOMEM;
+            u64 *offs = (u64 *)(big + A8(d->data_size + 8 * n));
+            u64 dsz = bwiden(d, big, offs);
+            d64 = (struct btd){ d->target, d->cookie, d->code, d->flags, 0, 0, dsz, n * 8, (u64)(ul)big, (u64)(ul)offs };
+            cmds[nc++] = cmd == 0x40286300u ? BC_TRANSACTION : BC_REPLY;
+            memcpy(cmds + nc, &d64, sizeof d64); nc += sizeof d64 / 4;
+            break;
+        }
+        case 0x40046303u:                       // BC_FREE_BUFFER (u32 ptr)
+            cmds[nc++] = BC_FREE_BUFFER; cmds[nc++] = (u32)G(a[0]); cmds[nc++] = 0; break;
+        case 0x40086308u: case 0x40086309u:     // BC_INCREFS_DONE, BC_ACQUIRE_DONE: ptr, cookie
+            cmds[nc++] = cmd + 0x80000u; cmds[nc++] = a[0]; cmds[nc++] = 0; cmds[nc++] = a[1]; cmds[nc++] = 0; break;
+        case 0x4008630eu: case 0x4008630fu:     // BC_REQUEST/CLEAR_DEATH_NOTIFICATION: handle, cookie
+            cmds[nc++] = cmd + 0x40000u; cmds[nc++] = a[0]; cmds[nc++] = a[1]; cmds[nc++] = 0; break;
+        case 0x40046310u:                       // BC_DEAD_BINDER_DONE: cookie
+            cmds[nc++] = 0x40086310u; cmds[nc++] = a[0]; cmds[nc++] = 0; break;
+        default:                                // handles and plain commands are the same in both
+            if (sz <= 16) { cmds[nc++] = cmd; memcpy(cmds + nc, a, sz); nc += (sz + 3) / 4; }
+        }
+        p += 4 + sz;
+    }
+    w->write_consumed = (u32)(p - (char *)G(w->write_buffer));
+    // the answer arrives 64-bit in a buffer of ours, at most twice the size it will have
+    u64 rs = w->read_size > w->read_consumed ? w->read_size - w->read_consumed : 0;
+    char *rb = 0; u64 rbsz = 0;
+    if (rs) {
+        rbsz = (2 * rs + 64 + 4095) & ~4095UL;
+        rb = (char *)S6(NR_mmap, 0, rbsz, 3, 0x22, -1, 0);
+        if ((ul)rb >= (ul)-4095) { r = -ENOMEM; goto out; }
+    }
+    struct bwr w64 = { (u64)nc * 4, 0, (u64)(ul)cmds, rs ? 2 * rs : 0, 0, (u64)(ul)rb };
+    r = nc || rs ? bwrite_read(t, &w64) : 0;
+    if (r < 0 || !rs) goto out;
+    // 64-bit BR_* -> 32-bit ones
+    char *q = rb, *qe = rb + w64.read_consumed, *o = (char *)G(w->read_buffer) + w->read_consumed, *oe = o + rs;
+    while (q + 4 <= qe && o + 4 <= oe) {
+        u32 cmd = *(u32 *)q, sz = (cmd >> 16) & 0x3fff, *a = (u32 *)(q + 4), *b = (u32 *)(o + 4);
+        if (cmd == 0x80407202u || cmd == 0x80407203u) {         // BR_TRANSACTION, BR_REPLY
+            struct btd *d = (struct btd *)a;
+            if (o + 44 > oe) break;
+            u64 dsz = d->data_size, n = d->offsets_size / 8;
+            if (d->buffer) bnarrow((char *)(ul)d->buffer, &dsz, (u64 *)(ul)d->offsets, n);
+            struct btd32 e = { (u32)d->target, (u32)d->cookie, d->code, d->flags, d->sender_pid, d->sender_euid,
+                               (u32)dsz, (u32)(n * 4), (u32)(d->buffer - g_gbase), (u32)(d->offsets - g_gbase) };
+            *(u32 *)o = cmd == 0x80407202u ? 0x80287202u : 0x80287203u; memcpy(b, &e, sizeof e); o += 44;
+        } else if (cmd >= 0x80107207u && cmd <= 0x8010720au) {   // BR_INCREFS, ACQUIRE, RELEASE, DECREFS
+            if (o + 12 > oe) break;
+            *(u32 *)o = cmd - 0x80000u; b[0] = a[0]; b[1] = a[2]; o += 12;
+        } else if (cmd == 0x8008720fu || cmd == 0x80087210u) {   // BR_DEAD_BINDER, BR_CLEAR_DEATH_NOTIFICATION_DONE
+            if (o + 8 > oe) break;
+            *(u32 *)o = cmd - 0x40000u; b[0] = a[0]; o += 8;
+        } else {
+            if (o + 4 + sz > oe) break;
+            memcpy(o, q, 4 + sz); o += 4 + sz;
+        }
+        q += 4 + sz;
+    }
+    w->read_consumed = (u32)(o - (char *)G(w->read_buffer));
+out:
+    if (rb) S2(NR_munmap, rb, rbsz);
+    if (big) S2(NR_munmap, big, bigsz);
+    return r < 0 ? r : 0;
+}
+
 static long binder_ioctl(int fd, u32 cmd, u64 arg) {
+    if (g_is32 && arg) arg = G(arg);
     struct bth *t = bthread(fd, 1);
     if (!t) return -ENOMEM;
     if (!t->sock) {
@@ -372,7 +507,8 @@ static long binder_ioctl(int fd, u32 cmd, u64 arg) {
     }
     switch (cmd) {
     case BINDER_WRITE_READ: return bwrite_read(t, (struct bwr *)arg);
-    case BINDER_VERSION: *(int *)arg = 8; return 0;
+    case BINDER_WRITE_READ32: return bwrite_read32(t, (struct bwr32 *)arg);
+    case BINDER_VERSION: *(int *)arg = g_b32 ? 7 : 8; return 0;
     case BINDER_SET_MAX_THREADS: case BINDER_SET_CONTEXT_MGR: {
         struct { struct c_hdr h; u32 c, v; } m = { { OP_BCS, 0, 0, (u32)g_uid }, cmd == BINDER_SET_MAX_THREADS ? BC_AEMU_MAX_THREADS : BC_AEMU_CTX_MGR, arg ? *(u32 *)arg : 0 };
         return bsend(t->sock, &m, cmd == BINDER_SET_MAX_THREADS ? sizeof m : sizeof m - 4, 0, 0, 0, 0, 0, 0) < 0 ? -EBADF : 0;

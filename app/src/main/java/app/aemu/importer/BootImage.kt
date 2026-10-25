@@ -33,6 +33,11 @@ object BootImage {
             val rd = img.copyOfRange(off.toInt(), (off + len).toInt())
             return cpio(decompress(rd) ?: return null)
         }
+        // SDK emulator ramdisk.img: a bare gzip cpio
+        if (img.size > 6 && img[0] == 0x1f.toByte() && img[1] == 0x8b.toByte()) {
+            val inner = runCatching { gunzipLenient(img) }.getOrNull()
+            if (inner != null && inner.size > 6 && String(inner, 0, 6, Charsets.ISO_8859_1) == "070701") return cpio(inner)
+        }
         // Sony (kernel.sin, Xperia 2012–2016): an ELF whose segments are the kernel, the ramdisk (gzip cpio) and the cmdline
         if (img.size > 64 && img[0] == 0x7f.toByte() && img[1] == 'E'.code.toByte() && img[2] == 'L'.code.toByte() && img[3] == 'F'.code.toByte()) {
             for (i in 0 until img.size - 3) {

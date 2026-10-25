@@ -35,8 +35,12 @@ data class VmSettings(
     val mtMode: Int = 0,
     /** старый движок для 2.x (GL через pbuffer, только GLES 1.x) — запасной вариант */
     val legacyEngine: Boolean = false,
+    /** a 32-bit 7.1 firmware on the open engine: kernel 25 with qemu-arm (or aemu32), binder protocol 7 */
+    val open32: Boolean = false,
     /** guest RAM budget in MB, 0 = automatic */
     val ramMb: Int = 0,
+    /** internal storage the guest reports, MB; 0: derived from the phone's free space */
+    val diskMb: Int = 0,
     /** emulate the radio (RIL); off = tablet-like firmware without telephony */
     val radio: Boolean = true,
     /** hardware 32-bit (AArch32 EL0) bypass without translator on supported CPUs */
@@ -51,8 +55,8 @@ data class VmSettings(
         .put("gpu", gpu).put("hwui", hwui).put("jit", jit).put("fullDexopt", fullDexopt).put("fbHz", fbHz)
         .put("touchHz", touchHz).put("netProxy", netProxy).put("lowRam", lowRam)
         .put("showFrame", showFrame).put("showNavBar", showNavBar).put("navKeys", navKeys).put("navSize", navSize)
-        .put("keepScreenOn", keepScreenOn).put("showLed", showLed).put("mtMode", mtMode).put("legacyEngine", legacyEngine)
-        .put("ramMb", ramMb).put("radio", radio).put("native32", native32).put("imei", imei).put("qemuArgs", qemuArgs)
+        .put("keepScreenOn", keepScreenOn).put("showLed", showLed).put("mtMode", mtMode).put("legacyEngine", legacyEngine).put("open32", open32)
+        .put("ramMb", ramMb).put("diskMb", diskMb).put("radio", radio).put("native32", native32).put("imei", imei).put("qemuArgs", qemuArgs)
 
     companion object {
         const val NAV_DEFAULT = "back,home,recents,menu"
@@ -92,7 +96,9 @@ data class VmSettings(
                 showLed = o.optBoolean("showLed", d.showLed),
                 mtMode = o.optInt("mtMode", d.mtMode),
                 legacyEngine = o.optBoolean("legacyEngine", false),
+                open32 = o.optBoolean("open32", false),
                 ramMb = o.optInt("ramMb", 0),
+                diskMb = o.optInt("diskMb", 0),
                 radio = o.optBoolean("radio", true),
                 native32 = o.optBoolean("native32", false),
                 imei = o.optString("imei", ""),
@@ -187,6 +193,7 @@ data class GuestImage(
     /** Движок с учётом выбора пользователя. */
     fun effective(): GuestImage = copy(engine = when {
         abi == "arm64-v8a" -> Engine.N64
+        settings.open32 && (api in 1..19 || api == 23 || api == 25) -> Engine.N64
         settings.legacyEngine && api < 14 -> Engine.GB
         else -> Engine.KK
     })

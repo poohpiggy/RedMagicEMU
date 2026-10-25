@@ -66,6 +66,7 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
         val gap = if (rateHz > 0) 1000L / rateHz else 0L
         val ids = now.map { it.id }
         val t = SystemClock.uptimeMillis()
+        if (touchAt == 0L) touchAt = t
         if (!force && gap > 0 && now.isNotEmpty() && ids == lastIds && t - lastSentAt < gap) {
             pending = now
             pendingAt = t
@@ -225,6 +226,9 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
     }
 
     companion object {
+        /** the first touch the screen has not answered yet (uptime ms, 0: none); GuestScreen logs answers over a second late */
+        @Volatile @JvmStatic var touchAt = 0L
+
         private const val EV = 16
         private const val EV_SYN = 0
         private const val EV_KEY = 1

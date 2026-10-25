@@ -23,10 +23,12 @@ object RecoveryImage {
         }.getOrDefault(false)
     }
 
-    /** Unpacks a recovery (or boot) image; false when it holds no /sbin/recovery. */
+    private val BIN_NAMES = listOf("sbin/recovery", "system/bin/recovery")
+
+    /** Unpacks a recovery (or boot) image; false when it holds no /sbin/recovery or /system/bin/recovery (TWRP 3.4+). */
     fun install(paths: VmPaths, image: ByteArray, log: (String) -> Unit): Boolean {
         val rd = runCatching { BootImage.ramdisk(image) }.getOrNull()
-        if (rd.isNullOrEmpty() || rd.none { it.name == "sbin/recovery" }) { log("recovery: image has no /sbin/recovery"); return false }
+        if (rd.isNullOrEmpty() || rd.none { it.name.trimStart('/') in BIN_NAMES }) { log("recovery: image has no /sbin/recovery or /system/bin/recovery"); return false }
         val out = dir(paths)
         // never deleteRecursively: system/, data/, sdcard/ in it are links to the firmware's partitions and card
         ImageStore.wipe(out)
@@ -46,6 +48,11 @@ object RecoveryImage {
                     f.setReadable(true, false)
                 }
             }
+        }
+        // modern recoveries keep the binary in system/bin; the VM always starts /sbin/recovery
+        val sbin = File(out, "sbin/recovery")
+        if (!sbin.exists() && File(out, "system/bin/recovery").isFile) {
+            sbin.parentFile?.mkdirs(); runCatching { Os.symlink("../system/bin/recovery", sbin.path) }
         }
         val name = runCatching { File(out, "default.prop").readText() }.getOrDefault("")
             .let { Regex("twrp", RegexOption.IGNORE_CASE).containsMatchIn(it) }.let { if (it) "TWRP" else "" }

@@ -166,14 +166,101 @@ static int dev_close(struct hw_device *h) {
     return 0;
 }
 
+/*
+ * 1.5-1.6 (libhardware sensors.h of cupcake/donut): no "poll" device. SensorService opens "control"
+ * (open_data_source, activate, set_delay, wake) and hands the data source to the apps, whose SensorManager opens
+ * "data" (data_open, data_close, poll -> sensors_data_t). The source is a plain fd on 1.5, a native_handle_t on 1.6.
+ * Opened as the poll device, set_delay landed on poll() and blocked SensorService forever.
+ */
+struct native_handle_ { int version, numFds, numInts, data[1]; };
+struct sensors_data_t_ {
+    int sensor;
+    float v[3]; int8_t status; uint8_t reserved0[3];
+    int64_t time;
+    uint32_t reserved;
+};
+struct control_device {
+    struct hw_device common;
+    void *(*open_data_source)(struct control_device *d);
+    int (*activate)(struct control_device *d, int handle, int enabled);
+    int (*set_delay)(struct control_device *d, int32_t ms);
+    int (*wake)(struct control_device *d);
+    int api;
+};
+struct data_device {
+    struct hw_device common;
+    int (*data_open)(struct data_device *d, void *src);
+    int (*data_close)(struct data_device *d);
+    int (*poll)(struct data_device *d, struct sensors_data_t_ *data);
+    int api, fd;
+};
+extern int dup(int fd);
+static int legacy_active;   /* per process: activate runs in system_server, poll in the apps (they poll anyway) */
+
+static void *ctl_open_source(struct control_device *d) {
+    int fd = open("/dev/aemu_sensors", O_RDWR);
+    if (d->api <= 3) return (void *)(long)fd;
+    if (fd < 0) return 0;
+    struct native_handle_ *h = calloc(1, sizeof(*h));
+    if (!h) { close(fd); return 0; }
+    h->version = 12; h->numFds = 1; h->numInts = 0; h->data[0] = fd;
+    return h;
+}
+static int ctl_activate(struct control_device *d, int handle, int en) { (void)d; if (handle == HANDLE_ACCEL) legacy_active = en; return 0; }
+static int ctl_set_delay(struct control_device *d, int32_t ms) { (void)d; (void)ms; return 0; }
+static int ctl_wake(struct control_device *d) { (void)d; return 0; }
+
+static int dat_open(struct data_device *d, void *src) {
+    int fd = d->api <= 3 ? (int)(long)src : (src ? ((struct native_handle_ *)src)->data[0] : -1);
+    d->fd = fd >= 0 ? dup(fd) : -1;
+    return d->fd >= 0 ? 0 : -1;
+}
+static int dat_close(struct data_device *d) { if (d->fd >= 0) close(d->fd); d->fd = -1; return 0; }
+static int dat_poll(struct data_device *d, struct sensors_data_t_ *out) {
+    for (;;) {
+        int32_t rec[4];
+        long n = d->fd >= 0 ? read(d->fd, rec, sizeof(rec)) : -1;
+        if (n != (long)sizeof(rec)) { struct timespec_ ts = { 0, 200000000 }; nanosleep(&ts, 0); continue; }
+        if (rec[0] != SENSOR_TYPE_ACCELEROMETER) continue;
+        for (unsigned i = 0; i < sizeof(*out) / 4; i++) ((uint32_t *)out)[i] = 0;
+        out->sensor = HANDLE_ACCEL;
+        out->v[0] = *(float *)&rec[1]; out->v[1] = *(float *)&rec[2]; out->v[2] = *(float *)&rec[3];
+        out->status = 3;
+        out->time = now_ns();
+        return HANDLE_ACCEL;
+    }
+}
+static int legacy_close(struct hw_device *h) { free(h); return 0; }
+
+static int streq(const char *a, const char *b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
+
 static int sensors_open(const struct hw_module *m, const char *id, struct hw_device **out) {
-    (void)id;
-    struct poll_device *d = calloc(1, sizeof(*d));
-    if (!d) return -12;
     char sdk[92] = { 0 };
     __system_property_get("ro.build.version.sdk", sdk);
     int api = 0;
     for (int i = 0; sdk[i] >= '0' && sdk[i] <= '9'; i++) api = api * 10 + (sdk[i] - '0');
+    if (id && streq(id, "control")) {
+        struct control_device *c = calloc(1, sizeof(*c));
+        if (!c) return -12;
+        c->common.tag = HARDWARE_DEVICE_TAG; c->common.version = 0; c->common.module = (struct hw_module *)m;
+        c->common.close = legacy_close;
+        c->open_data_source = ctl_open_source; c->activate = ctl_activate; c->set_delay = ctl_set_delay; c->wake = ctl_wake;
+        c->api = api;
+        *out = &c->common;
+        return 0;
+    }
+    if (id && streq(id, "data")) {
+        struct data_device *dd = calloc(1, sizeof(*dd));
+        if (!dd) return -12;
+        dd->common.tag = HARDWARE_DEVICE_TAG; dd->common.version = 0; dd->common.module = (struct hw_module *)m;
+        dd->common.close = legacy_close;
+        dd->data_open = dat_open; dd->data_close = dat_close; dd->poll = dat_poll;
+        dd->api = api; dd->fd = -1;
+        *out = &dd->common;
+        return 0;
+    }
+    struct poll_device *d = calloc(1, sizeof(*d));
+    if (!d) return -12;
     d->common.tag = HARDWARE_DEVICE_TAG;
     /* HARDWARE_DEVICE_API_VERSION(major, minor) = (major << 24) | (minor << 16) | header version */
     /* 8.0+: the HIDL wrapper compares with SENSORS_DEVICE_API_VERSION_1_3 exactly, header version (1) included */

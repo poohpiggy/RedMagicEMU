@@ -95,6 +95,13 @@ class GuestRunner(
             if (jars.isNotEmpty()) e["SYSTEMSERVERCLASSPATH"] = jars.joinToString(":") { "/system/framework/$it" }
         }
         e["HOME"] = "/data"; e["TMPDIR"] = "/data/local/tmp"; e["TZ"] = "UTC"
+        // 0.9-1.x were built for ARMv5 (PixelFlinger generates ARMv5 code at run time): qemu-arm emulates that CPU
+        if (img.api < 3 && img.abi != "arm64-v8a") e["QEMU_CPU"] = "arm926"
+        // their ARMv5 kernels ran any readable page (READ_IMPLIES_EXEC): PixelFlinger's JIT jumps into malloc memory
+        // the kernel's rule (elf_read_implies_exec): an executable without PT_GNU_STACK gets READ_IMPLIES_EXEC;
+        // app_process of 0.9-1.6 has none, 2.3+ has one
+        if (img.abi != "arm64-v8a" && "AEMU_READ_IMPLIES_EXEC" !in img.exports && !hasGnuStack(File(paths.root, "system/bin/app_process")))
+            e["AEMU_READ_IMPLIES_EXEC"] = "1"
         e["AEMU64_ROOT"] = paths.root.absolutePath
         e["AEMU64_PROPS"] = paths.props.absolutePath
         e["AEMU64_BINDER"] = paths.binderSock.absolutePath
@@ -103,16 +110,39 @@ class GuestRunner(
             e["AEMU64_VNDBINDER"] = paths.vndbinderSock.absolutePath
         }
         e["AEMU64_INPUT"] = paths.inputSock.absolutePath
+        if (img.abi != "arm64-v8a") e["AEMU64_B32"] = "1"     // a whole 32-bit firmware: binder protocol 7
         paths.nativeBin("libqemu_arm.so").takeIf { it.canExecute() }?.let { e["AEMU64_QEMU"] = it.absolutePath }
+        // native 32-bit kernel of this release (native/guest32), where the phone executes AArch32; files/noarm32 turns it off
+        if (img.abi != "arm64-v8a" && HostInfo.hasAArch32() && !File(paths.ctx.filesDir, "noarm32").exists())
+            paths.nativeBin("libaemu32_${kernel.tag}.so").takeIf { it.canExecute() }?.let { e["AEMU64_ARM32"] = it.absolutePath }
         sdcardHost?.let { e["AEMU64_SDCARD"] = it.absolutePath }
-        if (img.settings.gpu && kernel.gpuBridge32 != null) {
+        if (img.settings.gpu && (kernel.gpuBridge32 != null || img.abi != "arm64-v8a")) {
             e["DHD_GL"] = "/dev/socket/gl"
             if (!HostInfo.gpu().contains("adreno")) e["DHD_GL3"] = "0"
-            e["AEMU_GL_RETARGET"] = "0"; e["AEMU_GL_CLIENT_ARRAYS"] = "0"      // as on the 4.4 engine for 4.3+
+            // as on the 4.4 engine for 4.3+; 2.x has no texture relay (DHD_GL_TEX below), so its SurfaceFlinger
+            // needs the re-targeting, or every layer freezes on its first buffers (2.3: clock and lock screen stood still)
+            // client arrays stay uploaded: the bridge sends their pointers as offsets, and RenderScript (4.x live
+            // wallpapers: PhaseBeam etc.) draws only from client arrays - without the upload the wallpaper was white
+            if (img.api >= 14) e["AEMU_GL_RETARGET"] = "0"
+            // open32: an app's frame stays in the GL server as a texture SurfaceFlinger takes by the buffer's node
+            // (the bridge's "relay"), instead of being read back and sent again through the socket for every frame
+            // (gl2 on 7.1: 3.6 MB per frame twice). files/nogltex turns it off.
+            // 2.x SurfaceFlinger takes app buffers its own way: the relay left the GL window white (TouchWiz launcher)
+            // 4.0-4.3: the relayed frame of a GL window stayed white in SurfaceFlinger (RS live wallpapers), so from 4.4
+            if (img.abi != "arm64-v8a" && img.api >= 19 && !File(paths.ctx.filesDir, "nogltex").exists()) e["DHD_GL_TEX"] = "1"
         }
         e["AEMU64_FB"] = "${img.settings.width}x${img.settings.height}"
         // debugging: run/crash.report makes the runner print pc/lr and their mappings on a fatal signal
         if (File(paths.bin, "crash.report").exists()) e["AEMU64_CRASH"] = "1"
+        // debugging: files/qperf makes our qemu-arm write perf-<pid>.map (guest pc of each translated block) into
+        // <image root>/data/local/tmp/perf, so simpleperf samples in generated code can be traced back to guest code.
+        // The path is a guest one: qemu's own file calls are resolved inside the image root.
+        if (img.abi != "arm64-v8a" && File(paths.ctx.filesDir, "qperf").exists()) {
+            File(paths.root, "data/local/tmp/perf").mkdirs()
+            e["QEMU_PERFMAP"] = "1"; e["AEMU_PERFDIR"] = "/data/local/tmp/perf"
+        }
+        // experiment: files/qjni makes our qemu-arm run android.opengl.Matrix.multiplyMM/MV on the host (ART only: 5.0+)
+        if (img.abi != "arm64-v8a" && img.api >= 21 && File(paths.ctx.filesDir, "qjni").exists()) e["AEMU_JNIHOOK"] = "1"
         for (t in userTokens.filter(::isEnvToken)) e[t.substringBefore('=')] = t.substringAfter('=')
         for ((k, v) in extra) when {
             k.startsWith("DHD_SOCK_") -> e["AEMU64_SOCK_" + k.removePrefix("DHD_SOCK_")] = v
@@ -181,7 +211,7 @@ class GuestRunner(
         // через мост не работают — для них сообщаем ES 2.0. На Adreno 4.4 с ES 3 и PBO работает правильно.
         if (img.api < 19 || !HostInfo.gpu().contains("adreno")) e["DHD_GL3"] = "0"
         // 4.3+: SurfaceFlinger (GLConsumer) re-targets its EGLImages itself; forcing it again blanks the screen
-        if (img.api >= 18) { e["AEMU_GL_RETARGET"] = "0"; e["AEMU_GL_CLIENT_ARRAYS"] = "0" }
+        if (img.api >= 18) e["AEMU_GL_RETARGET"] = "0"   // client arrays stay on: RS live wallpapers draw from them
         if (tbFlush > 0) e["DHD_TBFLUSH"] = tbFlush.toString()
         if (noSmc) e["DHD_NO_SMC"] = "1"
         if (noTcgOpt) e["DHD_NO_TCGOPT"] = "1"
@@ -209,6 +239,17 @@ class GuestRunner(
 
     companion object {
         private val EXPORTS_SKIP = setOf("PATH", "LD_LIBRARY_PATH", "BOOTCLASSPATH", "LD_PRELOAD")
+
+        /** Whether a 32-bit ELF has a PT_GNU_STACK program header (unreadable file: assume yes, nothing changes). */
+        fun hasGnuStack(f: File): Boolean = runCatching {
+            java.io.RandomAccessFile(f, "r").use { r ->
+                val h = ByteArray(52); r.readFully(h)
+                val b = java.nio.ByteBuffer.wrap(h).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                if (h[4].toInt() != 1) return@use true
+                val off = b.getInt(28).toLong(); val n = b.getShort(44).toInt() and 0xffff
+                (0 until n).any { k -> r.seek(off + 32L * k); Integer.reverseBytes(r.readInt()) == 0x6474e551 }
+            }
+        }.getOrDefault(true)
 
         /** RAM the guest is told it has: the user's choice, or what phones of that Android version shipped with. */
         fun guestRamMb(api: Int, chosen: Int): Int {

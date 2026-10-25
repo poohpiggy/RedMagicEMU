@@ -219,9 +219,10 @@ enum class Kernel64(
     A5_0("21", 21..21, registeredNetwork = true, eglCfgTags = true, trafficAccounting = true, treble = false, eglDir = "system/lib64/egl", gles = "1", absentFeatures = emptyList(),
         procFiles = mapOf("asound/cards" to "--- no soundcards ---\n")),
     // Android 5.1: starts as kernel 23. A board's own infrared HAL (consumerir.<board>.so) is set aside with the other
-    // vendor HALs, and 5.1 takes "feature declared, HAL missing" for fatal.
-    A5_1("22", 22..22, registeredNetwork = true, dnsLayoutProbe = true, exynosHandles = true, wideAudioFormat = true, bootImageInCache = true, ethernetStandIn = true, eglCfgTags = true, taskMapsIsSelfMaps = true, trafficAccounting = true, treble = false, eglDir = "system/lib64/egl", gles = "1",
-        absentFeatures = listOf("consumerir"),
+    // vendor HALs, and 5.1 takes "feature declared, HAL missing" for fatal; a HAL that stays (MIUI V7 Redmi 3) keeps the
+    // declaration (irFollowsHal): "HAL present, feature not set" is fatal as well and leaves the window manager unmade.
+    A5_1("22", 22..22, gpuBridge32 = "libGLES.so", gpuBridge32Open = true, gpuBridge64 = true, gpuBridgeMode = "2", irFollowsHal = true, registeredNetwork = true, dnsLayoutProbe = true, exynosHandles = true, wideAudioFormat = true, bootImageInCache = true, ethernetStandIn = true, eglCfgTags = true, taskMapsIsSelfMaps = true, trafficAccounting = true, treble = false, eglDir = "system/lib64/egl", gles = "1",
+        absentFeatures = emptyList(),
         standInServices = mapOf("Exynos.HWCService" to "system/lib64/libsurfaceflinger.so"),
         sysFiles = mapOf(
             "power/cpufreq_table" to "1500000 1400000 1300000 1200000 1100000 1000000 900000 800000 700000 600000 500000 400000\n",
@@ -232,7 +233,7 @@ enum class Kernel64(
                 "825000 728000 633000 543000 413000 275000 206000 165000 138000\n"),
         procFiles = mapOf("asound/cards" to "--- no soundcards ---\n")),
     // Android 6.0
-    A6("23", 23..23, gpuBridge32 = "libGLES.so", gpuBridge32Open = true, gpuBridge64 = true, gpuBridgeMode = "3", registeredNetwork = true, exynosHandles = true, irFollowsHal = true, wideAudioFormat = true, xmlSettings = true, bootImageInCache = true, ethernetStandIn = true, treble = false, eglDir = "system/lib64/egl", gles = "1", absentFeatures = emptyList(),
+    A6("23", 23..23, ramBudget = true, gpuBridge32 = "libGLES.so", gpuBridge32Open = true, gpuBridge64 = true, gpuBridgeMode = "3", registeredNetwork = true, exynosHandles = true, irFollowsHal = true, wideAudioFormat = true, xmlSettings = true, bootImageInCache = true, ethernetStandIn = true, treble = false, eglDir = "system/lib64/egl", gles = "1", absentFeatures = emptyList(),
         // Qualcomm's boot animation (MIUI 9) reads the list of sound cards and takes a missing file for an open one
         // (it dies at once and the boot goes on without an animation); the phone's own list is not readable
         procFiles = mapOf("asound/cards" to "--- no soundcards ---\n"),
@@ -474,10 +475,11 @@ enum class Kernel64(
             "vendor#lib64#libhidltransport.so", "vendor#lib64#libhwbinder.so", "vendor#lib#libhidltransport.so", "vendor#lib#libhwbinder.so"),
         firmwareAside = listOf("vendor#lib64#hw#android.hardware.keymaster@3.0-impl-qti.so", "vendor#lib64#hw#android.hardware.gatekeeper@1.0-impl-qti.so")),
     // Android 16: a copy of the kernel of 15 (its own from here on)
-    A16("36", 36..36, volumeAtUserStart = true, derivedIdentity = true, oneIncludePolicy = true, webViewSingleProcess = true, registeredNetwork = true, treble = true, eglDir = "vendor/lib64/egl", gles = "2",
+    A16("36", 36..36, aconfigStorage = true, volumeAtUserStart = true, derivedIdentity = true, oneIncludePolicy = true, webViewSingleProcess = true, registeredNetwork = true, treble = true, eglDir = "vendor/lib64/egl", gles = "2",
         absentFeatures = listOf("consumerir", "fingerprint", "nfc", "nfc.hce", "nfc.hcef", "bluetooth", "bluetooth_le"), trafficAccounting = true, noQemuPipe = true, binderVold = true,
         // (12 has no VNDK 27 any more: the 8.1 vendor side links against the oldest one there is)
-        props = mapOf("ro.treble.enabled" to "false", "bpf.progs_loaded" to "1", "ro.product.first_api_level" to "27", "debug.stagefright.c2inputsurface" to "1",
+        // (16 QPR and custom 16 builds: HintManagerService parses ro.vendor.api_level without a default, as on 17)
+        props = mapOf("ro.treble.enabled" to "false", "bpf.progs_loaded" to "1", "ro.product.first_api_level" to "27", "debug.stagefright.c2inputsurface" to "1", "ro.vendor.api_level" to "27",
             "ro.apex.updatable" to "false", "dalvik.vm.jdwp-provider" to "none", "ro.property_service.version" to "2",
             "persist.zygote.app_data_isolation" to "false",
             // (a vendor's firmware: as on 11)

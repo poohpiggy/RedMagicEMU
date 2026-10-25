@@ -766,7 +766,9 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
             if (seq(P(1), "/sys/fs/selinux/enforce")) return 0;
         }
         NEEDX(1);
-        if ((a[2] & (3 | 0100 | 01000)) && in_system(a[0], h1, PB(2))) return -EROFS;
+        /* (faccessat modes: W_OK 2 is a write; X_OK 1 and R_OK 4 are not - the open flags' mask here made every
+         * exec check of a /system program fail with EROFS: the debug shell and the testers could not run anything) */
+        if ((a[2] & 2) && in_system(a[0], h1, PB(2))) return -EROFS;
         return S4(nr, a[0], h1, a[2], a[3]);
     }
     case NR_mkdirat: case NR_unlinkat: case NR_fchmodat: case NR_utimensat: case NR_mknodat:

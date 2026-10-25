@@ -210,4 +210,9 @@
     <string name="m_vnc">Запустити VNC-сервер</string>
     <string name="m_vnc_stop">Зупинити VNC-сервер</string>
     <string name="m_vnc_started">VNC: %1$s, пароль %2$s</string>
+    <string name="m_apps">Застосунки прошивки</string>
+    <string name="m_apps_none">Нічого запускати</string>
+    <string name="vs_disk">Внутрішня пам’ять</string>
+    <string name="m_apps_search">Пошук застосунків</string>
+    <string name="powered_off">Гостя вимкнено</string>
 </resources>

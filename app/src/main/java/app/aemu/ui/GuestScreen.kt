@@ -92,6 +92,7 @@ class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(c
             if (n < directSeen) { directSeen = n; passthrough = false; lastHash = 0 }      // (the guest started again)
             else if (n != directSeen) {
                 directFrames += n - directSeen
+                answered()
                 shown += n - directSeen
                 directSeen = n
                 if (!passthrough) { passthrough = true; countSeen = fbCount(); directFrames = 0; directAt = now }
@@ -120,7 +121,7 @@ class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(c
         }
         val b = buf ?: return
         val bitmap = bmp ?: return
-        val two = b.capacity() >= pixels * 2
+        val two = !onePage && b.capacity() >= pixels * 2     // (open32: the GL server's one RGB565 page with its frame counter)
         if (two) {
             // two pages: follow the one whose content changed most recently
             for (pg in 0..1) {
@@ -164,6 +165,7 @@ class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(c
                 lastHash = hash
                 changed++
                 shown++
+                answered()
                 val now = System.currentTimeMillis()
                 if (changedAt == 0L) changedAt = now
                 if (now - changedAt > 1000) { fps = changed * 1000f / (now - changedAt); changed = 0; changedAt = now; android.util.Log.d("aemu-screen", "fb0 %.1f fps".format(fps)) }
@@ -217,6 +219,22 @@ class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(c
         return true
     }
 
+    /** open32 only: fb0 is one page followed by the GL server's counter, not a second page */
+    @Volatile var onePage = false
+
     private fun gx(x: Float) = (x * w / width).toInt().coerceIn(0, w - 1)
     private fun gy(y: Float) = (y * h / height).toInt().coerceIn(0, h - 1)
+
+    /** a touch the guest answered (its next frame) more than a second late: the freezes users see, with their time */
+    private fun answered() {
+        val t = app.aemu.core.InputService.touchAt
+        if (t == 0L) return
+        app.aemu.core.InputService.touchAt = 0L
+        val late = android.os.SystemClock.uptimeMillis() - t
+        if (late > 1000) {
+            val line = "%tT touch answered after %d ms".format(System.currentTimeMillis(), late)
+            android.util.Log.w("aemu-stall", line)
+            runCatching { java.io.File(context.filesDir, "stall.log").appendText(line + System.lineSeparator()) }
+        }
+    }
 }

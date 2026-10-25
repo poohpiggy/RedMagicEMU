@@ -5,7 +5,7 @@
 export MSYS_NO_PATHCONV=1
 A="$LOCALAPPDATA/Android/Sdk/platform-tools/adb.exe${ANDROID_SERIAL:+ -s $ANDROID_SERIAL}"
 W=${W:-$PWD}
-T=$(cd "$(dirname "$0")/../.." && pwd)
+T=$(cd "$(dirname "$0")/../.." && (pwd -W 2>/dev/null || pwd))   # adb.exe needs E:/..., not /e/...
 if [ "$1" = "-w" ]; then shift; R="files/images/$1/root/data/data/app.aemu.test/files/report.txt"; else
   I=$1
   R="files/images/$I/root/data/data/app.aemu.test/files/report.txt"
@@ -22,7 +22,8 @@ if [ "$1" = "-w" ]; then shift; R="files/images/$1/root/data/data/app.aemu.test/
   [ "$API" -ge 23 ] && for p in CAMERA RECORD_AUDIO; do T=15 sh $W/gsh.sh $I "pm grant app.aemu.test android.permission.$p" >/dev/null; done
   $A shell "run-as app.aemu rm -f $R"
   E=""; [ -n "$2" ] && E="--es only $2"; [ -n "$3" ] && E="$E --ei secs $3"
-  T=20 sh $W/gsh.sh $I "am start -S -n app.aemu.test/.Main $E" | tail -1
+  S="-S"; [ "$API" -lt 11 ] && S=""   # 2.x am has no -S (NullPointerException)
+  T=20 sh $W/gsh.sh $I "am start $S -n app.aemu.test/.Main $E" | tail -1
   [ -n "$NOWAIT" ] && exit 0
 fi
 n=0

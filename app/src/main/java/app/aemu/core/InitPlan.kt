@@ -55,6 +55,7 @@ object InitPlan {
         val setprops = LinkedHashMap<String, String>()
         for (f in files) {
             if (!f.isFile || skip.matches(f.name)) continue
+            if (isLegacy(f)) { parseLegacy(f, services, exports); continue }
             var cur: RcService? = null
             var propTrigger = false
             var condOk: Boolean? = null
@@ -97,6 +98,46 @@ object InitPlan {
         return Rc(services, exports, dirs, setprops)
     }
 
+    /** M3/M5 (2007-2008): /etc/init.rc of brace blocks — env { NAME value } and service { name { exec … args { n v } } }. */
+    private fun isLegacy(f: File): Boolean = runCatching {
+        f.useLines { ls -> ls.map { it.trim() }.firstOrNull { it.isNotEmpty() && !it.startsWith("#") } }?.let { Regex("^(env|onboot|startup|service)\\s*\\{").containsMatchIn(it) } ?: false
+    }.getOrDefault(false)
+
+    private fun parseLegacy(f: File, services: MutableMap<String, RcService>, exports: MutableMap<String, String>) {
+        val path = ArrayList<String>()              // the open blocks: section, service, args
+        var exec: String? = null; val args = java.util.TreeMap<Int, String>(); var autostart = true; var oneshot = false
+        fun endService(name: String) {
+            val e = exec ?: return
+            services[name] = RcService(name, listOf(e) + args.values, oneshot = oneshot, disabled = !autostart)
+        }
+        for (raw in f.readLines()) {
+            val ln = raw.substringBefore('#').trim()
+            if (ln.isEmpty()) continue
+            if (ln.endsWith("{")) {
+                path.add(ln.removeSuffix("{").trim())
+                if (path.size == 2 && path[0] == "service") { exec = null; args.clear(); autostart = true; oneshot = false }
+                continue
+            }
+            if (ln == "}") {
+                if (path.size == 2 && path[0] == "service") endService(path[1])
+                if (path.isNotEmpty()) path.removeAt(path.size - 1)
+                continue
+            }
+            val t = ln.split(Regex("\\s+"), limit = 2)
+            val v = t.getOrNull(1)?.trim()?.removeSurrounding("\"") ?: ""
+            when {
+                path.size == 1 && path[0] == "env" -> exports[t[0]] = v
+                path.size == 2 && path[0] == "service" -> when {
+                    t[0] == "exec" -> exec = v
+                    t[0].startsWith("args.") -> t[0].removePrefix("args.").toIntOrNull()?.let { args[it] = v }
+                    t[0] == "autostart" -> autostart = v != "0"
+                    t[0] == "oneshot" -> oneshot = v != "0"
+                }
+                path.size == 3 && path[0] == "service" && path[2] == "args" -> t[0].toIntOrNull()?.let { args[it] = v }
+            }
+        }
+    }
+
     private val AID = mapOf(
         "root" to 0, "system" to 1000, "radio" to 1001, "bluetooth" to 1002, "graphics" to 1003,
         "input" to 1004, "audio" to 1005, "camera" to 1006, "log" to 1007, "compass" to 1008,
@@ -132,7 +173,8 @@ object InitPlan {
     fun plan(rc: Rc, api: Int, root: File): List<GuestService> {
         val out = ArrayList<GuestService>()
         for (r in ORDER) {
-            if (api in 1 until r.minApi) continue
+            // (3.1-3.2 already declare surfaceflinger in init.rc and turn it off in system_init: their rc decides)
+            if (api in 1 until r.minApi && !(r.name == "surfaceflinger" && rc.services["surfaceflinger"] != null)) continue
             if (r.name == "zygote_secondary" && (rc.setprops["ro.zygote"] == "zygote64" || !File(root, "system/bin/app_process32").isFile)) continue
             val found = (listOf(r.name) + r.alt).firstNotNullOfOrNull { rc.services[it] }
             var def = found?.let { toService(it, r) } ?: defaults(r.name, api, root)?.let {
@@ -184,7 +226,7 @@ object InitPlan {
         "kpoc_charger",
         // mtkbt: MediaTek's Bluetooth stack daemon; without its chip it fills the log with thousands of lines a second
         "mtkbt",
-        "ueventd", "vold", "rild", "ril-daemon", "adbd", "debuggerd", "debuggerd64", "console", "dbus", "bluetoothd",
+        "ueventd", "vold", "usbd", "powerd", "rild", "ril-daemon", "adbd", "debuggerd", "debuggerd64", "console", "dbus", "bluetoothd",
         "btld", "wpa_supplicant", "p2p_supplicant", "dhcpcd", "racoon", "mtpd", "qemud", "goldfish-setup", "goldfish-logcat",
         "dumpstate", "flash_recovery", "recovery", "redbend_ua", "sreadaheadd", "lpmkey", "playlpm", "charger", "macloader",
         "mfgloader", "wlandutservice", "bt_dut_cmd", "bootanim", "samsungani", "playsound", "sdcard", "fuse_sdcard0",

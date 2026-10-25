@@ -1,3 +1,4 @@
+typedef long intptr_t;
 extern int __android_log_print(int, const char *, const char *, ...);
 /*
  * libGLES_split — переходник перед GL-мостом (libGLES_bridge.so, гостевая часть моста автора).
@@ -211,7 +212,29 @@ static int is_surfaceflinger(void) {
     return v;
 }
 
+
+/* ------------------------------------------------------------ config handles per connection
+ * The bridge numbers the configs per connection (each thread has its own): RenderScript's thread got 0x23..
+ * where libEGL may have kept another connection's numbering from eglInitialize. Outside the shim a config is
+ * always in the first connection's numbering (identical numbering makes this a no-op). */
+typedef unsigned (*GetConfigsFn)(void *dpy, void **configs, int size, int *num);
+static intptr_t g_cfg_base0;
+static intptr_t cfg_base(void *dpy) {
+    void *c = 0; int n = 0;
+    ((GetConfigsFn)aemu_split_resolve(IDX_eglGetConfigs))(dpy, &c, 1, &n);
+    return n > 0 ? (intptr_t)c : 0;
+}
+static void *cfg_out(void *dpy, void *c, intptr_t cur) {
+    if (!g_cfg_base0) g_cfg_base0 = cur;
+    return c && cur ? (void *)((intptr_t)c - cur + g_cfg_base0) : c;
+}
+static void *cfg_in(void *dpy, void *c) {
+    if (!c || !g_cfg_base0) return c;
+    intptr_t cur = cfg_base(dpy);
+    return cur ? (void *)((intptr_t)c - g_cfg_base0 + cur) : c;
+}
 __attribute__((visibility("default"))) void *eglCreateContext(void *dpy, void *config, void *share, const GLint *attribs) {
+    config = cfg_in(dpy, config);
     CreateContextFn f = (CreateContextFn)aemu_split_resolve(IDX_eglCreateContext);
     static int force = -1;
     if (force < 0) { const char *v = getenv("AEMU_GL_ES2"); force = v && v[0] == '1'; }
@@ -477,10 +500,10 @@ static void va_context(void *ctx) {
  * the VBO stays alive between draws and is re-filled only when the bytes differ from the last upload, and
  * attribute pointers are re-sent only when they moved (per-draw GenBuffers/BufferData/DeleteBuffers and
  * 2x pointers made every client-array draw a dozen bridge calls). */
-static int va_upload(struct va_state *v, long nverts) {
+static int va_upload_f(struct va_state *v, long nverts, int force) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("AEMU_GL_CLIENT_ARRAYS"); on = !(e && e[0] == '0'); }
-    if (!on || nverts <= 0 || es1_current()) return 0;
+    if (!(on || force) || nverts <= 0 || es1_current()) return 0;
     unsigned long lo = ~0UL, hi = 0, sum = 0;
     for (int i = 0; i < MAXATTR; i++) {
         struct va_attr *a = &v->a[i];
@@ -526,6 +549,8 @@ static int va_upload(struct va_state *v, long nverts) {
     return 1;
 }
 
+static int va_upload(struct va_state *v, long nverts) { return va_upload_f(v, nverts, 0); }
+
 /* after the draw only the app's GL_ARRAY_BUFFER binding is put back; the attributes stay on the scratch
  * VBO (they are client arrays, so the next draw goes through va_upload again) */
 static void va_restore(struct va_state *v, int used) {
@@ -540,19 +565,96 @@ __attribute__((visibility("default"))) void glDrawArrays(GLenum mode, GLint firs
     if (buf) va_restore(v, buf);
 }
 
+/* Copies of element-array buffer contents. With indices in a bound buffer and some attributes still client
+ * arrays (2.3 RenderScript, Launcher2 3D all-apps: a stale stack pointer left enabled), the bridge cannot know
+ * the vertex count and copies from the client pointer until it runs off the stack (SIGSEGV in callv_x, the
+ * launcher restarted forever). The max index is read from this copy, and the client arrays are uploaded. */
+#define MAXEBO 128
+static struct { unsigned id; unsigned long len; unsigned char *data; } g_ebo[MAXEBO];
+static unsigned bound_id(GLenum target);
+
+static int ebo_slot(unsigned id, int make) {
+    int fr = -1;
+    for (int i = 0; i < MAXEBO; i++) {
+        if (g_ebo[i].id == id) return i;
+        if (!g_ebo[i].id && fr < 0) fr = i;
+    }
+    if (!make) return -1;
+    if (fr < 0) { fr = (int)(id % MAXEBO); free(g_ebo[fr].data); g_ebo[fr].data = 0; g_ebo[fr].len = 0; }
+    g_ebo[fr].id = id;
+    return fr;
+}
+
+/* id of the buffer bound to target; the data of index buffers can arrive through GL_ARRAY_BUFFER (2.3 RS
+ * fills it there, then binds the same buffer as GL_ELEMENT_ARRAY_BUFFER), so small buffers of both are copied */
+#define EBO_COPY_MAX 65536
+static unsigned bound_id(GLenum target) {
+    struct va_state *v = va_cur();
+    return target == GL_ELEMENT_ARRAY_BUFFER ? v->elem_buf : target == GL_ARRAY_BUFFER ? v->array_buf : 0;
+}
+
+__attribute__((visibility("default"))) void glBufferData(GLenum target, long size, const void *data, GLenum usage) {
+    unsigned id = bound_id(target);
+    if (id && size > EBO_COPY_MAX) { int s = ebo_slot(id, 0); if (s >= 0) { free(g_ebo[s].data); g_ebo[s].data = 0; g_ebo[s].len = 0; g_ebo[s].id = 0; } id = 0; }
+    if (id) {
+        int s = ebo_slot(id, 1);
+        free(g_ebo[s].data); g_ebo[s].data = 0; g_ebo[s].len = 0;
+        if (size > 0 && (g_ebo[s].data = (unsigned char *)malloc((unsigned)size))) {
+            g_ebo[s].len = (unsigned long)size;
+            if (data) copy_bytes(g_ebo[s].data, (const unsigned char *)data, (unsigned long)size);
+            else for (long i = 0; i < size; i++) g_ebo[s].data[i] = 0;
+        }
+    }
+    ((BufferDataFn)aemu_split_resolve(IDX_glBufferData))(target, size, data, usage);
+}
+
+__attribute__((visibility("default"))) void glBufferSubData(GLenum target, long off, long size, const void *data) {
+    unsigned id = bound_id(target);
+    int s = id ? ebo_slot(id, 0) : -1;
+    if (s >= 0 && data && off >= 0 && size > 0 && (unsigned long)(off + size) <= g_ebo[s].len)
+        copy_bytes(g_ebo[s].data + off, (const unsigned char *)data, (unsigned long)size);
+    ((BufferSubDataFn)aemu_split_resolve(IDX_glBufferSubData))(target, off, size, data);
+}
+
+__attribute__((visibility("default"))) void glDeleteBuffers(GLsizei n, const unsigned *ids) {
+    for (GLsizei i = 0; ids && i < n; i++) {
+        int s = ids[i] ? ebo_slot(ids[i], 0) : -1;
+        if (s >= 0) { free(g_ebo[s].data); g_ebo[s].data = 0; g_ebo[s].len = 0; g_ebo[s].id = 0; }
+    }
+    ((GenBuffersFn)aemu_split_resolve(IDX_glDeleteBuffers))(n, (unsigned *)ids);
+}
+
+static long max_index(const void *p, GLsizei count, GLenum type) {
+    long maxi = 0;
+    for (GLsizei i = 0; i < count; i++) {
+        long x = type == 0x1401 ? ((const unsigned char *)p)[i]
+               : type == 0x1403 ? ((const unsigned short *)p)[i]
+               : (long)((const unsigned int *)p)[i];
+        if (x > maxi) maxi = x;
+    }
+    return maxi;
+}
+
+static int any_client(struct va_state *v) {
+    for (int i = 0; i < MAXATTR; i++) if (v->a[i].enabled && v->a[i].client) return 1;
+    return 0;
+}
+
 __attribute__((visibility("default"))) void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices) {
     struct va_state *v = va_cur();
     int buf = 0;
-    /* vertex count is only known when the indices are in client memory too */
     if (count > 0 && v->elem_buf == 0 && indices) {
-        long maxi = 0;
-        for (GLsizei i = 0; i < count; i++) {
-            long x = type == 0x1401 ? ((const unsigned char *)indices)[i]
-                   : type == 0x1403 ? ((const unsigned short *)indices)[i]
-                   : (long)((const unsigned int *)indices)[i];
-            if (x > maxi) maxi = x;
-        }
-        buf = va_upload(v, maxi + 1);
+        buf = va_upload(v, max_index(indices, count, type) + 1);
+    } else if (count > 0 && v->elem_buf && any_client(v)) {
+        int s = ebo_slot(v->elem_buf, 0);
+        unsigned long off = (unsigned long)indices, need = (unsigned long)count * type_size(type);
+        if (s >= 0 && g_ebo[s].data && off + need <= g_ebo[s].len)
+            buf = va_upload_f(v, max_index(g_ebo[s].data + off, count, type) + 1, 1);   /* the bridge cannot do this case */
+        static int warned;
+        if (!buf && warned++ < 3)
+            __android_log_print(5, "aemu-split", "DrawElements ebo %u slot %d len %lu off %lu need %lu es1 %d maxi %ld: client arrays not uploaded",
+                                v->elem_buf, s, s >= 0 ? g_ebo[s].len : 0, off, need, es1_current(),
+                                s >= 0 && g_ebo[s].data ? max_index(g_ebo[s].data + off, count, type) : -1L);
     }
     ((DrawElementsFn)aemu_split_resolve(IDX_glDrawElements))(mode, count, type, indices);
     if (buf) va_restore(v, buf);
@@ -651,6 +753,19 @@ __attribute__((constructor)) static void hold_std_fds(void) {
 typedef void *(*CreateImageFn)(void *dpy, void *ctx, unsigned target, void *buf, const GLint *attribs);
 __attribute__((visibility("default"))) void *eglCreateImageKHR(void *dpy, void *ctx, unsigned target, void *buf, const GLint *attribs) {
     CreateImageFn f = (CreateImageFn)aemu_split_resolve(IDX_eglCreateImageKHR);
+    /* (the descriptors may be taken before this library is loaded: a buffer already sitting on 0 moves up, its
+     * handle follows it, and /dev/null takes 0 so later buffers never land there) */
+    if (target == 0x3140 && buf) {
+        int *h = *(int **)((char *)buf + 60);           /* ANativeWindowBuffer.handle: version, numFds, numInts, data */
+        if (h && h[1] > 0 && h[3] == 0) {
+            int nfd = syscall(55 /* fcntl */, 0, 0 /* F_DUPFD */, 3);
+            if (nfd >= 3) {
+                h[3] = nfd;
+                syscall(6 /* close */, 0);
+                syscall(5 /* open */, "/dev/null", 2 /* O_RDWR */, 0);
+            }
+        }
+    }
     void *img = f(dpy, ctx, target, buf, attribs);
     if (img || target != 0x3140 /* EGL_NATIVE_BUFFER_ANDROID */ || !buf) return img;
     int *usage = (int *)((char *)buf + 48);
@@ -673,8 +788,21 @@ __attribute__((visibility("default"))) void *eglCreateImageKHR(void *dpy, void *
     return img;
 }
 
+/* EGL_SYNC_NATIVE_FENCE_ANDROID: the bridge does not list EGL_ANDROID_native_fence_sync, yet hands out a sync and
+ * then an fd that is no sync file. SurfaceFlinger (captureScreenImplLocked, 4.4+) asks for this type without
+ * checking the extension string and queues the screenshot with that fd; the consumer's sync_wait fails
+ * ("GLConsumer: doGLFenceWait: error waiting for fence: -25/-13") and SurfaceTexture.updateTexImage throws - on 7.1
+ * the screen-off animation (ColorFade) took system_server down at every power-key press. EGL_KHR_fence_sync: a type
+ * the implementation does not support gives EGL_NO_SYNC_KHR; SurfaceFlinger then falls back to a plain fence sync. */
+typedef void *(*CreateSyncFn)(void *dpy, unsigned type, const GLint *attribs);
+__attribute__((visibility("default"))) void *eglCreateSyncKHR(void *dpy, unsigned type, const GLint *attribs) {
+    if (type == 0x3144 /* EGL_SYNC_NATIVE_FENCE_ANDROID */) return 0;
+    return ((CreateSyncFn)aemu_split_resolve(IDX_eglCreateSyncKHR))(dpy, type, attribs);
+}
+
 typedef void *(*ProcFn)(const char *);
 __attribute__((visibility("default"))) void *eglGetProcAddress(const char *name) {
+    if (name && !__builtin_strcmp(name, "eglCreateSyncKHR")) return (void *)eglCreateSyncKHR;
     static const char *const names[] = { "eglSwapBuffersWithDamageKHR", "eglSwapBuffersWithDamageEXT", "eglSetDamageRegionKHR" };
     static void *const fns[] = { (void *)swap_with_damage, (void *)swap_with_damage, (void *)set_damage_region };
     for (int i = 0; name && i < 3; i++) {
@@ -701,6 +829,7 @@ typedef unsigned (*GetAttrFn)(void *dpy, void *config, int attr, int *value);
 typedef unsigned (*ChooseFn)(void *dpy, const GLint *attribs, void **configs, int size, int *num);
 
 __attribute__((visibility("default"))) void *eglCreateWindowSurface(void *dpy, void *config, void *win, const GLint *attribs) {
+    config = cfg_in(dpy, config);
     CreateWinFn f = (CreateWinFn)aemu_split_resolve(IDX_eglCreateWindowSurface);
     if (!is_surfaceflinger() || !win) {
         void *r = f(dpy, config, win, attribs);
@@ -731,4 +860,112 @@ __attribute__((visibility("default"))) void *eglCreateWindowSurface(void *dpy, v
     if (h <= 0 || h > 4096) h = 1;
     GLint pa[] = { 0x3057 /* EGL_WIDTH */, w, 0x3056 /* EGL_HEIGHT */, h, EGL_NONE };
     return ((CreatePbufFn)aemu_split_resolve(IDX_eglCreatePbufferSurface))(dpy, config, pa);
+}
+
+/* ------------------------------------------------------------ EGL_NATIVE_VISUAL_ID
+ *
+ * The bridge leaves EGL_NATIVE_VISUAL_ID 0. 2.3's EGLUtils (RenderScript, so the Nexus live wallpapers and the
+ * 3D all-apps list) picks the config whose visual id equals the window's pixel format and finds none: "couldn't
+ * find an EGLConfig matching the screen format", no context, and the app crashes. The id is derived from the
+ * channel sizes, as a real driver reports it: 565 -> RGB_565, 8888 -> RGBA_8888, 888 -> RGBX_8888.
+ */
+__attribute__((visibility("default"))) unsigned eglGetConfigAttrib(void *dpy, void *config, int attr, int *value) {
+    GetAttrFn f = (GetAttrFn)aemu_split_resolve(IDX_eglGetConfigAttrib);
+    config = cfg_in(dpy, config);
+    unsigned ok = f(dpy, config, attr, value);
+    if (ok && attr == 0x302E /* EGL_NATIVE_VISUAL_ID */ && value && *value == 0) {
+        int r = 0, g = 0, b = 0, a = 0;
+        f(dpy, config, 0x3024, &r); f(dpy, config, 0x3023, &g); f(dpy, config, 0x3022, &b); f(dpy, config, 0x3021, &a);
+        if (r == 5 && g == 6 && b == 5 && a == 0) *value = 4;
+        else if (r == 8 && g == 8 && b == 8) *value = a == 8 ? 1 : 2;
+    }
+    return ok;
+}
+
+/* EGL lets configs be NULL to count the matches (2.3's EGLUtils does that first); the bridge answers
+ * EGL_BAD_CONFIG instead. The count comes from a call into a scratch array. */
+__attribute__((visibility("default"))) unsigned eglChooseConfig(void *dpy, const GLint *attribs, void **configs, int size, int *num) {
+    ChooseFn f = (ChooseFn)aemu_split_resolve(IDX_eglChooseConfig);
+    unsigned ok;
+    int n = 0;
+    void *tmp[256];
+    ok = configs ? f(dpy, attribs, configs, size, num) : f(dpy, attribs, tmp, 256, &n);
+    if (!ok) {
+        char m[300]; int k = 0;
+        for (int i = 0; attribs && attribs[i] != 0x3038 && i < 40 && k < 280; i += 2)
+            k += __builtin_snprintf(m + k, sizeof m - k, "%x=%d ", attribs[i], attribs[i + 1]);
+        m[k] = 0;
+        __android_log_print(5, "aemu-split", "eglChooseConfig refused: %s", m);
+    }
+    if (configs && ok && num) { intptr_t cur = cfg_base(dpy); for (int i = 0; i < *num; i++) configs[i] = cfg_out(dpy, configs[i], cur); }
+    /* The bridge chooses among more configs than its eglGetConfigs lists (that stops at 64: 0x46.. came back
+     * where the list ended at 0x41); 2.3's libEGL maps every chosen config through that list and failed the
+     * whole call (EGL_BAD_CONFIG: RenderScript live wallpapers, Launcher2). EGL wants a subset: the rest is dropped. */
+    if (configs && ok && num && *num > 0) {
+        void *all[256]; int na = 0, m = 0;
+        GetConfigsFn gc = (GetConfigsFn)aemu_split_resolve(IDX_eglGetConfigs);
+        if (gc(dpy, all, 256, &na) && na > 0) {
+            intptr_t cur = (intptr_t)all[0];
+            for (int i = 0; i < na; i++) all[i] = cfg_out(dpy, all[i], cur);
+            for (int i = 0; i < *num; i++) {
+                int f = 0;
+                for (int j = 0; j < na && !f; j++) f = all[j] == configs[i];
+                if (f) configs[m++] = configs[i];
+            }
+            *num = m;
+        }
+    }
+    if (configs) return ok;
+    if (num) *num = ok ? n : 0;
+    return ok;
+}
+
+__attribute__((visibility("default"))) unsigned eglGetConfigs(void *dpy, void **configs, int size, int *num) {
+    if (!configs) {     /* counting (2.3's libEGL at eglInitialize): the bridge refuses NULL */
+        void *tmp[256]; int n = 0;
+        unsigned ok0 = ((GetConfigsFn)aemu_split_resolve(IDX_eglGetConfigs))(dpy, tmp, 256, &n);
+        if (num) *num = ok0 ? n : 0;
+        return ok0;
+    }
+    unsigned ok = ((GetConfigsFn)aemu_split_resolve(IDX_eglGetConfigs))(dpy, configs, size, num);
+    if (ok && configs && num && *num > 0) { intptr_t cur = (intptr_t)configs[0]; for (int i = 0; i < *num; i++) configs[i] = cfg_out(dpy, configs[i], cur); }
+    return ok;
+}
+
+__attribute__((visibility("default"))) void *eglCreatePbufferSurface(void *dpy, void *config, const GLint *attribs) {
+    return ((CreatePbufFn)aemu_split_resolve(IDX_eglCreatePbufferSurface))(dpy, cfg_in(dpy, config), attribs);
+}
+
+/* 2.3's libEGL builds its config table only for a driver whose eglInitialize filled in the version (major >= 0);
+ * the bridge leaves it untouched (-1): the table stayed empty and every eglChooseConfig gave EGL_BAD_CONFIG
+ * (RenderScript, so the live wallpapers and the launcher died) */
+__attribute__((visibility("default"))) unsigned eglInitialize(void *dpy, int *major, int *minor) {
+    unsigned ok = ((unsigned (*)(void *, int *, int *))aemu_split_resolve(IDX_eglInitialize))(dpy, major, minor);
+    if (ok) {
+        if (major && *major < 1) *major = 1;
+        if (minor && *minor < 0) *minor = 4;
+    }
+    return ok;
+}
+
+/* ------------------------------------------------------------ shader diagnostics: log only failures */
+typedef void (*ObjFn)(unsigned);
+typedef void (*GetivFn)(unsigned, GLenum, GLint *);
+typedef void (*InfoLogFn)(unsigned, GLsizei, GLsizei *, char *);
+static void gl_report(const char *what, unsigned id, int idx_iv, int idx_log, GLenum st) {
+    GLint ok = 1; char buf[512]; GLsizei n = 0;
+    ((GetivFn)aemu_split_resolve(idx_iv))(id, st, &ok);
+    if (ok) return;
+    buf[0] = 0;
+    ((InfoLogFn)aemu_split_resolve(idx_log))(id, sizeof buf - 1, &n, buf);
+    buf[n > 0 && n < 512 ? n : 0] = 0;
+    __android_log_print(6, "aemu-split", "%s %u failed (es1 %d): %s", what, id, es1_current(), buf);
+}
+__attribute__((visibility("default"))) void glCompileShader(unsigned sh) {
+    ((ObjFn)aemu_split_resolve(IDX_glCompileShader))(sh);
+    gl_report("CompileShader", sh, IDX_glGetShaderiv, IDX_glGetShaderInfoLog, 0x8B81);
+}
+__attribute__((visibility("default"))) void glLinkProgram(unsigned p) {
+    ((ObjFn)aemu_split_resolve(IDX_glLinkProgram))(p);
+    gl_report("LinkProgram", p, IDX_glGetProgramiv, IDX_glGetProgramInfoLog, 0x8B82);
 }

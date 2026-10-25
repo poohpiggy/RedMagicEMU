@@ -37,8 +37,23 @@ class RilStub(
             .getOrDefault(false)
     }
 
-    fun serve() = server.start(log)
-    fun stop() = server.stop()
+    /** pre-1.0 RIL.java (M5) connects to the abstract socket "radio-interface"; qemu passes it to the host as is */
+    @Volatile private var oldServer: android.net.LocalServerSocket? = null
+
+    fun serve() {
+        server.start(log)
+        if (api < 3 && oldServer == null) runCatching {
+            val s = android.net.LocalServerSocket("radio-interface")
+            oldServer = s
+            Thread({
+                while (true) {
+                    val c = try { s.accept() } catch (e: Exception) { break }
+                    Thread({ runCatching { serveOne(c) }; runCatching { c.close() } }, "radio-interface-client").start()
+                }
+            }, "radio-interface").start()
+        }.onFailure { log("radio: abstract radio-interface: ${it.message}") }
+    }
+    fun stop() { server.stop(); runCatching { oldServer?.close() }; oldServer = null }
 
     @Volatile private var out: OutputStream? = null
     /** fake call: number and CallState (4 incoming, 0 active); null when idle */
@@ -275,8 +290,11 @@ class RilStub(
     }
 
     private fun dataCall(single: Boolean): ByteArray {
-        if (api < 14) {   // 2.3: cid, interface, address
-            return if (single) strs("1", IFACE, "10.0.2.15") else (le(1) + le(1) + le(2) + str("IP") + str("10.0.2.15"))
+        // 2.3: cid, interface, address (it reads three). 3.x reads dns and gateway from fields 4-5 when there are five;
+        // with fewer it asks NetworkInterface.getByName(rmnet0), which the guest does not have, and phone dies (NPE)
+        if (api < 14) {
+            return if (single) strs("1", IFACE, "10.0.2.15", "8.8.8.8 1.1.1.1", "10.0.2.2")
+            else (le(1) + le(1) + le(2) + str("IP") + str("10.0.2.15"))
         }
         val b = ByteArrayOutputStream()
         b.write(le(RIL_VERSION)); b.write(le(1))
@@ -290,6 +308,7 @@ class RilStub(
     /** First generic ("default") APN of the firmware; 310/260 as a last resort. */
     private fun pickOperator(): Pair<String, String> = runCatching {
         val xml = File(paths.root, "system/etc/apns-conf.xml").readText()
+        val all = ArrayList<Pair<String, String>>()
         for (m in Regex("<apn\\b([^>]*)>", RegexOption.DOT_MATCHES_ALL).findAll(xml)) {
             val a = m.groupValues[1]
             fun attr(n: String) = Regex("\\b$n\\s*=\\s*\"([^\"]*)\"").find(a)?.groupValues?.get(1)
@@ -297,9 +316,15 @@ class RilStub(
             val mnc = attr("mnc") ?: continue
             val type = attr("type")
             if (attr("mvno_type") != null) continue
-            if (type == null || type.contains("default") || type == "*") return@runCatching mcc to mnc
+            if (type == null || type.contains("default") || type == "*") all += mcc to mnc
         }
-        null
+        // the phone's own country first, then the US: the file's first entry may be a country whose language the
+        // firmware's MccTable lacks (2.3 with Greece, 202: locale "null_gr", and resources no longer matched)
+        val host = runCatching {
+            (paths.ctx.getSystemService(android.content.Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager)
+                .simOperator.takeIf { it.length >= 5 }?.substring(0, 3)
+        }.getOrNull()
+        all.firstOrNull { it.first == host } ?: all.firstOrNull { it.first == "310" } ?: all.firstOrNull()
     }.getOrNull() ?: ("310" to "260")
 
     private fun unsol(o: OutputStream, code: Int, data: ByteArray) = runCatching { frame(o, le(1) + le(code) + data) }

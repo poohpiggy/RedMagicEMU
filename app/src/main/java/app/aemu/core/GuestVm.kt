@@ -58,6 +58,8 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             File(root, n).forEachLine { l -> val i = l.indexOf('='); if (i > 0 && !l.startsWith("#")) props[l.substring(0, i).trim()] = l.substring(i + 1).trim() }
         }
         val rcFiles = (root.listFiles()?.filter { it.isFile && it.name.endsWith(".rc") }?.sortedBy { if (it.name == "init.rc") 0 else 1 } ?: emptyList()) +
+            // M3/M5 keep it in /etc
+            listOfNotNull(File(root, "etc/init.rc").takeIf { it.isFile && !File(root, "init.rc").isFile }) +
             InitPlan.hwRcFiles(root, props) +
             listOf("system/etc/init", "vendor/etc/init").flatMap { d -> File(root, d).listFiles()?.filter { it.name.endsWith(".rc") }?.sortedBy { it.name } ?: emptyList() } +
             // 11+: a module's services are declared inside the module (the software codec service)
@@ -143,6 +145,10 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     @Volatile var recoveryMode = false
     /** recovery framebuffer format for the screen view: 0 RGB565, 1 RGBA/RGBX_8888, 2 BGRA_8888 */
     @Volatile var recoveryFormat = 0
+    /** a 32-bit firmware on the arm64 kernel (open32) with the 4.4 engine's GL server: fb0 holds RGB565 frames, as on that engine */
+    val fb565: Boolean get() = engine == Engine.N64 && img.abi != "arm64-v8a" && settings.gpu
+    /** 0.9-1.x: SurfaceFlinger draws RGB565 itself (whatever bpp fbdev reports) and flips between two such pages */
+    val fbLegacy565: Boolean get() = engine == Engine.N64 && img.api < 3
 
     private fun doRecovery() {
         paths.bin.mkdirs()
@@ -189,7 +195,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             .directory(r).redirectErrorStream(true).redirectOutput(File(paths.bin, "recovery.out"))
         pb.environment().clear()
         pb.environment().putAll(mapOf(
-            "PATH" to "/sbin:/system/bin", "LD_LIBRARY_PATH" to ".:/sbin", "ANDROID_ROOT" to "/system", "ANDROID_DATA" to "/data",
+            "PATH" to "/sbin:/system/bin", "LD_LIBRARY_PATH" to ".:/sbin:/system/lib64:/system/lib", "ANDROID_ROOT" to "/system", "ANDROID_DATA" to "/data",
             "EXTERNAL_STORAGE" to "/sdcard", "TZ" to "UTC",
             "LD_PRELOAD" to "/sbin/librecshim.so:/sbin/libaemushim.so", "AEMU_MOUNTS" to "/sdcard:/data:/system:/cache:/emmc:/external_sd:/usb-otg",
             "DHD_FB_W" to "$w", "DHD_FB_H" to "$h", "DHD_IN_W" to "$w", "DHD_IN_H" to "$h",
@@ -252,6 +258,8 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         }
         killLeftovers()
         HostNative.limitStackSafe()
+        LogCap.trimAtBoot(paths)
+        LogCap.watch(paths) { stopping || state == State.STOPPED || state == State.FAILED }
 
         // 1. дерево
         val fixer = TreeFixer(ctx, paths, img, ::log)
@@ -310,7 +318,9 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         overrides["ro.aemu.host"] = if (engine == Engine.N64) "native" else "qemu-user"
         if (engine == Engine.N64) {
             // the phone runs arm64 code only: the 32-bit zygote and its apps go through qemu-arm when it is there
-            if (n64Has32) {
+            // (a whole 32-bit firmware, open32, keeps its own zygote and ABI list)
+            if (img.abi != "arm64-v8a") {
+            } else if (n64Has32) {
                 overrides["ro.zygote"] = "zygote64_32"
                 overrides["ro.product.cpu.abilist"] = "arm64-v8a,armeabi-v7a,armeabi"
                 overrides["ro.product.cpu.abilist64"] = "arm64-v8a"
@@ -331,6 +341,10 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             overrides["dalvik.vm.heapgrowthlimit"] = "${(heap / 2).coerceAtLeast(24)}m"
         }
         if (!s.radio) overrides["ro.radio.noril"] = "true"
+        // 0.9-1.x on open32: the GL boot animation in system_server runs PixelFlinger's generated ARM code, on which qemu-arm faults
+        if (img.api < 3 && engine == Engine.N64) overrides["debug.sf.nobootanimation"] = "1"
+        // 0.9's simulated radio always reports a roaming network: data (and with it the Browser) needs roaming allowed
+        if (img.api < 3) overrides["ro.com.android.dataroaming"] = "true"
         if (!s.hwui) overrides["debug.hwui.renderer"] = "skia"
         // the 64-bit engine has GLES only (bridge or SwiftShader), no Vulkan device: hwui of firmwares that default to
         // Vulkan (HyperOS 2, MediaTek) aborts "Assertion failed: !gpuCount" in system_server's RenderThread
@@ -355,12 +369,23 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             // GLES 3.0, or 3.1 when the phone's contexts have it (the renderer says "ES 3.1 to the guest")
             overrides["ro.opengles.version"] = if (glInfo.contains("ES 3.1 to the guest")) "196609" else "196608"
         }
+        // open32 on Dalvik (4.4 and older): its JIT aborts in the assembler under qemu (dvmAbort; in system_server the
+        // whole system restarts, a black screen); the fast interpreter instead
+        if (open32 && img.api < 21 && !File(paths.dir, "jit32").exists()) overrides["dalvik.vm.execution-mode"] = "int:fast"
         // ART first boot compiles every app with dex2oat under qemu (minutes, single-threaded): by default only
         // skip it (verify-none: ART verifies classes lazily when an app runs) and use several threads; "full compilation" in the settings keeps machine code
         if (img.api >= 21) {
             // (the native arm64 engine too: dex2oat is a 32-bit program there and runs translated; the boot image is
             // still compiled in full, it has its own filter)
             if (!s.fullDexopt) overrides["dalvik.vm.dex2oat-filter"] = "verify-none"
+            // a whole 32-bit firmware on the arm64 kernel (open32): interpreted Java under the translator is what makes
+            // its UI lag (launcher pages ~10 fps, 66-75 compiled), so new and background compiles make machine code;
+            // the first boot stays quick (verify-none) and afterBoot compiles the always-visible apps once
+            if (open32) {
+                overrides["dalvik.vm.dex2oat-filter"] = "speed"
+                for (r in listOf("install", "bg-dexopt", "core-app", "forced-dexopt")) overrides["pm.dexopt.$r"] = "speed"
+                for (r in listOf("first-boot", "boot", "ab-ota", "nsys-library")) overrides["pm.dexopt.$r"] = "verify-none"
+            }
             // 7.0+: PackageManager picks the filter per reason from pm.dexopt.*
             if (img.api >= 24 && !s.fullDexopt && engine != Engine.N64) for (r in listOf("first-boot", "boot", "install", "bg-dexopt", "ab-ota", "core-app", "forced-dexopt", "nsys-library"))
                 overrides["pm.dexopt.$r"] = "verify-none"
@@ -400,6 +425,16 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         overrides["net.dns2"] = "1.1.1.1"
         // в прошивках старая база часовых поясов — передаём текущее смещение, а не название зоны
         overrides["persist.sys.timezone"] = gmtZone()
+        if (img.api < 3) {
+            // pre-1.0 libc takes the zone from /data/timezone, not from the property
+            runCatching { File(paths.root, "data/timezone").writeText(gmtZone()) }
+            // what the SDK emulator's qemu-init.sh sets: telephony simulated in Java (M5 checks "yes"), no ppp
+            overrides["ro.radio.noril"] = "yes"
+            overrides["ro.radio.use-ppp"] = "no"
+            overrides["ro.config.nocheckin"] = "yes"
+            overrides["net.eth0.dns1"] = "8.8.8.8"
+            overrides["net.gprs.local-ip"] = "10.0.2.15"
+        }
         // what init reads after /system/build.prop: the default properties of a system-only image (8.0+) and the
         // vendor's own files (on a Treble image the vendor side is the engine's). Only what the image does not say.
         val later = LinkedHashMap<String, String>()
@@ -447,9 +482,10 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
 
         // 3. службы хоста
         props.serve()
+        if (img.api < 3) props.serveAbstract()
         input.rateHz = s.touchHz
         input.mtMode = s.mtMode
-        input.wide = engine == Engine.N64
+        input.wide = engine == Engine.N64 && img.abi == "arm64-v8a"     // (a 32-bit firmware reads 16-byte events)
         input.serve()
         frames.serve()
         if (s.radio) ril.serve() else log("radio: emulation disabled in settings")
@@ -493,7 +529,9 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             val f = File(paths.root, "dev/.aemu-ram")
             if (kernel.ramBudget) f.writeText((GuestRunner.guestRamMb(img.api, s.ramMb) * 1024L).toString()) else f.delete()
         }
-        lmk = GuestLmk(paths.root, s.lowRam, ::log, s.ramMb).also { it.start() }
+        // internal storage size chosen in the image settings (kernel 23 reports it in statfs)
+        runCatching { File(paths.root, "dev/.aemu-disk").let { if (s.diskMb > 0) it.writeText(s.diskMb.toString()) else it.delete() } }
+        lmk = GuestLmk(paths.root, s.lowRam, ::log, s.ramMb, cgroupSockets = open32).also { it.start() }
         val netCfg = if (s.netProxy) net.start() else GuestRunner.NetConfig()
         runner.sdcardHost = sd
         val r = GuestRunner(paths, img, netCfg.copy(glPath = if (s.gpu) "/dev/socket/gl" else null)).also {
@@ -578,19 +616,20 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             // (well before zygote: apexd of 10+ looks for vold first and only then registers its own service, which the
             // package manager requires)
             if (svc.name == "surfaceflinger" && engine == Engine.N64 && kernel.binderVold && File(paths.root, "system/framework/aemu-stubs.jar").isFile) {
-                synchronized(procs) { procs.remove("aemu-vold") }?.let { runCatching { it.destroyForcibly() } }
+                killOurs(synchronized(procs) { procs.remove("aemu-vold") })
                 startService(GuestService("aemu-vold", listOf("/system/bin/app_process",
                     "-Djava.class.path=/system/framework/aemu-stubs.jar", "/system/bin", "app.aemu.stub.VoldStub") + (if (kernel.volumeAtUserStart) listOf("userstart") else emptyList()), optional = true))
             }
-            // 5.0–7.x: a registered network, otherwise ConnectivityService says "no active network" and browsers stay offline
-            if (svc.name == "zygote" && (if (engine == Engine.N64) kernel.registeredNetwork else img.api in 21..25) && engine != Engine.GB && File(paths.root, "system/framework/aemu-stubs.jar").isFile) {
-                synchronized(procs) { procs.remove("aemu-net") }?.let { runCatching { it.destroyForcibly() } }
+            // 5.0–7.x: a registered network (by the firmware's API: open32 runs 2.3–4.4 on kernel 23, where NetworkAgent
+            // does not exist and the stub died 137/139), otherwise ConnectivityService says "no active network" and browsers stay offline
+            if (svc.name == "zygote" && img.api >= 21 && (if (engine == Engine.N64) kernel.registeredNetwork else img.api in 21..25) && engine != Engine.GB && File(paths.root, "system/framework/aemu-stubs.jar").isFile) {
+                killOurs(synchronized(procs) { procs.remove("aemu-net") })
                 startService(GuestService("aemu-net", listOf("/system/bin/app_process",
                     "-Djava.class.path=/system/framework/aemu-stubs.jar", "/system/bin", "app.aemu.stub.NetStub") + (if (Kernel64.forApi(img.api).ethernetStandIn) listOf("ethernet") else emptyList()), optional = true))
             }
             if (svc.name == "zygote" && engine == Engine.N64 && kernel.apexStandIn && File(paths.root, "system/framework/aemu-stubs.jar").isFile) {
                 apexStandInList()
-                synchronized(procs) { procs.remove("aemu-apex") }?.let { runCatching { it.destroyForcibly() } }
+                killOurs(synchronized(procs) { procs.remove("aemu-apex") })
                 startService(GuestService("aemu-apex", listOf("/system/bin/app_process",
                     "-Djava.class.path=/system/framework/aemu-stubs.jar", "/system/bin", "app.aemu.stub.ApexStub"), optional = true))
             }
@@ -598,7 +637,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             if (svc.name == "zygote" && engine == Engine.N64 && File(paths.root, "system/framework/aemu-stubs.jar").isFile) {
                 val names = Kernel64.forApi(img.api).standInServices.filter { (name, user) ->
                     runCatching { String(File(paths.root, user.substringBefore('#')).readBytes(), Charsets.ISO_8859_1).contains(user.substringAfter('#', name)) }.getOrDefault(false) }.keys
-                synchronized(procs) { procs.remove("aemu-standin") }?.let { runCatching { it.destroyForcibly() } }
+                killOurs(synchronized(procs) { procs.remove("aemu-standin") })
                 if (names.isNotEmpty()) startService(GuestService("aemu-standin", listOf("/system/bin/app_process",
                     "-Djava.class.path=/system/framework/aemu-stubs.jar", "/system/bin", "app.aemu.stub.StandIn") + names, optional = true))
             }
@@ -608,6 +647,17 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         }
         if (!glDone) glUp()
         log("system started: ${alive().joinToString()}")
+        // M3/M5 set no boot property at all: their SurfaceFlinger's "Boot is finished" in the guest log is the sign
+        if (img.api < 3) Thread {
+            val f = File(paths.root, "dev/log/main"); val mark = "Boot is finished".toByteArray()
+            val start = bootAt
+            val from = f.length()                 // (the log keeps earlier boots)
+            while (bootDoneAt == 0L && bootAt == start && state != State.FAILED && state != State.STOPPED) {
+                val hit = runCatching { f.readBytes().let { d -> (minOf(from, d.size.toLong()).toInt()..d.size - mark.size).any { i -> mark.indices.all { d[i + it] == mark[it] } } } }.getOrDefault(false)
+                if (hit) { booted(); break }
+                Thread.sleep(1000)
+            }
+        }.apply { isDaemon = true }.start()
         watchdog()
     }
 
@@ -644,7 +694,14 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         paths.glSock.parentFile?.mkdirs()
         paths.glSock.delete()
         when (engine) {
-            Engine.N64 -> {
+            Engine.N64 -> if (img.abi != "arm64-v8a") {
+                // a whole 32-bit firmware (open32): the 4.4 engine's GL server draws its frames into fb0, as on that engine
+                log("GPU bridge: standalone glserverd (open32)")
+                spawn("glserverd", listOf(paths.nativeBin(Engine.KK.glserverd).absolutePath,
+                    "-s", paths.glSock.absolutePath, "-fb", paths.fb.absolutePath,
+                    "-notify", paths.frameSock.absolutePath, "-w", "$w", "-h", "$h"), glServerEnv())
+                waitFor("GL bridge socket", 10_000) { paths.glSock.exists() }
+            } else {
                 log("native arm64: graphics are served by the engine's own HALs")
                 // ...except for 32-bit programs, which draw through the 4.4 engine's GPU bridge (its frame file is not shown)
                 if (kernel.gpuBridge32 != null && n64Has32) {
@@ -770,11 +827,20 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             if (!direct) runCatching {
                 OutputStreamWriter(FileOutputStream(log, true)).use { w ->
                     w.write("\n=== $name ${stamp()} ===\n")
-                    p.inputStream.bufferedReader().forEachLine { w.write(it); w.write("\n"); w.flush() }
+                    // a looping service once wrote 455 MB in one run: past the cap the output is only drained
+                    var n = 0L; var cut = false
+                    p.inputStream.bufferedReader().forEachLine {
+                        if (n < LogCap.SERVICE_RUN) { w.write(it); w.write("\n"); w.flush(); n += it.length + 1 }
+                        else if (!cut) { cut = true; w.write("=== output cut at ${LogCap.SERVICE_RUN shr 20} MB ===\n"); w.flush() }
+                    }
                 }
             }
             val code = runCatching { p.waitFor() }.getOrDefault(-1)
-            if (!stopping) log("· $name exited, code $code")
+            if (!stopping) {
+                log("· $name exited, code $code")
+                // (a process the engine stopped itself - boot animation, planned restart - is not a crash)
+                if (code != 0 && !ourKills.remove(p)) LogCap.crash(paths, name, code, if (name == "zygote" && code == 137) systemServerDeath() else null)
+            }
             // a restarted service is already running again under this name
             synchronized(procs) { if (procs[name].let { it == null || it === p }) props.put("init.svc.$name", "stopped") }
         }, "log-$name").apply { isDaemon = true; start() }
@@ -845,7 +911,18 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         if (k == "service.bootanim.exit" && v == "0" && engine == Engine.N64 && kernel.clientComposition)
             Thread { clientComposition() }.start()
         if (k == "service.bootanim.exit" && v == "1" && screenUpAt == 0L) screenUpAt = System.currentTimeMillis()
-        if ((k == "sys.boot_completed" || k == "dev.bootcomplete") && v == "1" && bootDoneAt == 0L) {
+        // The animation notices the request late or never (open32, and the N64 kernels too: 7.1 on kernel 25), and
+        // 7.x WindowManager keeps the screen off and input frozen until init.svc.bootanim is "stopped" (BOOT_TIMEOUT,
+        // 30 s): the "frozen" half minute at the end of boot. It gets 1.5 s.
+        if (k == "service.bootanim.exit" && v == "1") Thread {
+            Thread.sleep(1500)
+            killOurs(synchronized(procs) { procs["bootanim"]?.takeIf { it.isAlive }?.let { procs.remove("bootanim") } })
+        }.start()
+        if ((k == "sys.boot_completed" || k == "dev.bootcomplete") && v == "1") booted()
+    }
+
+    @Synchronized private fun booted() {
+        if (bootDoneAt == 0L) {
             bootDoneAt = System.currentTimeMillis()
             everBooted = true
             log("★ system booted in ${(bootDoneAt - bootAt) / 1000} s")
@@ -914,7 +991,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
                 // app creating a sound (the phone process, ToneGenerator) got an ANR.
                 val p = synchronized(procs) { procs.remove("bootanim") } ?: return
                 Thread {
-                    runCatching { if (!p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) p.destroyForcibly() }
+                    runCatching { if (!p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) killOurs(p) }
                 }.start()
                 return
             }
@@ -928,13 +1005,20 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         }
         val def = plan.firstOrNull { it.name == svc } ?: InitPlan.optional(svc, img, paths.root)
         if (def == null) { log("ctl.${if (start) "start" else "stop"} $svc: no such service"); return }
-        synchronized(procs) { procs.remove(svc) }?.destroyForcibly()
+        killOurs(synchronized(procs) { procs.remove(svc) })
         if (start) Thread { runCatching { startService(def) } }.start()
     }
 
     private fun afterBoot() {
         val r = guestRunner
         if (skipWizardNow()) return   // the system comes up again and gets here once more
+        // open32: right after the boot completes a dozen Google apps wake up at once, each 100-250 MB under the
+        // translator; the host runs out of memory and swaps (kswapd at 100%), the screen stands still for ~15 s and
+        // LMK kills and restarts them in a loop. Two background processes at most (AMS setProcessLimit, 7.x code 51).
+        // 2.x-4.x: vendor launchers keep providers in processes of their own (TouchWiz BadgeProvider); with two slots AMS
+        // exits that "empty" process and kills TwLauncher with it ("provider in dying process", forum: TwLauncher crashes)
+        if (open32) runCatching { guestShell("service call activity 51 i32 ${if (img.api < 21) 6 else 2}", 15_000) }
+        if (open32 && img.api >= 24) Thread { compileVisibleApps() }.start()   // "cmd package compile" is 7.0+
         // (again: something in the first seconds after the boot completes turns it back off, and it is not known what;
         // a call made half a minute later stays)
         if (engine == Engine.N64 && kernel.clientComposition) Thread {
@@ -974,7 +1058,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             plannedRestart = true
             log("first boot: setup wizard ($wizard) switched off in the running system, restarting it")
             runCatching { guestShell("settings put global device_provisioned 1; settings put secure user_setup_complete 1; pm disable-user --user 0 $wizard", 60_000) }
-            synchronized(procs) { procs["zygote"] }?.let { z -> pidOf(z)?.let { runCatching { AProcess.sendSignal(it, 9) } } }
+            killZygoteOurs()
             return true
         }
         val pkgs = runCatching { pkgFile.readText() }.getOrNull() ?: return false
@@ -985,7 +1069,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         wizardSkipped = true
         plannedRestart = true
         log("first boot: restarting the system past the setup wizard ($wizard)")
-        synchronized(procs) { procs["zygote"] }?.let { z -> pidOf(z)?.let { runCatching { AProcess.sendSignal(it, 9) } } }
+        killZygoteOurs()
         return true
     }
 
@@ -1055,7 +1139,8 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
                     if (name == "zygote" || name == "zygote_secondary") {
                         if (state != State.FAILED && bootDoneAt == 0L && !(everBooted && zygoteRestarts < 6)) {
                             failure = "$name exited (code $code)" + if (code == 137) " — killed: the phone ran out of memory, or system_server died and took zygote with it (see the guest log)" else ""
-                            if (code == 137 && guestLogHas("No original dex files found"))
+                            // (not "No original dex files found": our own `input`/`wm` helpers log that for unrelated jars)
+                            if (code == 137 && guestLogHas("ClassNotFoundException: com.android.server.SystemServer"))
                                 failure = "system_server cannot start: the precompiled code of the framework (system/framework/oat) is missing from this container — import the firmware again"
                             log("✖ $failure"); setState(State.FAILED)
                         } else if (plannedRestart) {
@@ -1090,7 +1175,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
                         log("✖ surfaceflinger crashed (code $code), restarting it and the system (${n + 1}/12)")
                         synchronized(procs) { procs.remove(name) }
                         runCatching { startService(svc) }
-                        synchronized(procs) { procs["zygote"] }?.let { z -> pidOf(z)?.let { runCatching { AProcess.sendSignal(it, 9) } } }
+                        killZygoteOurs()
                         continue
                     }
                     // родной audio_policy производителя может падать с нашим HAL — подменяем на AOSP
@@ -1153,6 +1238,41 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     }
 
     @Volatile private var plannedRestart = false
+
+    /** processes the engine itself stopped: their exits are not crashes (run/crashes.log is the crash statistics) */
+    private val ourKills: MutableSet<Process> = java.util.Collections.synchronizedSet(java.util.Collections.newSetFromMap(java.util.IdentityHashMap()))
+
+    private fun killOurs(p: Process?) { if (p != null) { ourKills.add(p); runCatching { p.destroyForcibly() } } }
+
+    private fun killZygoteOurs() {
+        synchronized(procs) { procs["zygote"] }?.let { z -> ourKills.add(z); pidOf(z)?.let { runCatching { AProcess.sendSignal(it, 9) } } }
+    }
+
+    /**
+     * zygote kills itself (SIGKILL, exit 137) when system_server dies (SigChldHandler in com_android_internal_os_Zygote.cpp,
+     * dalvik_system_Zygote.c before 5.0). The reason is in the guest log: the uncaught exception (RuntimeInit's
+     * "FATAL EXCEPTION IN SYSTEM PROCESS"), the watchdog ("WATCHDOG KILLING SYSTEM PROCESS") or a native crash.
+     */
+    private fun systemServerDeath(): String? = runCatching {
+        val markers = listOf("FATAL EXCEPTION IN SYSTEM PROCESS", "WATCHDOG KILLING SYSTEM PROCESS", ">>> system_server <<<")
+        var best: Pair<Long, String>? = null
+        for (buf in listOf("main", "system", "crash")) {
+            val f = File(paths.root, "dev/log/$buf")
+            if (!f.isFile) continue
+            val len = f.length(); val n = minOf(len, 2_000_000L).toInt()
+            val b = ByteArray(n)
+            java.io.RandomAccessFile(f, "r").use { r -> r.seek(len - n); r.readFully(b) }
+            val t = String(b, Charsets.ISO_8859_1)
+            for (m in markers) {
+                val i = t.lastIndexOf(m); if (i < 0) continue
+                // the ring is raw logger entries: keep the printable text after the marker
+                val tail = t.substring(i, minOf(t.length, i + 600)).map { if (it in ' '..'~') it else ' ' }.joinToString("")
+                    .replace(Regex(" {2,}"), " ").take(240)
+                if (best == null || f.lastModified() > best!!.first) best = f.lastModified() to tail
+            }
+        }
+        best?.second
+    }.getOrNull()
     private var wizardSkipped = false
 
     private fun restartZygote() {
@@ -1165,15 +1285,29 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         // держат ссылки на мёртвые службы (телефония отказывает новому system_server в правах)
         val n = killZygoteChildren()
         if (n > 0) log("killed apps of previous zygote: $n")
+        // servicemanager can leave together with system_server (Redmi 4 MIUI 9: exit 0); init restarts it and then,
+        // by its "onrestart" lines, every daemon that registered there - else the new system_server finds no services
+        val sm = img.services.firstOrNull { it.name == "servicemanager" }
+        if (sm != null && synchronized(procs) { procs["servicemanager"] }?.isAlive != true) {
+            synchronized(procs) { procs.remove("servicemanager") }
+            runCatching { startService(sm) }
+            Thread.sleep(300)
+            for (name in listOf("surfaceflinger", "mediaserver", "drmserver", "keystore", "gatekeeperd")) {
+                val s = img.services.firstOrNull { it.name == name } ?: continue
+                synchronized(procs) { procs.remove(name) }?.let { killOurs(it); runCatching { it.waitFor() } }
+                runCatching { startService(s) }
+            }
+            log("servicemanager was gone: restarted it and the daemons registered there")
+        }
         // healthd keeps the battery listener of the dead system_server and stops answering the new one:
         // BatteryService.onStart then blocks in registerListener forever
         img.services.firstOrNull { it.name == "healthd" }?.let { h ->
-            synchronized(procs) { procs.remove("healthd") }?.let { runCatching { it.destroyForcibly() } }
+            killOurs(synchronized(procs) { procs.remove("healthd") })
             runCatching { startService(h) }
         }
         runCatching { startService(z) }
         img.services.firstOrNull { it.name == "zygote_secondary" }?.let { z2 ->
-            synchronized(procs) { procs.remove("zygote_secondary") }?.let { runCatching { it.destroyForcibly() } }
+            killOurs(synchronized(procs) { procs.remove("zygote_secondary") })
             runCatching { startService(z2) }
         }
     }
@@ -1223,7 +1357,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         log("stopping system")
         runCatching { guestRunner.run(listOf("/system/bin/sync"), 5_000) }
         killAll()
-        adb.stop(); props.stop(); input.stop(); frames.stop(); ril.stop(); vold.stop(); audio.stop(); net.stop(); dns.stop(); events.stop(); logd.stop(); lights.stop(); sensors.stop(); mic.stop(); camera.stop(); GlHost.stop()
+        adb.stop(); props.stop(); props.stopAbstract();input.stop(); frames.stop(); ril.stop(); vold.stop(); audio.stop(); net.stop(); dns.stop(); events.stop(); logd.stop(); lights.stop(); sensors.stop(); mic.stop(); camera.stop(); GlHost.stop()
         extraStubs.forEach { it.stop() }; extraStubs.clear()
         lmk?.stop(); lmk = null
         Keeper.release(ctx)
@@ -1263,6 +1397,26 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
      * The PATH of 2.3–4.x starts with /sbin: am/pm/input then look up "app_process" there first and qemu gives up
      * ("Error while loading …/sbin/app_process"), so every menu action that ran such a script failed.
      */
+    private val open32: Boolean get() = engine == Engine.N64 && img.abi != "arm64-v8a"
+
+    /** open32: the launcher, SystemUI and Settings in machine code, once per image (a marker in run/ remembers it) */
+    private fun compileVisibleApps() = runCatching {
+        val mark = File(paths.bin, "compiled.speed")
+        if (mark.isFile) return@runCatching
+        Thread.sleep(20_000)            // the first minute is busy enough (media scan, Google services)
+        val home = guestShell("cmd package resolve-activity --brief -c android.intent.category.HOME -a android.intent.action.MAIN | tail -1", 30_000)
+            .trim().substringBefore('/').takeIf { it.isNotEmpty() && ' ' !in it }
+        val pkgs = listOfNotNull(home, "com.android.systemui", "com.android.settings").distinct()
+        var ok = 0
+        for (p in pkgs) {
+            if (state != State.RUNNING) return@runCatching
+            val out = guestShell("cmd package compile -m speed $p", 600_000)
+            if ("Success" in out) ok++ else if ("could not be compiled" in out) ok++ else log("compile $p: ${out.trim().lines().lastOrNull()}")
+        }
+        log("apps compiled to machine code: $ok of ${pkgs.size}")
+        if (ok > 0) mark.writeText(pkgs.joinToString(" "))
+    }
+
     fun guestShell(cmd: String, timeoutMs: Long = 60_000): String =
         guestRunner.run(listOf("/system/bin/sh", "-c", shellPrefix + cmd), timeoutMs).second
 
@@ -1275,7 +1429,8 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
      * never returns. Jar and class come from each tool's own script in /system/bin.
      */
     private val toolWrappers: String by lazy {
-        val stubs = "/system/framework/aemu-stubs.jar"
+        // pre-1.0 dalvik reads only dex 013 (aemu-stubs.jar is dex 035): there Run comes from aemu-run013.jar
+        val stubs = if (img.api < 3) "/system/framework/aemu-run013.jar" else "/system/framework/aemu-stubs.jar"
         if (!File(paths.root, stubs.removePrefix("/")).isFile) return@lazy ""
         val sb = StringBuilder()
         File(paths.root, "system/bin").listFiles()?.forEach { f ->

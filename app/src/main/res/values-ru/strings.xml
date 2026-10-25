@@ -210,4 +210,9 @@
     <string name="m_vnc_started">VNC: %1$s, пароль %2$s</string>
     <string name="as_led">Световой индикатор</string>
     <string name="as_led_sub">Показывать светодиод телефона-гостя над экраном</string>
+    <string name="m_apps">Приложения прошивки</string>
+    <string name="m_apps_none">Нечего запускать</string>
+    <string name="vs_disk">Внутренняя память</string>
+    <string name="m_apps_search">Поиск приложений</string>
+    <string name="powered_off">Гость выключен</string>
 </resources>

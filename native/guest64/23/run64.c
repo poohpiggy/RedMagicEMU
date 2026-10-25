@@ -33,7 +33,7 @@ enum {
     NR_mknodat = 33, NR_mkdirat = 34, NR_unlinkat = 35, NR_symlinkat = 36, NR_linkat = 37, NR_renameat = 38,
     NR_umount2 = 39, NR_mount = 40, NR_statfs = 43, NR_truncate = 45, NR_ftruncate = 46, NR_faccessat = 48,
     NR_chdir = 49, NR_chroot = 51, NR_fchmodat = 53, NR_fchownat = 54, NR_fchown = 55, NR_openat = 56, NR_close = 57,
-    NR_lseek = 62, NR_read = 63, NR_write = 64, NR_pread64 = 67, NR_pwrite64 = 68, NR_readlinkat = 78, NR_newfstatat = 79, NR_fstat = 80,
+    NR_lseek = 62, NR_read = 63, NR_write = 64, NR_pread64 = 67, NR_pwrite64 = 68, NR_pselect6 = 72, NR_readlinkat = 78, NR_newfstatat = 79, NR_fstat = 80,
     NR_timerfd_create = 85, NR_utimensat = 88, NR_capget = 90, NR_capset = 91, NR_exit_group = 94, NR_unshare = 97,
     NR_sched_yield = 124, NR_rt_sigaction = 134, NR_rt_sigprocmask = 135, NR_reboot = 142,
     NR_setregid = 143, NR_setgid = 144, NR_setreuid = 145, NR_setuid = 146, NR_setresuid = 147, NR_getresuid = 148,
@@ -85,6 +85,7 @@ static char g_exe[PATH_MAX];    // guest view of the running program
 static int g_uid, g_gid;        // the ids the guest believes it has
 static u32 g_real_uid;
 static char g_qemu[512];        // qemu-arm for the firmware's 32-bit programs (AEMU64_QEMU)
+static char g_arm32[512];       // the 32-bit kernel, on a phone that executes AArch32 (AEMU64_ARM32)
 static int g_crash;
 static u64 g_logdev, g_logino;      // the service log on descriptor 2 (a file or a pipe to the app)
 static int g_logpipe;
@@ -256,6 +257,61 @@ static long fake_memfile(const char *name, const char *content, u64 len) {
     return fd;
 }
 
+// ---------------------------------------------------------------------------------------------------- memory budget
+// /proc/meminfo scaled to the RAM the image is given (<root>/dev/.aemu-ram, in kB): the guest would otherwise see all
+// of the phone's memory and size its background by it (ColorOS 14 on a 12 GB phone: 128 cached processes, 150 in
+// all, 11 GB resident and the phone in swap).
+static long meminfo_open(void) {
+    static char in[8192], out[10240];
+    char p[512], d[24];
+    if (g_rootlen > 400) return -1;
+    memcpy(p, g_root, g_rootlen); memcpy(p + g_rootlen, "/dev/.aemu-ram", 15);
+    long fd = S4(NR_openat, AT_FDCWD, p, 02000000, 0);
+    if (fd < 0) return -1;
+    long n = S3(NR_read, fd, d, sizeof d - 1); S1(NR_close, fd);
+    if (n <= 0) return -1;
+    d[n] = 0;
+    u64 ram = atou(d), total = 0;
+    fd = S4(NR_openat, AT_FDCWD, "/proc/meminfo", 02000000, 0);
+    if (fd < 0) return -1;
+    n = S3(NR_read, fd, in, sizeof in - 1); S1(NR_close, fd);
+    if (n <= 0 || !ram) return -1;
+    in[n] = 0;
+    if (pre(in, "MemTotal:")) { const char *q = in + 9; while (*q == ' ') q++; total = atou(q); }
+    if (!total || total == ram) return -1;   // also above the phone's own: the slider goes past 4 GB
+    u64 o = 0;
+    for (const char *l = in; *l && o < sizeof out - 96; ) {
+        const char *e = l; while (*e && *e != '\n') e++;
+        const char *c = l; while (c < e && *c != ':') c++;
+        const char *v = c < e ? c + 1 : e; while (v < e && *v == ' ') v++;
+        const char *u = v; while (u < e && *u >= '0' && *u <= '9') u++;
+        if (u > v && u + 3 <= e && u[1] == 'k' && u[2] == 'B') {            // "Name:   <n> kB": the share of the budget
+            memcpy(out + o, l, (u64)(v - l)); o += (u64)(v - l);
+            char *t = utoa(atou(v) * ram / total, d + sizeof d);
+            memcpy(out + o, t, slen(t)); o += slen(t);
+            memcpy(out + o, u, (u64)(e - u)); o += (u64)(e - u);
+        } else { memcpy(out + o, l, (u64)(e - l)); o += (u64)(e - l); }
+        out[o++] = '\n';
+        l = *e ? e + 1 : e;
+    }
+    return fake_memfile("aemu-meminfo", out, o);
+}
+
+// internal storage size from the image settings (<root>/dev/.aemu-disk, in MB; absent: derived from the phone's)
+static u64 disk_bytes(void) {
+    static long cached = -1;
+    if (cached >= 0) return (u64)cached;
+    char p[512], d[24];
+    cached = 0;
+    if (g_rootlen > 400) return 0;
+    memcpy(p, g_root, g_rootlen); memcpy(p + g_rootlen, "/dev/.aemu-disk", 16);
+    long fd = S4(NR_openat, AT_FDCWD, p, 02000000, 0);
+    if (fd < 0) return 0;
+    long n = S3(NR_read, fd, d, sizeof d - 1); S1(NR_close, fd);
+    if (n > 0) { d[n] = 0; cached = (long)(atou(d) << 20); }
+    return (u64)cached;
+}
+
 // ---------------------------------------------------------------------------------------------------- netlink emulation
 struct aemu_nlmsghdr {
     u32 len;
@@ -338,6 +394,20 @@ struct sockaddr_un { u16 family; char path[108]; };
 // /dev/graphics/fb0 is a plain file of two RGBX pages (the app's screen view maps it); the guest's gralloc asks
 // the usual fbdev questions, answered here from <root>/dhd.fbgeom ("width height").
 static u32 g_fbw, g_fbh;
+static int g_fb16;
+// installd of 0.9-1.x serves only the system uid (SO_PEERCRED must read 1000, not root): is this process installd?
+static int self_is_installd(void) {
+    static int known = -1;
+    if (known >= 0) return known;
+    char d[512]; known = 0;
+    long fd = S4(NR_openat, AT_FDCWD, "/proc/self/cmdline", 02000000, 0);
+    if (fd < 0) return 0;
+    long n = S3(NR_read, fd, d, sizeof d - 1); S1(NR_close, fd);
+    for (long i = 0; i + 8 <= n; i++)
+        if (d[i] == 'i' && d[i+1] == 'n' && d[i+2] == 's' && d[i+3] == 't' && d[i+4] == 'a' && d[i+5] == 'l' && d[i+6] == 'l' && d[i+7] == 'd') { known = 1; break; }
+    return known;
+}
+
 
 static void fb_geom(void) {
     char p[600], t[64];
@@ -353,6 +423,9 @@ static void fb_geom(void) {
     while (*q >= '0' && *q <= '9') q++;
     while (*q == ' ') q++;
     u32 h = (u32)atou(q);
+    while (*q >= '0' && *q <= '9') q++;
+    while (*q == ' ') q++;
+    if (atou(q) == 16) g_fb16 = 1;   // pre-1.0: report RGB565 (M3 SurfaceFlinger wants 16 bits)
     if (w && h) { g_fbw = w; g_fbh = h; }
 }
 
@@ -364,19 +437,23 @@ static long fb_ioctl(u32 cmd, u64 arg) {
         memset(v, 0, 160);
         v[0] = g_fbw; v[1] = g_fbh; v[2] = g_fbw; v[3] = g_fbh; v[6] = 32;   // one page: gralloc copies each frame in on post
         v[8] = 0; v[9] = 8; v[11] = 8; v[12] = 8; v[14] = 16; v[15] = 8; v[17] = 24; v[18] = 8;   // R, G, B, A
+        if (g_fb16) { v[6] = 16; v[8] = 11; v[9] = 5; v[11] = 5; v[12] = 6; v[14] = 0; v[15] = 5; v[17] = 0; v[18] = 0; }
         return 0;
     }
     case 0x4602: {                              // FBIOGET_FSCREENINFO
         u8 *f = (u8 *)arg;
         memset(f, 0, 80);
         memcpy(f, "aemu", 5);
-        *(u32 *)(f + 24) = g_fbw * g_fbh * 4;       // smem_len
+        *(u32 *)(f + 24) = g_fbw * g_fbh * 4 * 2;   // smem_len: the file holds two pages (0.9-1.x flip between them)
         *(u32 *)(f + 36) = 2;                       // FB_VISUAL_TRUECOLOR
         *(u16 *)(f + 42) = 1;                       // ypanstep
-        *(u32 *)(f + 48) = g_fbw * 4;               // line_length
+        *(u32 *)(f + 48) = g_fbw * (g_fb16 ? 2 : 4);  // line_length
         return 0;
     }
-    case 0x4601: case 0x4606: case 0x4611: return 0;    // PUT_VSCREENINFO, PAN_DISPLAY, BLANK
+    // PUT_VSCREENINFO: fb0 has one page. 0.9-1.x EGLDisplaySurface asks for two and trusts a 0 without reading back,
+    // then flips into a page that does not exist; refused, it renders into its own back buffer
+    case 0x4601: return 0;
+    case 0x4606: case 0x4611: return 0;                 // PAN_DISPLAY, BLANK
     }
     return -25; /* ENOTTY */
 }
@@ -402,6 +479,22 @@ static long input_open(long flags) {
     return s;
 }
 
+// /dev/cpuctl/tasks, /dev/cpuctl/bg_non_interactive/tasks: there is no cpu cgroup for the guest. The firmware's
+// libcutils writes each thread it moves into one of them; the app (GuestLmk) listens on a datagram socket of that name
+// in the image and lowers or restores the thread's priority, so the background (a boot's dozen woken apps) stays
+// behind the screen. Non-blocking: a busy listener loses a move, never stalls the system.
+static long cg_open(const char *path, long flags) {
+    struct sockaddr_un sa; sa.family = 1;
+    u64 l = slen(path);
+    if (g_rootlen + l + 1 > sizeof sa.path) return -ENOENT;
+    memcpy(sa.path, g_root, g_rootlen); memcpy(sa.path + g_rootlen, path, l + 1);
+    long s = S3(NR_socket, 1, 2 | 04000 | (flags & 02000000), 0);
+    if (s < 0) return s;
+    long r = S3(NR_connect, s, &sa, 2 + g_rootlen + l + 1);
+    if (r < 0) { S1(NR_close, s); return -ENOENT; }
+    return s;
+}
+
 static void setbit(u8 *m, u64 len, u32 bit) { if (bit / 8 < len) m[bit / 8] |= (u8)(1 << (bit % 8)); }
 
 static long input_ioctl(u32 cmd, u64 arg) {
@@ -418,16 +511,19 @@ static long input_ioctl(u32 cmd, u64 arg) {
         memset(out, 0, len);
         switch (nr - 0x20) {
         case 0: setbit(out, len, 0); setbit(out, len, 1); setbit(out, len, 3); break;
-        case 1: for (u32 k = 1; k < 0xf0; k++) setbit(out, len, k); setbit(out, len, 580); break;
-        case 3: setbit(out, len, 48); setbit(out, len, 50); setbit(out, len, 53); setbit(out, len, 54); setbit(out, len, 57); break;
+        case 1: for (u32 k = 1; k < 0xf0; k++) setbit(out, len, k); setbit(out, len, 580); setbit(out, len, 330); break;   // + BTN_TOUCH
+        // ABS_X/Y/PRESSURE too: 0.9-1.6 know single touch only (the app sends it for them, mtMode 4); later readers prefer MT
+        case 3: setbit(out, len, 0); setbit(out, len, 1); setbit(out, len, 24); setbit(out, len, 48); setbit(out, len, 50); setbit(out, len, 53); setbit(out, len, 54); setbit(out, len, 57); break;
         }
         return len;
     }
     if (nr >= 0x40 && nr < 0x80) {                                               // EVIOCGABS(axis)
-        int *a = (int *)arg; u32 ax = nr - 0x40;
-        memset(a, 0, 24);
-        if (ax == 53) a[2] = (int)g_fbw - 1; else if (ax == 54) a[2] = (int)g_fbh - 1;
+        // the size comes from the request: 2.3's input_absinfo has no resolution (20 bytes, not 24) and the
+        // extra word overwrote InputReader's saved registers
+        int a[6] = { 0, 0, 0, 0, 0, 0 }; u32 ax = nr - 0x40;
+        if (ax == 53 || ax == 0) a[2] = (int)g_fbw - 1; else if (ax == 54 || ax == 1) a[2] = (int)g_fbh - 1; else if (ax == 24) a[2] = 255;
         else if (ax == 48 || ax == 50) a[2] = 255; else if (ax == 57) a[2] = 31; else return -EINVAL;
+        memcpy((void *)arg, a, len < 24 ? len : 24);
         return 0;
     }
     if (nr == 0x90 || nr == 0xa0 || nr == 0x03) return 0;                        // grab, clock id, repeat
@@ -447,7 +543,7 @@ static long do_exec(const char *path, char *const argv[], char *const envp[]) {
     u64 na = 0, ne = 0;
     if (argv) while (argv[na]) na++;
     if (envp) while (envp[ne]) ne++;
-    u64 need = (na + ne + 24) * sizeof(char *);
+    u64 need = (na + ne + 27) * sizeof(char *);
     char **v = (char **)S6(NR_mmap, 0, need, 3, 0x22, -1, 0);
     if ((u64)v >= (u64)-4095) return -ENOMEM;
     char **a = v, **e;
@@ -470,8 +566,11 @@ static long do_exec(const char *path, char *const argv[], char *const envp[]) {
     s = utoa((u64)g_gid, t + sizeof t); memcpy(e_id + o, s, slen(s) + 1);
     *a++ = e_id; *a++ = e_f;
     if (g_crash) *a++ = "AEMU64_CRASH=1";
+    if (g_b32) *a++ = "AEMU64_B32=1";
     static char e_input[130];
     if (g_input[0]) { memcpy(e_input, "AEMU64_INPUT=", 13); memcpy(e_input + 13, g_input, slen(g_input) + 1); *a++ = e_input; }
+    static char e_a32[540];
+    if (g_arm32[0]) { memcpy(e_a32, "AEMU64_ARM32=", 13); memcpy(e_a32 + 13, g_arm32, slen(g_arm32) + 1); *a++ = e_a32; }
     static char e_qemu[540];
     if (g_qemu[0]) { memcpy(e_qemu, "AEMU64_QEMU=", 12); memcpy(e_qemu + 12, g_qemu, slen(g_qemu) + 1); *a++ = e_qemu; }
     static char e_sd[540];
@@ -561,6 +660,56 @@ static long trap(long nr, long *a, void *uc) {
     return r;
 }
 
+/* /dev/alarm (Android up to 4.4): without it 2.3's AlarmManager falls back to a Handler that takes the RTC
+ * time for uptime, so TIME_TICK never comes (the clock stood still, alarms never fired). One host timerfd per
+ * alarm type: RTC types on CLOCK_REALTIME, ELAPSED ones on CLOCK_BOOTTIME; WAIT polls them. */
+static int g_al[4] = { -1, -1, -1, -1 };
+static long alarm_open(void) {
+    if (g_al[0] < 0)
+        for (int t = 0; t < 4; t++) g_al[t] = (int)S2(NR_timerfd_create, t < 2 ? 0 : 7, 02000000 /*CLOEXEC*/);
+    return g_al[0] < 0 ? g_al[0] : S1(23 /*dup*/, g_al[0]);
+}
+/* Every open of /dev/alarm is a dup of g_al[0]; 4.x opens it in several places (SystemClock, AlarmManager),
+ * so match by inode instead of remembering one fd (the others got ENOTTY and AlarmManager spun on WAIT). */
+static int is_alarm_fd(int fd) {
+    struct kstat a, b;
+    return g_al[0] >= 0 && S2(NR_fstat, fd, &a) == 0 && S2(NR_fstat, g_al[0], &b) == 0 &&
+           a.st_ino == b.st_ino && a.st_dev == b.st_dev;
+}
+static long alarm_ioctl(u32 cmd, u64 arg) {
+    u32 nr = cmd & 0xff, type = (nr >> 4) & 0xf, op = nr & 0xf;
+    int *ts = (int *)G(arg);
+    struct { long s, ns; } now;
+    if (op == 4) {                              /* GET_TIME */
+        S2(113 /*clock_gettime*/, type < 2 ? 0 : type < 4 ? 7 : 1, &now);
+        if (ts) { ts[0] = (int)now.s; ts[1] = (int)now.ns; }
+        return 0;
+    }
+    if (op == 5 && nr == 5) return 0;          /* SET_RTC: the phone's clock is not ours to change */
+    if (type > 3) return -EINVAL;
+    if (op == 0) {                              /* CLEAR */
+        long z[4] = { 0, 0, 0, 0 };
+        S4(86 /*timerfd_settime*/, g_al[type], 1, z, 0);
+        return 0;
+    }
+    if (op == 2 || op == 3) {                   /* SET, SET_AND_WAIT */
+        long v[4] = { 0, 0, ts ? ts[0] : 0, ts ? ts[1] : 0 };
+        if (v[2] <= 0 && v[3] <= 0) v[3] = 1;   /* zero disarms a timerfd; the alarm is due now */
+        S4(86, g_al[type], 1 /*ABSTIME*/, v, 0);
+        if (op == 2) return 0;
+    }
+    if (op == 1 || op == 3) {                   /* WAIT: mask of the types that fired */
+        struct { int fd; short ev, rev; } p[4];
+        for (int t = 0; t < 4; t++) { p[t].fd = g_al[t]; p[t].ev = 1; p[t].rev = 0; }
+        long r = S5(73 /*ppoll*/, p, 4, 0, 0, 0);
+        if (r < 0) return r;
+        long mask = 0; u64 cnt;
+        for (int t = 0; t < 4; t++) if (p[t].rev & 1) { S3(NR_read, g_al[t], &cnt, 8); mask |= 1L << t; }
+        return mask;
+    }
+    return -EINVAL;
+}
+
 #define PB(i) ((*pbp ? *pbp : (*pbp = pb_get())) + (i) * PATH_MAX)
 
 static long trap2(long nr, long *a, void *uc, char **pbp) {
@@ -575,7 +724,13 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
                 }
                 if (seq(P(1), "/dev/binder") || seq(P(1), "/dev/hwbinder") || seq(P(1), "/dev/vndbinder")) return binder_open(a[2], P(1));
                 if (pre(P(1), "/dev/input/event")) return input_open(a[2]);
+                if (seq(P(1), "/dev/alarm")) return alarm_open();
+                if (seq(P(1), "/dev/cpuctl/tasks") || seq(P(1), "/dev/cpuctl/bg_non_interactive/tasks")) return cg_open(P(1), a[2]);
+                // 4.4 (open32) keeps its groups under apps/; a failed move makes setThreadPriority throw in system_server
+                if (seq(P(1), "/dev/cpuctl/apps/tasks")) return cg_open("/dev/cpuctl/tasks", a[2]);
+                if (seq(P(1), "/dev/cpuctl/apps/bg_non_interactive/tasks")) return cg_open("/dev/cpuctl/bg_non_interactive/tasks", a[2]);
             }
+            if (seq(P(1), "/proc/meminfo")) { long r = meminfo_open(); if (r >= 0) return r; }
             u64 pl = slen(P(1));
             if (pre(P(1), "/proc/") && ((pl >= 13 && seq(P(1) + pl - 13, "/attr/current")) || (pl >= 10 && seq(P(1) + pl - 10, "/attr/exec")))) {
                 return fake_memfile("aemu-attr", "u:r:su:s0\n", 10);
@@ -590,7 +745,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
                     if (n < 0) n = 0;
                     t[n] = 0;
                     u64 l = slen(t);
-                    if (l > 16 && pre(t + l - 16, "/libaemu64_") && seq(t + l - 3, ".so")) {
+                    if (l > 16 && (pre(t + l - 16, "/libaemu64_") || pre(t + l - 16, "/libaemu32_")) && seq(t + l - 3, ".so")) {
                         o = (long)l + 1;
                         if (o < n && g_qemu[0] && seq(t + o, g_qemu)) o += (long)slen(g_qemu) + 1;
                         if (o > n) o = n;
@@ -756,7 +911,10 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
             // a nearly full phone reads as a nearly full guest disk (no dropbox, low-storage modes): the guest's disk
             // is what is still free plus as much again
             u64 *s = (u64 *)a[1];               /* type, bsize, blocks, bfree, bavail */
-            if (s[4] && s[2] > 2 * s[4]) { s[2] = 2 * s[4]; if (s[3] > s[2]) s[3] = s[2]; }
+            u64 disk = disk_bytes();
+            if (disk && s[1]) {                 // the size chosen in the image settings: that total, free at most that
+                s[2] = disk / s[1]; if (s[3] > s[2]) s[3] = s[2]; if (s[4] > s[2]) s[4] = s[2];
+            } else if (s[4] && s[2] > 2 * s[4]) { s[2] = 2 * s[4]; if (s[3] > s[2]) s[3] = s[2]; }
         }
         return r;
     }
@@ -820,9 +978,12 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
         return do_exec(P(0), (char *const *)a[1], (char *const *)a[2]);
     case NR_ioctl:
         if (((a[1] >> 8) & 0xff) == ASHMEM_MAGIC) return ashmem_ioctl((int)a[0], (u32)a[1], (u64)a[2]);
-        if (((a[1] >> 8) & 0xff) == 'E' && is_input_fd((int)a[0])) return input_ioctl((u32)a[1], (u64)a[2]);
-        if (((u32)a[1] & 0xffffff00u) == 0x4600) return fb_ioctl((u32)a[1], (u64)a[2]);
+        // the pointer is the guest's: add qemu's guest_base back (2.3's zygote, linked at 0x8000, runs with one;
+        // without it EventHub read empty capability bits and dropped the touchscreen)
+        if (((a[1] >> 8) & 0xff) == 'E' && is_input_fd((int)a[0])) return input_ioctl((u32)a[1], (u64)G(a[2]));
+        if (((u32)a[1] & 0xffffff00u) == 0x4600) return fb_ioctl((u32)a[1], (u64)a[2]);   /* qemu converts FBIO* itself */
         if (((a[1] >> 8) & 0xff) == 'b' && is_binder_fd((int)a[0])) return binder_ioctl((int)a[0], (u32)a[1], (u64)a[2]);
+        if (((a[1] >> 8) & 0xff) == 'a' && is_alarm_fd((int)a[0])) return alarm_ioctl((u32)a[1], (u64)a[2]);
         return S3(nr, a[0], a[1], a[2]);
     case NR_mmap:
         if (a[2] == 1 && is_binder_fd((int)a[4])) return binder_mmap((u64)a[0], (u64)a[1], a[3]);
@@ -844,6 +1005,15 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
             }
         }
         return S6(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
+    case NR_pselect6: {
+        // qemu-arm turns a 32-bit select()'s timeval into pselect6's timespec as it is: 0.9's network code waits with
+        // tv_usec = 60000000 (60 s), which the kernel's select normalised; as tv_nsec it is EINVAL and every page fails
+        if (a[4]) {
+            struct { long s, ns; } *t = (void *)a[4];
+            if (t->ns >= 1000000000L) { t->s += t->ns / 1000000000L; t->ns %= 1000000000L; }
+        }
+        return S6(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
+    }
     case NR_mount: case NR_umount2: case NR_chroot: case NR_capset: case NR_setgroups: case NR_unshare: return 0;
     case NR_prctl: return 0;                    // only PR_CAPBSET_DROP gets here
     case NR_timerfd_create: {                   // the *_ALARM clocks need CAP_WAKE_ALARM, vendor clocks (power-off alarm)
@@ -907,7 +1077,14 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
     }
     case NR_getsockopt: {
         if (is_nl_fd((int)a[0])) return 0;
-        return S5(nr, a[0], a[1], a[2], a[3], a[4]);
+        long r = S5(nr, a[0], a[1], a[2], a[3], a[4]);
+        // SO_PEERCRED: every guest program runs under the app's uid on the phone. The 4.4 zygote (open32) lets only
+        // root and system name the uid of a new process ("App UIDs may not specify uid's or gid's"): the peer reads as root
+        if (r == 0 && a[1] == 1 && a[2] == 17 && a[3] && a[4] && *(u32 *)a[4] >= 12) {
+            u32 *cred = (u32 *)a[3];            // pid, uid, gid
+            if (cred[1] == g_real_uid) { cred[1] = 0; cred[2] = 0; if (self_is_installd()) cred[1] = cred[2] = 1000; }
+        }
+        return r;
     }
     case NR_sendto: {
         if (is_nl_fd((int)a[0])) {
@@ -1105,7 +1282,7 @@ static const u8 trapped[] = {
     NR_rt_sigaction, NR_reboot, NR_setregid, NR_setgid, NR_setreuid, NR_setuid, NR_setresuid, NR_getresuid,
     NR_setresgid, NR_getresgid, NR_setfsuid, NR_setfsgid, NR_getgroups, NR_setgroups, NR_getuid, NR_geteuid,
     NR_getgid, NR_getegid, NR_bind, NR_connect, NR_execve, NR_setsockopt, NR_unshare, NR_timerfd_create,
-    NR_close, NR_getsockopt, NR_sendto, NR_sendmsg, NR_getsockname, NR_socket, NR_dup3,
+    NR_close, NR_getsockopt, NR_sendto, NR_sendmsg, NR_getsockname, NR_socket, NR_dup3, NR_pselect6,
 };
 
 enum { L_TRAP = 240, L_ALLOW, L_SIG, L_MMAP, L_NR, L_PRCTL, L_N };
@@ -1215,6 +1392,8 @@ void aemu_main(u64 *sp) {
     if ((r = env_get(envp, "AEMU64_INPUT")) && slen(r) < sizeof g_input) memcpy(g_input, r, slen(r) + 1);
     if ((r = env_get(envp, "AEMU64_SDCARD")) && slen(r) < sizeof g_sd) { g_sdlen = slen(r); memcpy(g_sd, r, g_sdlen + 1); }
     if ((r = env_get(envp, "AEMU64_QEMU")) && slen(r) < sizeof g_qemu) memcpy(g_qemu, r, slen(r) + 1);
+    if (env_get(envp, "AEMU64_B32")) g_b32 = 1;
+    if ((r = env_get(envp, "AEMU64_ARM32")) && slen(r) < sizeof g_arm32) memcpy(g_arm32, r, slen(r) + 1);
     if ((r = env_get(envp, "AEMU64_BINDER")) && slen(r) < sizeof g_bsock) memcpy(g_bsock, r, slen(r) + 1);
     if ((r = env_get(envp, "AEMU64_HWBINDER")) && slen(r) < sizeof g_hwbsock) memcpy(g_hwbsock, r, slen(r) + 1);
     if ((r = env_get(envp, "AEMU64_VNDBINDER")) && slen(r) < sizeof g_vndbsock) memcpy(g_vndbsock, r, slen(r) + 1);
@@ -1289,6 +1468,10 @@ void aemu_main(u64 *sp) {
         for (q = g_exe; *q; q++) if (*q == '/') b = q + 1;
         static const char *const mute[] = { "ip", "tc", "iptables", "ip6tables", "iptables-restore", "ip6tables-restore", "ndppd", 0 };
         for (int i = 0; mute[i]; i++) if (seq(b, mute[i])) S1(NR_exit_group, 0);
+        // the compiler and the profile tools work in the background: the lowest priority keeps the screen moving
+        // while a just-booted system compiles its apps (it took four cores right when the user starts touching)
+        static const char *const bg[] = { "dex2oat", "patchoat", "dexopt", "profman", 0 };
+        for (int i = 0; bg[i]; i++) if (seq(b, bg[i])) S3(140 /*setpriority*/, 0 /*PRIO_PROCESS*/, 0, 19);
     }
     struct image exe, ld;
     int is32 = 0;
@@ -1303,15 +1486,59 @@ void aemu_main(u64 *sp) {
     if (hn > 5 && head[0] == 0x7f && head[4] == 1) {
         struct kstat st;
         if (S4(NR_newfstatat, AT_FDCWD, prog, &st, 0) == 0 && st.st_size < 1024) S1(NR_exit_group, 0);   // the engine's "true"
+        // a phone that still executes AArch32: the 32-bit kernel runs the program natively (native/guest32), with
+        // the same arguments and environment; it starts this kernel again for a 64-bit program
+        if (g_arm32[0]) {
+            static char k64[540], *nenv[4200]; u64 k = 0;
+            memcpy(k64, "AEMU64_KERNEL64=", 16); memcpy(k64 + 16, g_self, slen(g_self) + 1);
+            for (char **e = envp; *e && k < 4190; e++) if (!pre(*e, "AEMU64_KERNEL64=")) nenv[k++] = *e;
+            nenv[k++] = k64; nenv[k] = 0;
+            argv[0] = g_arm32;
+            S3(NR_execve, g_arm32, argv, nenv);
+            die("cannot start the 32-bit kernel for ", prog);
+        }
         if (!g_qemu[0]) die("32-bit program and no translator: ", prog);
+        // a static program linked below 64 KB (the phone maps nothing there) gets a guest_base: binder adds it back
+        const char *gbopt = "0";
+        {
+            long f3 = S4(NR_openat, AT_FDCWD, prog, 0x80000, 0);
+            u8 eh[52]; u8 ph[32 * 16];
+            if (f3 >= 0 && S4(NR_pread64, f3, eh, 52, 0) == 52 && *(u16 *)(eh + 16) == 2) {
+                u32 phoff = *(u32 *)(eh + 28), phnum = *(u16 *)(eh + 44); if (phnum > 16) phnum = 16;
+                if (S4(NR_pread64, f3, ph, phnum * 32, phoff) == (long)(phnum * 32))
+                    for (u32 i = 0; i < phnum; i++) if (*(u32 *)(ph + i * 32) == 1 && *(u32 *)(ph + i * 32 + 8) < 0x10000) { gbopt = "0x10000"; g_gbase = 0x10000; }
+            }
+            if (f3 >= 0) S1(NR_close, f3);
+        }
         // a 32-bit program of a 64-bit firmware: qemu-arm translates the code, and its system calls come back
         // through the same filter. Guest addresses are host addresses (-B 0), so binder and ashmem work unchanged.
         static char *qargv[4100]; long k = 0;
         static char progcopy[PATH_MAX];
         memcpy(progcopy, prog, slen(prog) + 1);
-        qargv[k++] = g_qemu; qargv[k++] = "-B"; qargv[k++] = "0"; qargv[k++] = "-0"; qargv[k++] = (char *)argv0; qargv[k++] = progcopy;
+        qargv[k++] = g_qemu; qargv[k++] = "-B"; qargv[k++] = (char *)gbopt; qargv[k++] = "-0"; qargv[k++] = (char *)argv0; qargv[k++] = progcopy;
         for (long i = 1; i < gargc && k < 4096; i++) qargv[k++] = gargv[i];
         qargv[k] = 0; gargv = qargv; gargc = k; argv0 = g_qemu; prog = g_qemu; is32 = 1; g_is32 = 1;
+        // bionic up to 4.3 finds the property area only through ANDROID_PROPERTY_WORKSPACE ("fd,size", the fd init
+        // left open): without it every getprop is empty (SDK 0, no density...) and resources stop matching
+        if (g_b32 && g_props[0]) {
+            int have = 0;
+            for (char **e = envp; *e; e++) if (pre(*e, "ANDROID_PROPERTY_WORKSPACE=")) have = 1;
+            long pf = have ? -1 : S4(NR_openat, AT_FDCWD, g_props, 0 /*O_RDONLY*/, 0);
+            if (pf >= 0) {
+                u8 st[128]; long sz = 0;
+                if (S2(80 /*fstat*/, pf, st) == 0) sz = *(long *)(st + 48);
+                if (pf != 30) { S3(24 /*dup3*/, pf, 30, 0); S1(NR_close, pf); }
+                static char ws[64]; char num[24]; int n = 0; u64 v = (u64)sz;
+                do { num[n++] = '0' + v % 10; v /= 10; } while (v);
+                memcpy(ws, "ANDROID_PROPERTY_WORKSPACE=30,", 30);
+                for (int i = 0; i < n; i++) ws[30 + i] = num[n - 1 - i];
+                ws[30 + n] = 0;
+                static char *nenv[4200]; u64 m = 0;
+                for (char **e = envp; *e && m < 4190; e++) nenv[m++] = *e;
+                nenv[m++] = ws; nenv[m] = 0;
+                envp = nenv;
+            }
+        }
     }
     // each world has its own libraries
     static char ldpath[64];

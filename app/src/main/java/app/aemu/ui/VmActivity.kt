@@ -21,6 +21,7 @@ import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material.icons.rounded.Screenshot
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.Sms
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.Lan
@@ -82,6 +83,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -151,6 +153,9 @@ class VmActivity : ComponentActivity() {
     private var grabScratch: android.graphics.Bitmap? = null
     private lateinit var box: FrameLayout
     private var state by mutableStateOf(GuestVm.State.STOPPED)
+    /** the guest shut itself down: the screen stays with its log until the user closes it */
+    private var poweredOff by mutableStateOf(false)
+    private var openLog by mutableStateOf(false)
     /** the guest's notification LED and where the guest screen starts (the LED sits just above it) */
     private var led by mutableStateOf<app.aemu.core.Lights.Led?>(null)
     /** this system's setting "Notification light" (the settings sheet changes it while the system runs) */
@@ -178,7 +183,7 @@ class VmActivity : ComponentActivity() {
         }
         vm = if (cur != null && cur.img.id == img.id) cur
             else GuestVm(applicationContext, img).also { it.recoveryMode = intent.getBooleanExtra(EXTRA_RECOVERY, false); VmHost.vm = it }
-        vm.onPower = { reboot, reason -> runOnUiThread { if (reboot) rebootVm(reason == "recovery") else stopVm() } }
+        vm.onPower = { reboot, reason -> runOnUiThread { if (reboot) rebootVm(reason == "recovery") else { poweredOff = true; thread { vm.stop() } } } }
         val s = vm.settings
         showLed = s.showLed
         if (s.keepScreenOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -356,7 +361,7 @@ class VmActivity : ComponentActivity() {
         }
     }
 
-    private enum class Dlg { NONE, SMS, CALL, BATTERY, ADB, DEVICE }
+    private enum class Dlg { NONE, SMS, CALL, BATTERY, ADB, DEVICE, APPS }
 
     // position of the floating menu button, kept across launches
     private val uiPrefs by lazy { getSharedPreferences("vm_ui", MODE_PRIVATE) }
@@ -383,6 +388,13 @@ class VmActivity : ComponentActivity() {
         // Normalize line endings and truncate extreme paste payloads
         val lines = text.replace("\r\n", "\n").replace('\r', '\n').split('\n')
         val safeLines = if (lines.size > 150) lines.take(150) else lines
+        // "input text" types only what the virtual keyboard map has (KeyCharacterMap.getEvents is null otherwise):
+        // other text goes through the guest's clipboard and Ctrl+V (app.aemu.stub.TypeText; aemu-stubs.jar is 4.2+)
+        if (vm.img.api >= 17 && safeLines.any { l -> l.any { it.code !in 0x20..0x7e } }) {
+            val b64 = android.util.Base64.encodeToString(safeLines.joinToString("\n").toByteArray(), android.util.Base64.NO_WRAP)
+            guestAsync("CLASSPATH=/system/framework/aemu-stubs.jar app_process /system/bin app.aemu.stub.TypeText $b64")
+            return
+        }
         val script = buildString {
             for ((i, line) in safeLines.withIndex()) {
                 if (line.isNotEmpty()) {
@@ -494,7 +506,9 @@ class VmActivity : ComponentActivity() {
                 contentResolver.openInputStream(uri)!!.use { i -> java.io.File(dir, "aemu-install.apk").outputStream().use { o -> i.copyTo(o) } }
             }.isSuccess
             if (!ok) { toast(getString(R.string.m_failed)); return@thread }
-            val out = runCatching { vm.guestShell("pm install -r " + vm.img.sdcardPath.trimEnd('/') + "/aemu-install.apk", 300_000) }.getOrElse { it.toString() }
+            // 14+ refuses apps targeting below 23 (INSTALL_FAILED_DEPRECATED_SDK_VERSION); its pm has a switch for that
+            val flags = if (vm.img.api >= 34) "-r --bypass-low-target-sdk-block " else "-r "
+            val out = runCatching { vm.guestShell("pm install " + flags + vm.img.sdcardPath.trimEnd('/') + "/aemu-install.apk", 300_000) }.getOrElse { it.toString() }
             runCatching { app.aemu.core.TreeFixer(this@VmActivity, vm.paths, vm.img, vm::log).seedOwners() }
             toast(out.trim().lines().lastOrNull { it.isNotBlank() }?.take(200) ?: getString(R.string.m_failed))
         }
@@ -523,6 +537,29 @@ class VmActivity : ComponentActivity() {
             },
             confirmButton = { Button(onClick = { sendSms(from, body); onDone() }) { Text(stringResource(R.string.m_send)) } },
             dismissButton = { OutlinedButton(onClick = onDone) { Text(stringResource(R.string.close)) } })
+    }
+
+    /** The firmware's apps: packages with a MAIN activity, labels and icons read on the host from their APKs. */
+    @Composable
+    private fun AppsDialog(onDone: () -> Unit) {
+        var apps by remember { mutableStateOf<List<app.aemu.core.GuestApp>?>(null) }
+        LaunchedEffect(Unit) {
+            // the package list first: the runner keeps 256 KB of output and the resolver dump alone can be more
+            guestAsync("pm list packages -f; echo ===AEMU===; dumpsys package r") { out ->
+                val paths = app.aemu.core.GuestApps.parsePaths(out.substringBefore("===AEMU==="))
+                val main = app.aemu.core.GuestApps.parseMain(out.substringAfter("===AEMU===", ""))
+                val list = main.map { app.aemu.core.GuestApps.load(this@VmActivity, vm.paths.root, it, paths[it]) }
+                    .sortedWith(compareBy({ it.label == it.pkg }, { it.label.lowercase() }))
+                vm.log("apps: ${main.size} launchable, ${paths.size} paths, ${list.count { it.label != it.pkg }} labelled; ${app.aemu.core.GuestApps.lastError}")
+                runOnUiThread { apps = list }
+            }
+        }
+        GuestAppsSheet(apps, onDismiss = onDone, onLaunch = { a ->
+            onDone()
+            guestAsync("monkey -p ${q(a.pkg)} -c android.intent.category.LAUNCHER 1") { out ->
+                if (out.contains("No activities found")) toast(getString(R.string.m_apps_none))
+            }
+        })
     }
 
     @Composable
@@ -671,6 +708,7 @@ class VmActivity : ComponentActivity() {
     @Composable
     private fun Overlay() {
         var showLog by remember { mutableStateOf(false) }
+        LaunchedEffect(openLog) { if (openLog) { showLog = true; openLog = false } }
         var showTerm by remember { mutableStateOf(false) }
         var menu by remember { mutableStateOf(false) }
         var dialog by remember { mutableStateOf(Dlg.NONE) }
@@ -678,8 +716,9 @@ class VmActivity : ComponentActivity() {
         val running = state == GuestVm.State.RUNNING && !vm.recoveryMode
         var seconds by remember { mutableStateOf(0L) }
         var frames by remember { mutableStateOf(0L) }
-        LaunchedEffect(Unit) { while (true) { if (vm.recoveryMode) guest.format = vm.recoveryFormat else if (vm.engine == app.aemu.core.Engine.N64) guest.format = 1; seconds = vm.bootSeconds(); frames = if (vm.glInApp) dev.lk.m7sense.GlBridge.frames() else guest.rings; delay(500) } }
+        LaunchedEffect(Unit) { while (true) { if (vm.recoveryMode) guest.format = vm.recoveryFormat else if (vm.engine == app.aemu.core.Engine.N64) { guest.format = if (vm.fb565 || vm.fbLegacy565) 0 else 1; guest.onePage = vm.fb565 && !vm.fbLegacy565 }; seconds = vm.bootSeconds(); frames = if (vm.glInApp) dev.lk.m7sense.GlBridge.frames() else maxOf(guest.rings, guest.shown); delay(500) } }
         // как только гость начал рисовать — карточку убираем, остаётся маленький индикатор
+        // (frames shown on the GPU path of the arm64 kernels never ring onFrame: the card hid their boot animation)
         val drawing = frames > 30
         androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
             // the menu button stays on screen: 40 dp button + 8 dp padding, anchored at the top end
@@ -768,6 +807,8 @@ class VmActivity : ComponentActivity() {
                             enabled = running, onClick = { menu = false; dialog = Dlg.ADB })
                         DropdownMenuItem(text = { Text(stringResource(R.string.m_settings)) }, leadingIcon = { Icon(Icons.Rounded.Settings, null) },
                             enabled = running, onClick = { menu = false; guestAsync("am start -a android.settings.SETTINGS") })
+                        DropdownMenuItem(text = { Text(stringResource(R.string.m_apps)) }, leadingIcon = { Icon(Icons.Rounded.Apps, null) },
+                            enabled = running, onClick = { menu = false; dialog = Dlg.APPS })
                     }
                     DropdownMenuItem(text = { Text(stringResource(R.string.m_screenshot)) }, leadingIcon = { Icon(Icons.Rounded.Screenshot, null) },
                         enabled = state == GuestVm.State.RUNNING, onClick = { menu = false; screenshot() })
@@ -797,12 +838,92 @@ class VmActivity : ComponentActivity() {
                 Dlg.BATTERY -> BatteryDialog { dialog = Dlg.NONE }
                 Dlg.ADB -> AdbDialog { dialog = Dlg.NONE }
                 Dlg.DEVICE -> DeviceDialog { dialog = Dlg.NONE }
+                Dlg.APPS -> AppsDialog { dialog = Dlg.NONE }
                 Dlg.NONE -> {}
             }
 
-            // панель кнопок Android
-            if (vm.settings.showNavBar && !showLog && !showTerm) {
+            // pre-1.0 builds (Sooner/M3/M5) target phones driven by keys: their own keypad instead of the nav bar
+            if (hasDeviceKeys && !showLog && !showTerm) {
+                DeviceKeypad(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 4.dp))
+            } else if (vm.settings.showNavBar && !showLog && !showTerm) {
                 NavBar(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = if (vm.settings.navSize == 0) 3.dp else 6.dp))
+            }
+        }
+    }
+
+    /** Builds before API 3 select with the D-pad (a tap only moves focus) and have Call/End and a QWERTY keyboard. */
+    private val hasDeviceKeys: Boolean get() = vm.img.api in 1..2
+
+    /** A guest key held down for as long as the finger stays on it. */
+    @Composable
+    private fun PadKey(label: String, code: Int, modifier: Modifier = Modifier, w: androidx.compose.ui.unit.Dp = 44.dp,
+                       h: androidx.compose.ui.unit.Dp = 40.dp) {
+        var pressed by remember { mutableStateOf(false) }
+        Surface(shape = MaterialTheme.shapes.small,
+            color = if (pressed) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surfaceContainerHighest,
+            modifier = modifier.size(w, h).pointerInput(code) {
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    pressed = true
+                    vm.input.key(code, true)
+                    while (true) {
+                        val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                        c.consume()
+                        if (!c.pressed) break
+                    }
+                    pressed = false
+                    vm.input.key(code, false)
+                }
+            }) {
+            Box(contentAlignment = Alignment.Center) { Text(label, style = MaterialTheme.typography.labelLarge, maxLines = 1) }
+        }
+    }
+
+    /** Keypad of a pre-1.0 phone: Call/Home/Menu/Back/End, a D-pad with its center and a QWERTY that slides out. */
+    @Composable
+    private fun DeviceKeypad(modifier: Modifier) {
+        var qwerty by remember { mutableStateOf(false) }
+        Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.92f), modifier = modifier) {
+            Column(Modifier.padding(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                if (qwerty) {
+                    val rows = listOf(
+                        "qwertyuiop".toList().zip(listOf(16, 17, 18, 19, 20, 21, 22, 23, 24, 25)),
+                        "asdfghjkl".toList().zip(listOf(30, 31, 32, 33, 34, 35, 36, 37, 38)),
+                        "zxcvbnm".toList().zip(listOf(44, 45, 46, 47, 48, 49, 50)),
+                    )
+                    for (r in rows) Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                        for ((ch, sc) in r) PadKey(ch.toString(), sc, w = 32.dp, h = 38.dp)
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                        PadKey("⇧", 42, w = 44.dp, h = 38.dp); PadKey("Alt", 56, w = 44.dp, h = 38.dp)
+                        PadKey("", 57, w = 120.dp, h = 38.dp); PadKey(".", 52, w = 32.dp, h = 38.dp)
+                        PadKey("⌫", 14, w = 44.dp, h = 38.dp); PadKey("↵", 28, w = 44.dp, h = 38.dp)
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        PadKey("Call", 231, w = 56.dp); PadKey("Menu", InputService.KEY_MENU, w = 56.dp)
+                    }
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        PadKey("▲", InputService.KEY_UP, h = 32.dp)
+                        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                            PadKey("◀", InputService.KEY_LEFT, h = 32.dp); PadKey("●", InputService.KEY_CENTER, h = 32.dp)
+                            PadKey("▶", InputService.KEY_RIGHT, h = 32.dp)
+                        }
+                        PadKey("▼", InputService.KEY_DOWN, h = 32.dp)
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        PadKey("End", 107, w = 56.dp); PadKey("Back", InputService.KEY_BACK, w = 56.dp)
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        PadKey("Home", InputService.KEY_HOME, w = 56.dp)
+                        Surface(shape = MaterialTheme.shapes.small, color = if (qwerty) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                            else MaterialTheme.colorScheme.surfaceContainerHighest,
+                            onClick = { qwerty = !qwerty }, modifier = Modifier.size(56.dp, 40.dp)) {
+                            Box(contentAlignment = Alignment.Center) { Icon(Icons.Rounded.Keyboard, stringResource(R.string.m_keyboard)) }
+                        }
+                    }
+                }
             }
         }
     }
@@ -937,13 +1058,22 @@ class VmActivity : ComponentActivity() {
             shape = MaterialTheme.shapes.extraLarge,
         ) {
             Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                if (state == GuestVm.State.FAILED) {
+                if (poweredOff) {
+                    Text(stringResource(R.string.powered_off), style = MaterialTheme.typography.headlineSmall)
+                    Spacer(Modifier.height(16.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { stopVm() }) { Text(stringResource(R.string.close)) }
+                        OutlinedButton(onClick = { openLog = true }) { Text(stringResource(R.string.log)) }
+                        Button(onClick = { restartProcess(vm.img.id) }) { Text(stringResource(R.string.retry)) }
+                    }
+                } else if (state == GuestVm.State.FAILED) {
                     Text(stringResource(R.string.failed_start), style = MaterialTheme.typography.headlineSmall)
                     Spacer(Modifier.height(8.dp))
                     Text(vm.failure ?: "", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
                     Spacer(Modifier.height(16.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = { stopVm() }) { Text(stringResource(R.string.close)) }
+                        OutlinedButton(onClick = { openLog = true }) { Text(stringResource(R.string.log)) }
                         Button(onClick = { thread { vm.stop(); vm.boot() } }) { Text(stringResource(R.string.retry)) }
                     }
                 } else {

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Static overlay of framework-res for 32-bit firmwares on the open engine (open32): the activity manager takes no
+     task thumbnails. A thumbnail is a SurfaceFlinger screenshot through the GL bridge, which can hang and take
+     system_server down with it (watchdog: ActivityManagerService held in SurfaceControl.screenshot). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="app.aemu.overlay.noshot">
+    <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="25" />
+    <overlay android:targetPackage="android" android:priority="1" />
+    <application android:hasCode="false" />
+</manifest>

@@ -22,16 +22,6 @@ eglBindTexImage:
     mov r12, r0
     pop {r0-r3, lr}
     bx r12
-    .global eglChooseConfig
-    .type eglChooseConfig,%function
-    .align 2
-eglChooseConfig:
-    push {r0-r3, lr}
-    movw r0, #2
-    bl aemu_split_resolve
-    mov r12, r0
-    pop {r0-r3, lr}
-    bx r12
     .global eglClientWaitSyncKHR
     .type eglClientWaitSyncKHR,%function
     .align 2
@@ -62,32 +52,12 @@ eglCreatePbufferFromClientBuffer:
     mov r12, r0
     pop {r0-r3, lr}
     bx r12
-    .global eglCreatePbufferSurface
-    .type eglCreatePbufferSurface,%function
-    .align 2
-eglCreatePbufferSurface:
-    push {r0-r3, lr}
-    movw r0, #8
-    bl aemu_split_resolve
-    mov r12, r0
-    pop {r0-r3, lr}
-    bx r12
     .global eglCreatePixmapSurface
     .type eglCreatePixmapSurface,%function
     .align 2
 eglCreatePixmapSurface:
     push {r0-r3, lr}
     movw r0, #9
-    bl aemu_split_resolve
-    mov r12, r0
-    pop {r0-r3, lr}
-    bx r12
-    .global eglCreateSyncKHR
-    .type eglCreateSyncKHR,%function
-    .align 2
-eglCreateSyncKHR:
-    push {r0-r3, lr}
-    movw r0, #10
     bl aemu_split_resolve
     mov r12, r0
     pop {r0-r3, lr}
@@ -128,26 +98,6 @@ eglDestroySurface:
 eglDestroySyncKHR:
     push {r0-r3, lr}
     movw r0, #15
-    bl aemu_split_resolve
-    mov r12, r0
-    pop {r0-r3, lr}
-    bx r12
-    .global eglGetConfigAttrib
-    .type eglGetConfigAttrib,%function
-    .align 2
-eglGetConfigAttrib:
-    push {r0-r3, lr}
-    movw r0, #16
-    bl aemu_split_resolve
-    mov r12, r0
-    pop {r0-r3, lr}
-    bx r12
-    .global eglGetConfigs
-    .type eglGetConfigs,%function
-    .align 2
-eglGetConfigs:
-    push {r0-r3, lr}
-    movw r0, #17
     bl aemu_split_resolve
     mov r12, r0
     pop {r0-r3, lr}
@@ -238,16 +188,6 @@ eglGetSystemTimeFrequencyNV:
 eglGetSystemTimeNV:
     push {r0-r3, lr}
     movw r0, #27
-    bl aemu_split_resolve
-    mov r12, r0
-    pop {r0-r3, lr}
-    bx r12
-    .global eglInitialize
-    .type eglInitialize,%function
-    .align 2
-eglInitialize:
-    push {r0-r3, lr}
-    movw r0, #28
     bl aemu_split_resolve
     mov r12, r0
     pop {r0-r3, lr}
@@ -662,26 +602,6 @@ glBlitFramebuffer:
     mov r12, r0
     pop {r0-r3, lr}
     bx r12
-    .global glBufferData
-    .type glBufferData,%function
-    .align 2
-glBufferData:
-    push {r0-r3, lr}
-    movw r0, #74
-    bl aemu_split_resolve
-    mov r12, r0
-    pop {r0-r3, lr}
-    bx r12
-    .global glBufferSubData
-    .type glBufferSubData,%function
-    .align 2
-glBufferSubData:
-    push {r0-r3, lr}
-    movw r0, #75
-    bl aemu_split_resolve
-    mov r12, r0
-    pop {r0-r3, lr}
-    bx r12
     .global glCheckFramebufferStatus
     .type glCheckFramebufferStatus,%function
     .align 2
@@ -892,16 +812,6 @@ glColorPointer:
     mov r12, r0
     pop {r0-r3, lr}
     bx r12
-    .global glCompileShader
-    .type glCompileShader,%function
-    .align 2
-glCompileShader:
-    push {r0-r3, lr}
-    movw r0, #97
-    bl aemu_split_resolve
-    mov r12, r0
-    pop {r0-r3, lr}
-    bx r12
     .global glCompressedTexImage2D
     .type glCompressedTexImage2D,%function
     .align 2
@@ -1008,16 +918,6 @@ glCreateShader:
 glCullFace:
     push {r0-r3, lr}
     movw r0, #108
-    bl aemu_split_resolve
-    mov r12, r0
-    pop {r0-r3, lr}
-    bx r12
-    .global glDeleteBuffers
-    .type glDeleteBuffers,%function
-    .align 2
-glDeleteBuffers:
-    push {r0-r3, lr}
-    movw r0, #109
     bl aemu_split_resolve
     mov r12, r0
     pop {r0-r3, lr}
@@ -2568,16 +2468,6 @@ glLineWidth:
 glLineWidthx:
     push {r0-r3, lr}
     movw r0, #270
-    bl aemu_split_resolve
-    mov r12, r0
-    pop {r0-r3, lr}
-    bx r12
-    .global glLinkProgram
-    .type glLinkProgram,%function
-    .align 2
-glLinkProgram:
-    push {r0-r3, lr}
-    movw r0, #271
     bl aemu_split_resolve
     mov r12, r0
     pop {r0-r3, lr}

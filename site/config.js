@@ -11,7 +11,7 @@ window.AEMU_CONFIG = {
   "links": {
     "repo": "https://github.com/uxazu/aemulator",
     "site": "https://aemulator.gt.tc",
-    "forum": "https://aeforum.uxazuu.space/",
+    "forum": "https://forum.aemulator.fun/",
     "channel": "https://t.me/aemulatorofficial",
     "author": "https://github.com/uxazu",
     "original": "https://t.me/istratii_tech1",

@@ -85,6 +85,7 @@ static char g_exe[PATH_MAX];    // guest view of the running program
 static int g_uid, g_gid;        // the ids the guest believes it has
 static u32 g_real_uid;
 static char g_qemu[512];        // qemu-arm for the firmware's 32-bit programs (AEMU64_QEMU)
+static char g_arm32[512];       // the 32-bit kernel, on a phone that executes AArch32 (AEMU64_ARM32)
 static int g_crash;
 static u64 g_logdev, g_logino;      // the service log on descriptor 2 (a file or a pipe to the app)
 static int g_logpipe;
@@ -400,6 +401,22 @@ static long input_open(long flags) {
     return s;
 }
 
+// /dev/cpuctl/tasks, /dev/cpuctl/bg_non_interactive/tasks: there is no cpu cgroup for the guest. The firmware's
+// libcutils writes each thread it moves into one of them; the app (GuestLmk) listens on a datagram socket of that name
+// in the image and lowers or restores the thread's priority, so the background (a boot's dozen woken apps) stays
+// behind the screen. Non-blocking: a busy listener loses a move, never stalls the system.
+static long cg_open(const char *path, long flags) {
+    struct sockaddr_un sa; sa.family = 1;
+    u64 l = slen(path);
+    if (g_rootlen + l + 1 > sizeof sa.path) return -ENOENT;
+    memcpy(sa.path, g_root, g_rootlen); memcpy(sa.path + g_rootlen, path, l + 1);
+    long s = S3(NR_socket, 1, 2 | 04000 | (flags & 02000000), 0);
+    if (s < 0) return s;
+    long r = S3(NR_connect, s, &sa, 2 + g_rootlen + l + 1);
+    if (r < 0) { S1(NR_close, s); return -ENOENT; }
+    return s;
+}
+
 static void setbit(u8 *m, u64 len, u32 bit) { if (bit / 8 < len) m[bit / 8] |= (u8)(1 << (bit % 8)); }
 
 static long input_ioctl(u32 cmd, u64 arg) {
@@ -445,7 +462,7 @@ static long do_exec(const char *path, char *const argv[], char *const envp[]) {
     u64 na = 0, ne = 0;
     if (argv) while (argv[na]) na++;
     if (envp) while (envp[ne]) ne++;
-    u64 need = (na + ne + 24) * sizeof(char *);
+    u64 need = (na + ne + 27) * sizeof(char *);
     char **v = (char **)S6(NR_mmap, 0, need, 3, 0x22, -1, 0);
     if ((u64)v >= (u64)-4095) return -ENOMEM;
     char **a = v, **e;
@@ -468,8 +485,11 @@ static long do_exec(const char *path, char *const argv[], char *const envp[]) {
     s = utoa((u64)g_gid, t + sizeof t); memcpy(e_id + o, s, slen(s) + 1);
     *a++ = e_id; *a++ = e_f;
     if (g_crash) *a++ = "AEMU64_CRASH=1";
+    if (g_b32) *a++ = "AEMU64_B32=1";
     static char e_input[130];
     if (g_input[0]) { memcpy(e_input, "AEMU64_INPUT=", 13); memcpy(e_input + 13, g_input, slen(g_input) + 1); *a++ = e_input; }
+    static char e_a32[540];
+    if (g_arm32[0]) { memcpy(e_a32, "AEMU64_ARM32=", 13); memcpy(e_a32 + 13, g_arm32, slen(g_arm32) + 1); *a++ = e_a32; }
     static char e_qemu[540];
     if (g_qemu[0]) { memcpy(e_qemu, "AEMU64_QEMU=", 12); memcpy(e_qemu + 12, g_qemu, slen(g_qemu) + 1); *a++ = e_qemu; }
     static char e_sd[540];
@@ -573,6 +593,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
                 }
                 if (seq(P(1), "/dev/binder") || seq(P(1), "/dev/hwbinder") || seq(P(1), "/dev/vndbinder")) return binder_open(a[2], P(1));
                 if (pre(P(1), "/dev/input/event")) return input_open(a[2]);
+                if (seq(P(1), "/dev/cpuctl/tasks") || seq(P(1), "/dev/cpuctl/bg_non_interactive/tasks")) return cg_open(P(1), a[2]);
             }
             u64 pl = slen(P(1));
             if (pre(P(1), "/proc/") && ((pl >= 13 && seq(P(1) + pl - 13, "/attr/current")) || (pl >= 10 && seq(P(1) + pl - 10, "/attr/exec")))) {
@@ -588,7 +609,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
                     if (n < 0) n = 0;
                     t[n] = 0;
                     u64 l = slen(t);
-                    if (l > 16 && pre(t + l - 16, "/libaemu64_") && seq(t + l - 3, ".so")) {
+                    if (l > 16 && (pre(t + l - 16, "/libaemu64_") || pre(t + l - 16, "/libaemu32_")) && seq(t + l - 3, ".so")) {
                         o = (long)l + 1;
                         if (o < n && g_qemu[0] && seq(t + o, g_qemu)) o += (long)slen(g_qemu) + 1;
                         if (o > n) o = n;
@@ -1213,6 +1234,8 @@ void aemu_main(u64 *sp) {
     if ((r = env_get(envp, "AEMU64_INPUT")) && slen(r) < sizeof g_input) memcpy(g_input, r, slen(r) + 1);
     if ((r = env_get(envp, "AEMU64_SDCARD")) && slen(r) < sizeof g_sd) { g_sdlen = slen(r); memcpy(g_sd, r, g_sdlen + 1); }
     if ((r = env_get(envp, "AEMU64_QEMU")) && slen(r) < sizeof g_qemu) memcpy(g_qemu, r, slen(r) + 1);
+    if (env_get(envp, "AEMU64_B32")) g_b32 = 1;
+    if ((r = env_get(envp, "AEMU64_ARM32")) && slen(r) < sizeof g_arm32) memcpy(g_arm32, r, slen(r) + 1);
     if ((r = env_get(envp, "AEMU64_BINDER")) && slen(r) < sizeof g_bsock) memcpy(g_bsock, r, slen(r) + 1);
     if ((r = env_get(envp, "AEMU64_HWBINDER")) && slen(r) < sizeof g_hwbsock) memcpy(g_hwbsock, r, slen(r) + 1);
     if ((r = env_get(envp, "AEMU64_VNDBINDER")) && slen(r) < sizeof g_vndbsock) memcpy(g_vndbsock, r, slen(r) + 1);
@@ -1287,6 +1310,10 @@ void aemu_main(u64 *sp) {
         for (q = g_exe; *q; q++) if (*q == '/') b = q + 1;
         static const char *const mute[] = { "ip", "tc", "iptables", "ip6tables", "iptables-restore", "ip6tables-restore", "ndppd", 0 };
         for (int i = 0; mute[i]; i++) if (seq(b, mute[i])) S1(NR_exit_group, 0);
+        // the compiler and the profile tools work in the background: the lowest priority keeps the screen moving
+        // while a just-booted system compiles its apps (it took four cores right when the user starts touching)
+        static const char *const bg[] = { "dex2oat", "patchoat", "dexopt", "profman", 0 };
+        for (int i = 0; bg[i]; i++) if (seq(b, bg[i])) S3(140 /*setpriority*/, 0 /*PRIO_PROCESS*/, 0, 19);
     }
     struct image exe, ld;
     int is32 = 0;
@@ -1301,13 +1328,36 @@ void aemu_main(u64 *sp) {
     if (hn > 5 && head[0] == 0x7f && head[4] == 1) {
         struct kstat st;
         if (S4(NR_newfstatat, AT_FDCWD, prog, &st, 0) == 0 && st.st_size < 1024) S1(NR_exit_group, 0);   // the engine's "true"
+        // a phone that still executes AArch32: the 32-bit kernel runs the program natively (native/guest32), with
+        // the same arguments and environment; it starts this kernel again for a 64-bit program
+        if (g_arm32[0]) {
+            static char k64[540], *nenv[4200]; u64 k = 0;
+            memcpy(k64, "AEMU64_KERNEL64=", 16); memcpy(k64 + 16, g_self, slen(g_self) + 1);
+            for (char **e = envp; *e && k < 4190; e++) if (!pre(*e, "AEMU64_KERNEL64=")) nenv[k++] = *e;
+            nenv[k++] = k64; nenv[k] = 0;
+            argv[0] = g_arm32;
+            S3(NR_execve, g_arm32, argv, nenv);
+            die("cannot start the 32-bit kernel for ", prog);
+        }
         if (!g_qemu[0]) die("32-bit program and no translator: ", prog);
+        // a static program linked below 64 KB (the phone maps nothing there) gets a guest_base: binder adds it back
+        const char *gbopt = "0";
+        {
+            long f3 = S4(NR_openat, AT_FDCWD, prog, 0x80000, 0);
+            u8 eh[52]; u8 ph[32 * 16];
+            if (f3 >= 0 && S4(NR_pread64, f3, eh, 52, 0) == 52 && *(u16 *)(eh + 16) == 2) {
+                u32 phoff = *(u32 *)(eh + 28), phnum = *(u16 *)(eh + 44); if (phnum > 16) phnum = 16;
+                if (S4(NR_pread64, f3, ph, phnum * 32, phoff) == (long)(phnum * 32))
+                    for (u32 i = 0; i < phnum; i++) if (*(u32 *)(ph + i * 32) == 1 && *(u32 *)(ph + i * 32 + 8) < 0x10000) { gbopt = "0x10000"; g_gbase = 0x10000; }
+            }
+            if (f3 >= 0) S1(NR_close, f3);
+        }
         // a 32-bit program of a 64-bit firmware: qemu-arm translates the code, and its system calls come back
         // through the same filter. Guest addresses are host addresses (-B 0), so binder and ashmem work unchanged.
         static char *qargv[4100]; long k = 0;
         static char progcopy[PATH_MAX];
         memcpy(progcopy, prog, slen(prog) + 1);
-        qargv[k++] = g_qemu; qargv[k++] = "-B"; qargv[k++] = "0"; qargv[k++] = "-0"; qargv[k++] = (char *)argv0; qargv[k++] = progcopy;
+        qargv[k++] = g_qemu; qargv[k++] = "-B"; qargv[k++] = (char *)gbopt; qargv[k++] = "-0"; qargv[k++] = (char *)argv0; qargv[k++] = progcopy;
         for (long i = 1; i < gargc && k < 4096; i++) qargv[k++] = gargv[i];
         qargv[k] = 0; gargv = qargv; gargc = k; argv0 = g_qemu; prog = g_qemu; is32 = 1; g_is32 = 1;
     }

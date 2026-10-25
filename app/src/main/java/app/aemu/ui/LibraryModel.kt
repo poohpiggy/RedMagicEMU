@@ -54,7 +54,7 @@ class LibraryModel(app: Application) : AndroidViewModel(app) {
             val log = ArrayList<String>()
             val imp = Importer(ctx,
                 onProgress = { step, p -> _import.value = _import.value.copy(step = step, progress = if (p >= 0) p else _import.value.progress.takeIf { it >= 0 } ?: -1f) },
-                log = { s -> log.add(s); _import.value = _import.value.copy(log = log.takeLast(50)) })
+                log = { s -> android.util.Log.i("aemu-import", s); log.add(s); _import.value = _import.value.copy(log = log.takeLast(50)) })
             importer = imp
             try {
                 // умолчания из настроек приложения поверх того, что подобрал анализатор (экран, частоты)
