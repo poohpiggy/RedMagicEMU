@@ -68,7 +68,10 @@ class Analyzer(private val ctx: Context, private val paths: VmPaths, private val
         val bcp = rc.exports["BOOTCLASSPATH"]?.takeIf { it.isNotBlank() } ?: dhdBcp ?: dhdExports["BOOTCLASSPATH"]
             ?: bootclasspathFromOdex() ?: bootclasspathGuess(api)
         val exports = LinkedHashMap<String, String>(dhdExports).apply { putAll(rc.exports); remove("BOOTCLASSPATH") }
-        val dirs = (rc.dirs + dhdDirs).filter { it.startsWith("/data") || it.startsWith("/cache") || it.startsWith("/mnt") || it.startsWith("/storage") }.distinct()
+        // every writable mount the init.rc prepares, not only /data: Galaxy S 2.x keeps app databases on /dbdata
+        // (init.rc: mount rfs ... /dbdata; mkdir /dbdata/databases). Kernel and read-only trees stay out.
+        val skipTop = setOf("dev", "sys", "proc", "acct", "config", "system", "sbin", "vendor", "root", "odm", "product")
+        val dirs = (rc.dirs + dhdDirs).filter { it.startsWith("/") && it.length > 1 && it.removePrefix("/").substringBefore('/') !in skipTop }.distinct()
         if (api >= 17 && !exports.containsKey("EMULATED_STORAGE_TARGET") && exports["EXTERNAL_STORAGE"]?.startsWith("/storage/emulated") != false) {
             exports.putIfAbsent("EXTERNAL_STORAGE", "/storage/emulated/legacy")
             exports["EMULATED_STORAGE_SOURCE"] = "/mnt/shell/emulated"
@@ -92,6 +95,10 @@ class Analyzer(private val ctx: Context, private val paths: VmPaths, private val
         val settings = when {
             // 0.9-1.1 knew one screen, the G1's HVGA (Mms aborts on any other: "Unsupported display type")
             api < 3 -> VmSettings(width = 320, height = 480, density = 160, fbHz = 60, touchHz = 60, open32 = true, mtMode = 4)
+            api < 5 && !abi.startsWith("arm64") -> VmSettings(width = 480, height = 800, density = 240, fbHz = 60, touchHz = 60, open32 = true, mtMode = 4)
+            // 3.0-3.2 shipped on tablets only; the SDK's one skin is WXGA (skins/WXGA: 1280x800, hw.lcd.density=160),
+            // and the Honeycomb UI (system bar, tablet launcher) needs an xlarge screen
+            api in 11..13 && !abi.startsWith("arm64") -> VmSettings(width = 1280, height = 800, density = 160, fbHz = 60, touchHz = 60, open32 = true)
             // 1.5-3.2: 32-bit firmwares run on the open engine (open32) only
             api < 14 && !abi.startsWith("arm64") -> VmSettings(width = 480, height = 800, density = 240, fbHz = 60, touchHz = 60, open32 = true)
             engine == Engine.GB || api < 14 -> VmSettings(width = 480, height = 800, density = 240, fbHz = 60, touchHz = 60)
@@ -233,7 +240,12 @@ class Analyzer(private val ctx: Context, private val paths: VmPaths, private val
             p.containsKey("ro.build.version.opporom") -> "ColorOS"
             (p["ro.product.brand"] ?: "").lowercase() == "google" || p["ro.build.tags"]?.contains("release-keys") == true && man.contains("samsung") && !has("system/framework/twframework.jar") && !has("system/app/TwLauncher.apk") && !has("system/app/SecLauncher2.apk") -> "AOSP"
             has("system/framework/twframework.jar") || has("system/app/TwLauncher.apk") || has("system/app/TwLauncher") || has("system/app/SecLauncher2.apk") || man.contains("samsung") -> "TouchWiz"
-            man.contains("htc") || has("system/framework/com.htc.framework.jar") || has("system/framework/HTCExtension.jar") -> "HTC Sense"
+            // early mods (JesusFreke, CyanogenMod 3-4) name themselves only in ro.modversion
+            p["ro.modversion"]?.contains("CM", true) == true || p["ro.modversion"]?.contains("Cyanogen", true) == true -> "CyanogenMod"
+            // Sense is the skin's framework or its launcher (Rosie), not the maker: HTC Dream/Magic shipped the Google UI
+            has("system/framework/com.htc.framework.jar") || has("system/framework/HTCExtension.jar") ||
+                has("system/app/Rosie.apk") || has("system/app/HtcLauncher.apk") || has("system/app/Rosie") -> "HTC Sense"
+            man.contains("htc") -> "AOSP"
             man.contains("motorola") -> "MOTOBLUR"
             man.contains("lge") || man.contains("lg") -> "LG Optimus UI"
             man.contains("sony") || man.contains("semc") -> "Xperia UI"
@@ -325,7 +337,9 @@ class Analyzer(private val ctx: Context, private val paths: VmPaths, private val
         add("ro.factorytest", "0")
         add("ro.setupwizard.mode", "DISABLED")
         add("ro.kernel.android.checkjni", "0")
-        add("ro.opengles.version", if (engine == Engine.KK) "131072" else "131072")
+        // ConfigurationInfo.reqGlEsVersion (API 4) reads this; GLES 2.0 exists for programs from 2.2 (API 8,
+        // android.opengl.GLES20) - before it the guest's GL is "OpenGL ES-CM 1.0" and claiming 2.0 misleads apps
+        add("ro.opengles.version", if (api < 8) "65536" else "131072")
         add("keyguard.no_require_sim", "1")
         add("ro.radio.noril", "false")
         add("dalvik.vm.stack-trace-file", "/data/anr/traces.txt")

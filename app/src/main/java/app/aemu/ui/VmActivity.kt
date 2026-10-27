@@ -224,15 +224,21 @@ class VmActivity : ComponentActivity() {
         // camera cutout and system bars; the keyboard is not counted, so the screen does not jump when it opens
         var safeTop = 0
         var safeBottom = 0
+        var safeLeft = 0
+        var safeRight = 0
         androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root) { v, ins ->
             val bars = ins.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars() or androidx.core.view.WindowInsetsCompat.Type.displayCutout())
-            if (bars.top != safeTop || bars.bottom != safeBottom) { safeTop = bars.top; safeBottom = bars.bottom; v.requestLayout() }
+            if (bars.top != safeTop || bars.bottom != safeBottom || bars.left != safeLeft || bars.right != safeRight) {
+                safeTop = bars.top; safeBottom = bars.bottom; safeLeft = bars.left; safeRight = bars.right; v.requestLayout()
+            }
             ins
         }
         root.addOnLayoutChangeListener { v, l, t, r, b, _, _, _, _ ->
             val navPx = (navDp * resources.displayMetrics.density).toInt()
-            val aw = r - l
-            val ah = b - t - navPx - safeTop - safeBottom
+            // landscape: the button bar stands at the right edge, so the screen keeps the full height
+            val land = r - l > b - t
+            val aw = r - l - safeLeft - safeRight - if (land) navPx else 0
+            val ah = b - t - safeTop - safeBottom - if (land) 0 else navPx
             if (aw <= 0 || ah <= 0) return@addOnLayoutChangeListener
             val scale = minOf(aw.toFloat() / gw, ah.toFloat() / gh)
             val w = (gw * scale).toInt()
@@ -240,10 +246,11 @@ class VmActivity : ComponentActivity() {
             val lp = box.layoutParams as FrameLayout.LayoutParams
             val top = safeTop + (ah - h) / 2
             if (guestTopPx != top) guestTopPx = top
-            if (lp.width != w || lp.height != h || lp.topMargin != top) {
+            val left = safeLeft + (aw - w) / 2
+            if (lp.width != w || lp.height != h || lp.topMargin != top || lp.leftMargin != left) {
                 lp.width = w; lp.height = h
-                lp.gravity = Gravity.CENTER_HORIZONTAL or Gravity.TOP
-                lp.topMargin = top
+                lp.gravity = Gravity.LEFT or Gravity.TOP
+                lp.topMargin = top; lp.leftMargin = left
                 v.post { box.layoutParams = lp }
             }
         }
@@ -846,7 +853,10 @@ class VmActivity : ComponentActivity() {
             if (hasDeviceKeys && !showLog && !showTerm) {
                 DeviceKeypad(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 4.dp))
             } else if (vm.settings.showNavBar && !showLog && !showTerm) {
-                NavBar(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = if (vm.settings.navSize == 0) 3.dp else 6.dp))
+                val pad = if (vm.settings.navSize == 0) 3.dp else 6.dp
+                if (androidx.compose.ui.platform.LocalConfiguration.current.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE)
+                    NavBar(Modifier.align(Alignment.CenterEnd).navigationBarsPadding().displayCutoutPadding().padding(end = pad), vertical = true)
+                else NavBar(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = pad))
             }
         }
     }
@@ -930,13 +940,17 @@ class VmActivity : ComponentActivity() {
 
     /** The bar of guest buttons: the user's own set, each held down in the guest for as long as it is held here. */
     @Composable
-    private fun NavBar(modifier: Modifier) {
+    private fun NavBar(modifier: Modifier, vertical: Boolean = false) {
         val compact = vm.settings.navSize == 0
         val keys = remember { vm.settings.navKeys.split(',').filter { it in app.aemu.core.VmSettings.NAV_ALL } }
         if (keys.isEmpty()) return
         Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.92f), modifier = modifier) {
-            Row(Modifier.padding(horizontal = if (compact) 6.dp else 10.dp, vertical = if (compact) 2.dp else 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(if (compact) 6.dp else 4.dp)) {
+            val gap = if (compact) 6.dp else 4.dp
+            val along = if (compact) 6.dp else 10.dp
+            val across = if (compact) 2.dp else 6.dp
+            if (vertical) Column(Modifier.padding(horizontal = across, vertical = along), verticalArrangement = Arrangement.spacedBy(gap)) {
+                for (k in keys) NavKey(k, if (compact) 36.dp else 48.dp)
+            } else Row(Modifier.padding(horizontal = along, vertical = across), horizontalArrangement = Arrangement.spacedBy(gap)) {
                 for (k in keys) NavKey(k, if (compact) 36.dp else 48.dp)
             }
         }

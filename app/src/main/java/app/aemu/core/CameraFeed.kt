@@ -23,7 +23,13 @@ import java.nio.ByteOrder
 /**
  * The phone's cameras for the guest. The emulator's camera HAL (native/camerahal) connects to /dev/socket/aemu_cam
  * and sends "open <0 back | 1 front>", "start", "stop", "shot", "close"; frames go back as
- *     int32 type, width, height, length + data — type 1: RGBA_8888 then NV21 (preview), type 2: JPEG (picture).
+ *     int32 type, width, height, length + data — type 1: RGBA_8888 then NV21 (preview), type 2: JPEG (picture),
+ *     type 3: NV21 only (preview, after "nv21").
+ * "zoom <ratio×100>": digital zoom of every frame (preview, recording and picture).
+ * "size <w> <h>": NV21 previews of that size (the 640×480 frame cropped to its shape in the centre and scaled);
+ * type-3 frames then carry it in their header. Pictures stay 640×480.
+ * "ovl <id>" (2.3 HALs that show the preview through an overlay, camera_gb.cpp): the host draws each preview frame
+ * into that overlay itself (OverlayFeed), so the picture does not travel through the guest; "ovl 0" stops it.
  * Frames are 640×480 straight from the sensor (the HAL reports the sensor orientation, the guest rotates).
  */
 class CameraFeed(private val ctx: Context, private val paths: VmPaths, private val log: (String) -> Unit) {
@@ -41,7 +47,14 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         @Volatile private var reader: ImageReader? = null
         @Volatile private var streaming = false
         @Volatile private var shot = false
+        @Volatile private var onlyNv21 = false
+        @Volatile private var overlay = 0
+        @Volatile private var zoom = 100
+        @Volatile private var outW = W
+        @Volatile private var outH = H
         private val nv21 = ByteArray(W * H * 3 / 2)
+        private val zbuf = ByteArray(W * H * 3 / 2)
+        private var sized = ByteArray(0)
         private val rgba = ByteArray(W * H * 4)
         private var frames = 0
         private var firstNs = 0L
@@ -59,6 +72,13 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                         "start" -> streaming = true
                         "stop" -> streaming = false
                         "shot" -> shot = true
+                        "nv21" -> onlyNv21 = true
+                        "size" -> {
+                            val w = p.getOrNull(1)?.toIntOrNull() ?: W; val h = p.getOrNull(2)?.toIntOrNull() ?: H
+                            if (w in 16..1920 && h in 16..1080 && w % 2 == 0 && h % 2 == 0) { outH = h; outW = w }
+                        }
+                        "zoom" -> zoom = (p.getOrNull(1)?.toIntOrNull() ?: 100).coerceIn(100, 800)
+                        "ovl" -> overlay = p.getOrNull(1)?.toIntOrNull() ?: 0
                         "close" -> break
                     }
                 }
@@ -116,6 +136,8 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             if (!streaming && !shot) return
             val t0 = System.nanoTime()
             toNv21(img)
+            val z = zoom
+            if (z > 100) zoomNv21(z)
             runCatching {
                 if (shot) {
                     shot = false
@@ -125,9 +147,13 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                     send(2, jpg.toByteArray(), jpg.size())     // may come right after the picture, so this goes first)
                     return
                 }
-                toRgba()
+                val ow = outW; val oh = outH
+                val frame = if (ow == W && oh == H) nv21 else resized(ow, oh)
+                val ov = overlay
+                if (ov != 0) OverlayFeed.show(ov, frame, ow * oh * 3 / 2, ow, oh, OverlayFeed.NV21)
+                if (!onlyNv21) toRgba()
                 val t1 = System.nanoTime()
-                send(1, rgba, rgba.size, nv21)
+                if (onlyNv21) send(3, frame, ow * oh * 3 / 2, w = ow, h = oh) else send(1, rgba, rgba.size, nv21)
                 convNs += t1 - t0; sendNs += System.nanoTime() - t1
                 if (++frames == 30) {
                     // the host's own picture brightness: a dark guest preview with a dark host frame is the scene, not a bug
@@ -138,10 +164,49 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             }.onFailure { streaming = false }
         }
 
-        private fun send(type: Int, a: ByteArray, n: Int, b: ByteArray? = null) {
-            val h = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
-            h.putInt(type).putInt(W).putInt(H).putInt(n + (b?.size ?: 0))
-            synchronized(out) { out.write(h.array()); out.write(a, 0, n); if (b != null) out.write(b); out.flush() }
+        private fun send(type: Int, a: ByteArray, n: Int, b: ByteArray? = null, w: Int = W, h: Int = H) {
+            val hd = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
+            hd.putInt(type).putInt(w).putInt(h).putInt(n + (b?.size ?: 0))
+            synchronized(out) { out.write(hd.array()); out.write(a, 0, n); if (b != null) out.write(b); out.flush() }
+        }
+
+        /** the frame cropped in the centre to the shape of w×h and scaled to it (nearest pixel) */
+        private fun resized(w: Int, h: Int): ByteArray {
+            if (sized.size != w * h * 3 / 2) sized = ByteArray(w * h * 3 / 2)
+            val cw: Int; val ch: Int
+            if (W.toLong() * h > H.toLong() * w) { ch = H; cw = (H.toLong() * w / h).toInt() and 1.inv() } else { cw = W; ch = (W.toLong() * h / w).toInt() and 1.inv() }
+            val x0 = ((W - cw) / 2) and 1.inv(); val y0 = ((H - ch) / 2) and 1.inv()
+            for (y in 0 until h) {
+                val sr = (y0 + y * ch / h) * W + x0
+                for (x in 0 until w) sized[y * w + x] = nv21[sr + x * cw / w]
+            }
+            val n = W * H; val m = w * h
+            for (y in 0 until h / 2) {
+                val sr = n + ((y0 + y * 2 * ch / h) shr 1) * W
+                for (x in 0 until w / 2) {
+                    val sc = sr + ((x0 + x * 2 * cw / w) and 1.inv())
+                    sized[m + y * w + 2 * x] = nv21[sc]; sized[m + y * w + 2 * x + 1] = nv21[sc + 1]
+                }
+            }
+            return sized
+        }
+
+        /** digital zoom: the centre 1/ratio of the frame scaled back to W×H (nearest pixel) */
+        private fun zoomNv21(z: Int) {
+            val cw = W * 100 / z; val ch = H * 100 / z; val x0 = (W - cw) / 2; val y0 = (H - ch) / 2
+            for (y in 0 until H) {
+                val sr = (y0 + y * ch / H) * W + x0
+                for (x in 0 until W) zbuf[y * W + x] = nv21[sr + x * cw / W]
+            }
+            val n = W * H
+            for (y in 0 until H / 2) {
+                val sr = n + ((y0 + y * 2 * ch / H) shr 1) * W
+                for (x in 0 until W / 2) {
+                    val sc = sr + ((x0 + x * 2 * cw / W) and 1.inv())
+                    zbuf[n + y * W + 2 * x] = nv21[sc]; zbuf[n + y * W + 2 * x + 1] = nv21[sc + 1]
+                }
+            }
+            System.arraycopy(zbuf, 0, nv21, 0, zbuf.size)
         }
 
         /** YUV_420_888 planes (any row/pixel stride) → NV21 */

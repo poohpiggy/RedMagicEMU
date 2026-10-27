@@ -138,7 +138,13 @@ final class G3d {
     static final String FS_LIT = "precision mediump float; uniform vec3 u_col; varying float v_l; void main() { gl_FragColor = vec4(u_col * v_l, 1.0); }";
     static final String VS_Q = "attribute vec2 a_pos; varying vec2 v_uv; void main() { v_uv = a_pos * 0.5 + 0.5; gl_Position = vec4(a_pos, 0.0, 1.0); }";
 
-    static float[] proj(int w, int h) { float[] p = new float[16]; Matrix.perspectiveM(p, 0, 60, w / (float) h, 0.1f, 200); return p; }
+    static float[] proj(int w, int h) { float[] p = new float[16]; perspective(p, 60, w / (float) h, 0.1f, 200); return p; }
+    // Matrix.perspectiveM came in API 14; same math as its AOSP source, for 2.x-3.x
+    static void perspective(float[] m, float fovy, float aspect, float zNear, float zFar) {
+        float f = 1f / (float) Math.tan(fovy * (Math.PI / 360.0)), r = 1f / (zNear - zFar);
+        java.util.Arrays.fill(m, 0, 16, 0f);
+        m[0] = f / aspect; m[5] = f; m[10] = (zFar + zNear) * r; m[11] = -1f; m[14] = 2f * zFar * zNear * r;
+    }
 
     // ---- the scenes ----
     void add() {

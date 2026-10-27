@@ -101,7 +101,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     val audio = AudioOut(paths, ::log, if (img.api < 14) 44100 else AudioOut.RATE,
         if (TreeFixer.isMtkAudio(paths.root)) "dev/aemu_pcm" else "dev/eac")
     val ril = RilStub(paths, ::log, img.settings.imei.ifBlank { VmSettings.DEFAULT_IMEI }, img.api)
-    val vold = VoldStub(paths, img.sdcardPath, ::log, others = img.volumes, api = img.api)
+    val vold = VoldStub(paths, img.sdcardPath, ::log, others = img.volumes, api = img.api, setProp = { k, v -> props.put(k, v) })
     var onFrame: (() -> Unit)? = null
     val frames = FrameBell(paths, ::log) { onFrame?.invoke() }
     private val events = EventsSink(paths, ::log)
@@ -114,6 +114,8 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     val mic = AudioIn(ctx, paths.root, ::log)
     /** the phone's cameras for the guest (camera HAL → /dev/socket/aemu_cam) */
     val camera = CameraFeed(ctx, paths, ::log)
+    /** hardware overlays of 2.x (overlay HAL → /dev/socket/aemu_ovl), drawn over the screen */
+    val overlays = OverlayFeed(paths, ::log)
     @Volatile private var lmk: GuestLmk? = null
     val net = NetProxy(ctx, paths, ::log)
     private val dns = DnsProxy(paths, img.api, img.engine == Engine.N64 && Kernel64.forApi(img.api).dnsLayoutProbe, ::log)
@@ -164,7 +166,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         val sd = Sdcard.setup(ctx, paths, img, ::log)
         RecoveryImage.prepare(paths, sd, settings)
         input.rateHz = settings.touchHz
-        input.mtMode = settings.mtMode
+        input.mtMode = if (img.api < 5) 4 else settings.mtMode   // ABS_MT_* came in 2.0: 1.x KeyInputQueue reads ABS_X/Y only
         input.serve()
         // recovery's minui opens /dev/input/event* through openat():
         // a FIFO there gets the raw input_event stream straight from InputService
@@ -484,7 +486,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         props.serve()
         if (img.api < 3) props.serveAbstract()
         input.rateHz = s.touchHz
-        input.mtMode = s.mtMode
+        input.mtMode = if (img.api < 5) 4 else s.mtMode
         input.wide = engine == Engine.N64 && img.abi == "arm64-v8a"     // (a 32-bit firmware reads 16-byte events)
         input.serve()
         frames.serve()
@@ -522,6 +524,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         sensors.start()
         mic.start()
         camera.start()
+        overlays.start()
         if (img.api >= 21) logd.start()
         if (img.api >= 14) runCatching { dns.ensure() }
         // the RAM the guest is told it has (its /proc/meminfo, scaled by the kernel): the framework sizes its background by it
@@ -776,7 +779,13 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         if (svc.uid != 0) { extra["DHD_UID"] = svc.uid.toString(); extra["DHD_GID"] = svc.gid.toString() }
         var props = propsFile
         // звук: с ro.kernel.qemu=1 mediaserver берёт эмуляторный вывод в /dev/eac
-        if (svc.name == "mediaserver") props = this.props.privateCopy("media", mapOf("ro.kernel.qemu" to "1"))
+        // 2.2-2.3 AudioPolicyService (frameworks/base AudioPolicyService.cpp): with ro.kernel.qemu it builds
+        // AudioPolicyManagerBase. Galaxy S I9000 2.1/2.2 libaudioflinger has neither that class nor
+        // AudioHardwareGeneric, the emulator branch leaves mpPolicyManager null and mediaserver dies (SIGSEGV)
+        // (the global copy carries ro.kernel.qemu=1 too; the check is property_get()'s length, so "0" still counts: empty)
+        if (svc.name == "mediaserver")
+            props = this.props.privateCopy("media", mapOf("ro.kernel.qemu" to
+                if (img.api in 8..10 && !hasPolicyBase() || TreeFixer.legacyAudioWantsNoQemu(paths.root)) "" else "1"))
         val argv = if (svc.name == "zygote" && !settings.jit && img.runtime == "dalvik")
             svc.argv.take(1) + "-Xint:fast" + svc.argv.drop(1) else svc.argv
         // отладка: файл run/strace.<служба> включает трассировку системных вызовов qemu
@@ -1198,6 +1207,16 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
      * Ставит политику AOSP 4.3 за обёрткой: родная сохраняется, лишние потоки производителя
      * (Samsung: 0..14 против 0..9 в AOSP) обёртка сводит к MUSIC, чтобы AOSP-код не писал за массив.
      */
+    /** libaudioflinger carries AudioPolicyManagerBase (the class the emulator branch of 2.2-2.3 creates) */
+    private val policyBase by lazy {
+        runCatching {
+            val b = File(paths.root, "system/lib/libaudioflinger.so").readBytes()
+            val n = "AudioPolicyManagerBase".toByteArray()
+            (0..b.size - n.size).any { i -> b[i] == n[0] && (n.indices).all { b[i + it] == n[it] } }
+        }.getOrDefault(true)
+    }
+    private fun hasPolicyBase(): Boolean = policyBase
+
     private fun swapAudioPolicy(crashed: Boolean = false) {
         if (img.api < 16) return
         val f = File(paths.root, "system/lib/hw/audio_policy.default.so")
@@ -1357,7 +1376,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         log("stopping system")
         runCatching { guestRunner.run(listOf("/system/bin/sync"), 5_000) }
         killAll()
-        adb.stop(); props.stop(); props.stopAbstract();input.stop(); frames.stop(); ril.stop(); vold.stop(); audio.stop(); net.stop(); dns.stop(); events.stop(); logd.stop(); lights.stop(); sensors.stop(); mic.stop(); camera.stop(); GlHost.stop()
+        adb.stop(); props.stop(); props.stopAbstract();input.stop(); frames.stop(); ril.stop(); vold.stop(); audio.stop(); net.stop(); dns.stop(); events.stop(); logd.stop(); lights.stop(); sensors.stop(); mic.stop(); camera.stop(); overlays.stop(); GlHost.stop()
         extraStubs.forEach { it.stop() }; extraStubs.clear()
         lmk?.stop(); lmk = null
         Keeper.release(ctx)

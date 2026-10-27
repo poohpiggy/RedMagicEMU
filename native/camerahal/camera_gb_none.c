@@ -20,3 +20,10 @@ EXPORT void HAL_openCameraHardware(void **result, int id) {
     (void)id;
     *result = 0;
 }
+
+/* Android 1.0-2.2 (CameraHardwareInterface.h of those releases): one camera, extern "C"
+ * sp<CameraHardwareInterface> openCameraHardware(); - the same hidden result pointer. Without this export the
+ * CameraService of 1.x-2.2 does not link and mediaserver (sound, media) never starts. */
+EXPORT void openCameraHardware(void **result) {
+    *result = 0;
+}

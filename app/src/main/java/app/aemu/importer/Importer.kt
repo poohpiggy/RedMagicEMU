@@ -23,6 +23,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 import java.nio.file.StandardOpenOption
 import java.util.zip.GZIPInputStream
@@ -117,6 +118,8 @@ class Importer(
                 if (h[6].toInt() == 1) importRar5(src, name, depth) else importRar(src, name, depth)
             }
             PacFile.probe(h) -> if (ch != null) importPac(src, ch) else throw IOException("pac without random access")
+            h.size > 16 && String(h, 0, 16, Charsets.ISO_8859_1) == "Multi-Interface\u0000" ->
+                if (ch != null) importSbf(src, ch) else throw IOException("sbf without random access")
             PayloadReader.probe(h) -> importPayload(src, if (depth == 0) topInput else null)
             SinImage.probe(h) || SinImage.probeOld(h) && name.endsWith(".sin", true) -> importSin(streamOf(src), name.substringAfterLast('/'))
             SparseSource.probe(src) || Ext4Reader.probe(src) || SuperImage.probe(src) || ErofsReader.probe(src) -> importImage(src, "system")
@@ -266,7 +269,9 @@ class Importer(
                     zip.getInputStream(e).use { importSin(it, base) }
                 base.matches(Regex("(?i)vendor(\\.ext4)?\\.img")) ->
                     withEntrySource(zip, e) { runCatching { importImage(if (SparseSource.probe(it)) SparseSource(listOf(it)) else it, "vendor") } }
-                base.lowercase().endsWith(".zip") && (base.startsWith("image-") || depth == 0 && e.size > 50_000_000) -> {
+                // a zip around a whole firmware: image-*.zip of Google, a large zip, or a Sony .ftf (a zip itself)
+                (base.lowercase().endsWith(".zip") && (base.startsWith("image-") || depth == 0 && e.size > 50_000_000) ||
+                    base.lowercase().endsWith(".ftf")) -> {
                     handleNestedZip(spillEntry(zip, e), base, depth)
                 }
                 base.matches(Regex("(?i).*\\.(tar|tar\\.md5|md5|tgz|tar\\.gz)")) 
@@ -489,9 +494,12 @@ class Importer(
             if (n.isEmpty()) continue
             val base = n.substringAfterLast('/')
             // дерево rootfs целиком (system/, data/, dev/, …)
-            if (fullRoot == null && (n == "system" || n.startsWith("system/") || n.startsWith("init.rc") || n.startsWith("default.prop"))) fullRoot = true
+            // Odin tars of 2009-2010 Samsungs (GT-I7500) carry raw partition dumps named without an extension
+            // ("system", "kernel", "recovery" as regular files); in a rootfs tree "system" is a directory
+            val bareImage = e.isFile && e.size > 1_000_000 && base.matches(Regex("(?i)system|factoryfs"))
+            if (fullRoot == null && !bareImage && (n == "system" || n.startsWith("system/") || n.startsWith("init.rc") || n.startsWith("default.prop"))) fullRoot = true
             when {
-                (base.matches(SYSTEM_IMAGE) || base.matches(Regex("(?i)(system\\.img(\\.ext4)?|factoryfs\\.(img|rfs)|super\\.img)\\.lz4"))) && e.isFile -> {
+                (bareImage || base.matches(SYSTEM_IMAGE) || base.matches(Regex("(?i)(system\\.img(\\.ext4)?|factoryfs\\.(img|rfs)|super\\.img)\\.lz4"))) && e.isFile -> {
                     if (under != null && !base.endsWith(".lz4", true)) {
                         // an Odin tar holds the image as it is: read in place, the phone needs no second copy of it
                         importImage(ExtentSource(under, listOf(tar.bytesRead to e.size)), "system")
@@ -633,6 +641,59 @@ class Importer(
     }
 
     /** Spreadtrum .pac: partition files are slices of the package; system, boot and recovery are taken from it. */
+    /**
+     * Motorola .sbf (RSD Lite "Multi-Interface Super File"). From 0x300 a table of 32-byte code group entries: byte 3
+     * the group number, the load address at 6 (low u16, LE) and 8 (high u16), the last byte's address at 10/12.
+     * The data follow as records 03 02 02 00 00 00 00 03 02 00 00 00 00 00 03 02 01, size (BE32), load address
+     * (BE32), the bytes, a 4-byte checksum. (Checked on the Droid FRG83G file: CG39 0xd0ef4000..0xd8f577bf is the
+     * 0x080637c0-byte record of YAFFS2 pages 2048+64, CG35 0xc0680000 an Android boot image.) Groups by Motorola's
+     * numbering: 35 boot, 39 system.
+     */
+    private fun importSbf(src: RandomSource, ch: FileChannel) {
+        val tab = ByteBuffer.allocate(0x500).order(ByteOrder.LITTLE_ENDIAN)
+        src.read(0x300, tab); tab.flip()
+        val start = HashMap<Long, Int>()
+        for (o in 0 until 0x500 - 32 step 32) {
+            val cg = tab.get(o + 3).toInt() and 0xff
+            if ((0 until 32).all { tab.get(o + it).toInt() == 0 }) break   // the table ends with an empty entry
+            val a = ((tab.getShort(o + 8).toLong() and 0xffff) shl 16) or (tab.getShort(o + 6).toLong() and 0xffff)
+            start[a] = cg
+        }
+        log("sbf: code groups ${start.values.sorted()}")
+        val pre = byteArrayOf(3, 2, 2, 0, 0, 0, 0, 3, 2, 0, 0, 0, 0, 0, 3, 2, 1)
+        val win = ByteBuffer.allocate(1 shl 20)
+        var pos = 0L
+        var boot: ByteArray? = null
+        var sys: Pair<Long, Long>? = null
+        while (pos < src.size && (boot == null || sys == null)) {
+            if (cancelled) throw IOException("cancelled")
+            win.clear(); src.read(pos, win); win.flip()
+            val b = win.array(); val n = minOf(win.limit().toLong(), src.size - pos).toInt()
+            var hit = -1
+            var i = 0
+            while (i + pre.size + 8 <= n) {
+                var k = 0
+                while (k < pre.size && b[i + k] == pre[k]) k++
+                if (k == pre.size) { hit = i; break }
+                i++
+            }
+            if (hit < 0) { pos += maxOf(1, n - pre.size - 8); continue }
+            val hb = ByteBuffer.wrap(b, hit + pre.size, 8).order(ByteOrder.BIG_ENDIAN)
+            val size = hb.int.toLong() and 0xffffffffL; val addr = hb.int.toLong() and 0xffffffffL
+            val data = pos + hit + pre.size + 8
+            if (data + size > src.size) { pos += hit + 1; continue }
+            when (start[addr]) {
+                35 -> if (size < 64_000_000) boot = ByteArray(size.toInt()).also { src.read(data, ByteBuffer.wrap(it)) }
+                39 -> sys = data to size
+            }
+            onProgress("Reading SBF", 0.3f * (data + size) / src.size)
+            pos = data + size
+        }
+        boot?.let { takeBoot(it) }
+        val (off, size) = sys ?: throw IOException("sbf: no system code group (CG39)")
+        importImage(ChannelSource(ch, off, size), "system")
+    }
+
     private fun importPac(src: RandomSource, ch: FileChannel) {
         val list = PacFile.entries(src)
         log("PAC: ${list.joinToString { "${it.id}=${it.name}" }}")

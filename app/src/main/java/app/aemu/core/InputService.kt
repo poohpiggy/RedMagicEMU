@@ -16,7 +16,23 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
 
     data class P(val id: Int, val x: Int, val y: Int)
 
-    private class Client(val out: OutputStream, val pid: Int)
+    /**
+     * One guest reader. Its packets go out on its own thread: a guest that does not read (booting, or a reader left
+     * over from a system_server that died) fills the socket buffer, and a blocking write on the UI thread was an ANR.
+     * As the kernel's evdev does for a client that falls behind (evdev.c __pass_event), a full queue drops packets.
+     */
+    private class Client(val out: OutputStream, val pid: Int) {
+        private val q = java.util.concurrent.LinkedBlockingQueue<ByteArray>(256)
+        @Volatile var dead = false
+        init {
+            Thread({
+                try { while (!dead) { val a = q.take(); out.write(a); out.flush() } }
+                catch (_: Exception) { dead = true }
+            }, "input-out-$pid").apply { isDaemon = true; start() }
+        }
+        fun post(a: ByteArray) { if (!q.offer(a)) { q.clear(); q.offer(a) } }
+        fun close() { dead = true; q.offer(ByteArray(0)); runCatching { out.close() } }
+    }
 
     private val clients = CopyOnWriteArrayList<Client>()
     @Volatile var rateHz = 60
@@ -38,7 +54,7 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
         runCatching { c.sendBufferSize = 64 * 1024 }
         val pid = runCatching { c.peerCredentials.pid }.getOrDefault(-1)
         clients.removeAll { old ->
-            (old.pid == pid && pid > 0).also { if (it) runCatching { old.out.close() } }
+            (old.pid == pid && pid > 0).also { if (it) old.close() }
         }
         val me = Client(c.outputStream, pid)
         clients.add(me)
@@ -51,13 +67,14 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
             if (n < 0) break
         }
         clients.remove(me)
+        me.close()
     }
 
     fun serve() = server.start(log)
 
     fun stop() {
         server.stop()
-        clients.forEach { runCatching { it.out.close() } }
+        clients.forEach { it.close() }
         clients.clear()
     }
 
@@ -219,7 +236,7 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
             repeat(a.size / EV) { dst.putLong(src.int.toLong()); dst.putLong(src.int.toLong()); dst.putShort(src.short); dst.putShort(src.short); dst.putInt(src.int) }
         }
         for (c in clients) {
-            try { c.out.write(w); c.out.flush() } catch (e: Exception) { dead.add(c) }
+            if (c.dead) dead.add(c) else c.post(w)
         }
         if (dead.isNotEmpty()) clients.removeAll(dead.toSet())
         sent += a.size / EV

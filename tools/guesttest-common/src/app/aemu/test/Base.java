@@ -245,7 +245,8 @@ public abstract class Base extends Activity {
         ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
         am.getMemoryInfo(mi);
         line("device.ram_free_mb", mi.availMem >> 20);
-        line("device.gles", Integer.toHexString(am.getDeviceConfigurationInfo().reqGlEsVersion));
+        // ConfigurationInfo.reqGlEsVersion and getDeviceConfigurationInfo() are API 4: 1.5 has GLES 1.0 only
+        line("device.gles", SDK >= 4 ? Integer.toHexString(am.getDeviceConfigurationInfo().reqGlEsVersion) : "10000 (api 3)");
         line("device.hw_accel", hwAccel(root));
         line("device.heap_mb", Runtime.getRuntime().maxMemory() >> 20);
         done();
@@ -798,16 +799,19 @@ public abstract class Base extends Activity {
         final WebView w = new WebView(this);
         line("webview.created_ms", SystemClock.elapsedRealtime() - t0);
         w.getSettings().setJavaScriptEnabled(true);
+        // the answer comes back through a Java object too (API 1): getTitle() of 1.x WebView is not updated by script
+        final String[] js = { null };
+        w.addJavascriptInterface(new Object() { @SuppressWarnings("unused") public void r(String v) { js[0] = v; } }, "aemu");
         line("webview.ua", w.getSettings().getUserAgentString());
         w.setWebViewClient(new WebViewClient() {
             @Override public void onPageFinished(WebView v, String url) {
                 if (url.startsWith("javascript:")) return;
                 line("webview.loaded_ms", SystemClock.elapsedRealtime() - t0);
                 h.postDelayed(new Runnable() { public void run() {
-                    w.loadUrl("javascript:document.title='R:frames '+window.n+' sum '+window.s+' gl '+window.gl");
+                    w.loadUrl("javascript:(function(){var r='frames '+window.n+' sum '+window.s+' gl '+window.gl;document.title='R:'+r;try{aemu.r(r)}catch(e){}})()");
                     h.postDelayed(new Runnable() { public void run() {
                         String t = w.getTitle();
-                        line("webview.js", t != null && t.startsWith("R:") ? t.substring(2) : "no answer (" + t + ")");
+                        line("webview.js", js[0] != null ? js[0] : t != null && t.startsWith("R:") ? t.substring(2) : "no answer (" + t + ")");
                         end.run();
                     } }, 500);
                 } }, 3000);

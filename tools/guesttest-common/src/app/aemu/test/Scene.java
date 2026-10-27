@@ -167,7 +167,7 @@ class Scene implements GLSurfaceView.Renderer {
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         GLES20.glEnable(GLES20.GL_CULL_FACE);
-        Matrix.perspectiveM(proj, 0, 60, vw / (float) vh, 0.1f, 100);
+        G3d.perspective(proj, 60, vw / (float) vh, 0.1f, 100);
         Matrix.setLookAtM(view, 0, 0, 3, 14, 0, 0, 0, 0, 1, 0);
         GLES20.glUseProgram(prog);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex);

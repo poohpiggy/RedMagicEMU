@@ -157,6 +157,7 @@ class TreeFixer(
     fun fixup(owners: Boolean = true) {
         if (owners) seedOwners()
         installEngineFiles()
+        HcHwRender.install(ctx, root, img.api, log)
         protectOat()
         fixThemeXml()
         parkWhetstone()
@@ -346,6 +347,13 @@ class TreeFixer(
     }
 
     private fun keyLayout() {
+        // 3.x: InputReader takes a touch device for a touch pad unless its configuration file says
+        // touch.deviceType = touchScreen (Input Device Configuration Files; 4.0+ also reads INPUT_PROP_DIRECT)
+        if (img.api in 11..13) runCatching {
+            val idc = File(root, "system/usr/idc/dhd-touch.idc")
+            val want = "# AEmulator: the screen's touch panel\ntouch.deviceType = touchScreen\ndevice.internal = 1\n"
+            if (!idc.isFile || idc.readText() != want) { idc.parentFile?.mkdirs(); idc.writeText(want); idc.setReadable(true, false) }
+        }
         val f = File(root, "system/usr/keylayout/dhd-touch.kl")
         val vf = File(root, "vendor/usr/keylayout/dhd-touch.kl")
         // pre-1.0 (M5): the firmware's own qwerty.kl says which labels exist and what each scan code is (139 = SOFT_LEFT,
@@ -1006,25 +1014,53 @@ class TreeFixer(
                 copied++
             }.onFailure { log("$n not replaced: ${it.message}") }
         }
-        // камера 2.3: заглушка вместо вендорской libcamera.so, которая лезет в /dev/msm_camera
+        // 2.3 whose CameraService has the extended CameraHardwareInterface (Client::getBufferInfo(sp<IMemory>&,
+        // unsigned*), the vtable camera_gb.cpp is built for): the emulator's HAL over aemu_cam instead of the
+        // firmware's, which drives /dev/msm_camera (stock kept in .aemu-parked)
         val cam = File(root, "system/lib/libcamera.so")
-        val stamp = File(root, "system/lib/libcamera.so.aemu")
         val parkedCam = File(root, "system/.aemu-parked/system#lib#libcamera.so")
-        val htc = img.skin.contains("HTC", true)
-        // заглушка собрана под интерфейс камеры HTC — у других производителей оставляем родную
-        if (!htc && stamp.isFile && parkedCam.isFile) { cam.delete(); parkedCam.renameTo(cam); stamp.delete() }
-        if (engine == Engine.GB && htc) {
-            if (cam.isFile && !stamp.isFile) {
-                runCatching {
-                    File(root, "system/.aemu-parked").mkdirs()
-                    cam.copyTo(File(root, "system/.aemu-parked/system#lib#libcamera.so"), overwrite = true)
-                    EngineAssets.open(ctx, "engines/gb/libcamera.so").use { i -> cam.outputStream().use { o -> i.copyTo(o) } }
-                    stamp.writeText("1")
+        val extIface = img.api <= 10 && runCatching {
+            String(File(root, "system/lib/libcameraservice.so").readBytes(), Charsets.ISO_8859_1)
+                .contains("_ZN7android13CameraService6Client13getBufferInfoERNS_2spINS_7IMemoryEEEPj")
+        }.getOrDefault(false)
+        if (extIface) runCatching {
+            val fresh = EngineAssets.open(ctx, "engines/gb/libcamera.so").use { it.readBytes() }
+            if (!cam.isFile || !fresh.contentEquals(cam.readBytes())) {
+                // an older emulator stub (no stamp of the firmware's own) is not parked
+                if (cam.isFile && !parkedCam.exists() && !String(cam.readBytes(), Charsets.ISO_8859_1).contains("DhdCamera")) {
+                    parkedCam.parentFile?.mkdirs(); cam.copyTo(parkedCam)
                 }
+                cam.writeBytes(fresh); cam.setReadable(true, false)
+                File(root, "system/lib/libcamera.so.aemu").delete()
+                log("camera: the emulator's 2.3 camera HAL (extended interface) installed")
+                copied++
             }
-        }
+        }.onFailure { log("camera: HAL not replaced: ${it.message}") }
+        // 2.x: the emulator's libaudio.so (legacy_audio.c) instead of the firmware's (which drives the vendor's sound
+        // chip, or with ro.kernel.qemu gives AudioHardwareGeneric: microphone at 8 kHz only) — when nothing but the
+        // factory is taken from libaudio.so; its virtual tables follow the firmware's own (LegacyAudio.map)
+        if (img.api in 5..10 && !isMtkAudio(root)) runCatching {
+            val lib = File(root, "system/lib/libaudio.so")
+            val parked = File(root, "system/.aemu-parked/system#lib#libaudio.so")
+            val orig = if (parked.isFile) parked else lib
+            val flinger = File(root, "system/lib/libaudioflinger.so")
+            if (!orig.isFile || !flinger.isFile) return@runCatching
+            val factories = setOf("_ZN7android22AudioHardwareInterface6createEv", "_ZN7android19createAudioHardwareEv", "createAudioHardware")
+            val imports = LegacyAudio.importsFromLibaudio(File(root, "system/lib"), orig)?.filter { "Audio" in it }
+            if (imports == null || !factories.containsAll(imports)) { log("audio: libaudio.so keeps the firmware's (it also gives $imports)"); return@runCatching }
+            val map = LegacyAudio.map(listOf(orig, flinger)) { log(it) } ?: return@runCatching
+            val mapFile = File(root, "system/etc/aemu_legacy_audio.map")
+            if (!mapFile.isFile || mapFile.readText() != map) { mapFile.parentFile?.mkdirs(); mapFile.writeText(map); mapFile.setReadable(true, false) }
+            val fresh = EngineAssets.open(ctx, "engines/gb/libaudio.legacy.so").use { it.readBytes() }
+            if (!lib.isFile || !fresh.contentEquals(lib.readBytes())) {
+                if (!parked.exists()) { parked.parentFile?.mkdirs(); lib.copyTo(parked) }
+                lib.writeBytes(fresh); lib.setReadable(true, false)
+                log("audio: the emulator's 2.x audio HAL installed (microphone at any rate)")
+                copied++
+            }
+        }.onFailure { log("audio: HAL not replaced: ${it.message}") }
         // 2.3, Qualcomm: the camera HAL needs the modem (ONCRPC) and quits mediaserver without it — a HAL with no cameras
-        if (img.api <= 10 && !htc && cam.isFile && !parkedCam.exists() && cam.length() > 4096) {
+        if (img.api <= 10 && !extIface && cam.isFile && !parkedCam.exists() && cam.length() > 4096) {
             val text = runCatching { String(cam.readBytes(), Charsets.ISO_8859_1) }.getOrDefault("")
             if (listOf("libcald", "liboemcamera", "oncrpc").any { text.contains(it) }) runCatching {
                 File(root, "system/.aemu-parked").mkdirs()
@@ -1033,6 +1069,22 @@ class TreeFixer(
                 log("camera: the firmware's 2.3 HAL needs the modem, replaced with an empty one (stock kept)")
                 copied++
             }
+        } else if (img.api <= 10 && !extIface && parkedCam.isFile && cam.isFile && cam.length() <= 4096) {
+            // an empty HAL put here by an older build: refresh it (1.x-2.2 need the openCameraHardware export)
+            runCatching {
+                val fresh = EngineAssets.open(ctx, "engines/common/libcamera.none.so").use { it.readBytes() }
+                if (!fresh.contentEquals(cam.readBytes())) { cam.writeBytes(fresh); copied++ }
+            }
+        }
+        // 2.x: a firmware that came with an overlay module (parked: it drives the SoC's display hardware) shows its
+        // camera preview through an overlay, and its CameraService gives up without one: the emulator's overlay HAL,
+        // whose pictures the app draws over the screen (native/overlayhal, OverlayFeed)
+        if (img.api <= 10 && File(root, "system/.aemu-parked").listFiles()?.any { it.name.startsWith("system#lib#hw#overlay.") } == true) {
+            val ovl = File(root, "system/lib/hw/overlay.default.so")
+            runCatching {
+                val fresh = EngineAssets.open(ctx, "engines/common/overlay.default.so").use { it.readBytes() }
+                if (!ovl.isFile || !fresh.contentEquals(ovl.readBytes())) { ovl.parentFile?.mkdirs(); ovl.writeBytes(fresh); ovl.setReadable(true, false); copied++ }
+            }.onFailure { log("overlay HAL not installed: ${it.message}") }
         }
         if (copied > 0) log("engine ${engine.id} files updated: $copied")
     }
@@ -1581,6 +1633,12 @@ class TreeFixer(
         // core, and its only pool thread waited for the tasks it had queued behind itself)
         for (n in 0 until cpus) File(cpu, "cpu$n/online").let { if (!it.isFile) { it.parentFile?.mkdirs(); it.writeText("1\n") } }
         File(root, "sys/class/net/lo").mkdirs()
+        // the headset jack (switch class, drivers/switch/switch_class.c: name, state; 0 = nothing plugged), present on
+        // phones of every generation: HeadsetObserver/WiredAccessoryManager read it, and Samsung 2.1 mediaserver
+        // (initialize_database) fcloses the result of fopen("/sys/class/switch/h2w/state") unchecked
+        File(root, "sys/class/switch/h2w").let { d ->
+            if (!File(d, "state").isFile) { d.mkdirs(); File(d, "name").writeText("h2w\n"); File(d, "state").writeText("0\n") }
+        }
         if (engine == Engine.N64 && kernel.cgroup2Root) {
             File(root, "sys/fs/cgroup").mkdirs()
             for (d in kernel.cgroupUidParents) File(root, "sys/fs/cgroup/$d").mkdirs()
@@ -2207,6 +2265,12 @@ class TreeFixer(
         /** the entries of [SETUP_WIZARDS] that take over the screen at first boot (the AOSP provisioner finishes by itself) */
         val FIRST_RUN_WIZARDS = listOf("com.sec.android.app.SecSetupWizard", "com.google.android.setupwizard", "com.miui.provision",
             "com.htc.setupwizard", "com.sonyericsson.setupwizard", "com.sonymobile.setupwizard")
+        /** Our 2.x audio HAL is in, and libaudioflinger has its own AudioHardwareInterface::create (AOSP), which picks
+         *  AudioHardwareGeneric under ro.kernel.qemu: mediaserver must not see that property then. */
+        fun legacyAudioWantsNoQemu(root: File): Boolean =
+            File(root, "system/etc/aemu_legacy_audio.map").isFile &&
+                ElfPatch.symbols(File(root, "system/lib/libaudioflinger.so"), setOf("_ZN7android22AudioHardwareInterface6createEv"))?.isNotEmpty() == true
+
         /** Прошивка MediaTek, где AudioFlinger связан с собственной звуковой библиотекой MTK (/dev/eac). */
         fun isMtkAudio(root: File): Boolean {
             if (File(root, "system/lib/libaudio.mtk.so").isFile) return true   // already swapped for our HAL

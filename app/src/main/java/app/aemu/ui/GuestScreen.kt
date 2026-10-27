@@ -69,6 +69,7 @@ class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(c
     fun start() {
         if (live) return
         live = true
+        app.aemu.core.OverlayFeed.onChange = { postInvalidate() }
         Thread({
             while (live) {
                 runCatching { tick() }
@@ -183,9 +184,53 @@ class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(c
 
     override fun onDraw(c: Canvas) {
         dst.set(0, 0, width, height)
-        if (passthrough) return
+        if (passthrough) { drawOverlays(c); return }
         val b = bmp
         if (b != null) c.drawBitmap(b, null, dst, paint) else c.drawColor(0xff000000.toInt())
+        drawOverlays(c)
+    }
+
+    private val ovDst = android.graphics.Rect()
+    private val ovCrop = android.graphics.Rect()
+    private var ovGuest = IntArray(0); private var ovSrc = IntArray(0); private var ovOut: Bitmap? = null
+    /**
+     * 2.x hardware overlays (camera preview), in their place on the guest's screen. As on the hardware, SurfaceFlinger
+     * leaves the overlay's area black in the frame and the overlay shows only there: what the guest draws over it
+     * (menus, the lock screen) stays on top.
+     */
+    private fun drawOverlays(c: Canvas) {
+        val gb = if (passthrough) null else bmp
+        for (l in app.aemu.core.OverlayFeed.layers.values) {
+            val ob = l.bmp ?: continue
+            if (!l.visible || l.rect.isEmpty) continue
+            val r = android.graphics.Rect(l.rect)
+            if (!r.intersect(0, 0, w, h)) continue
+            ovDst.set(r.left * width / w, r.top * height / h, r.right * width / w, r.bottom * height / h)
+            // the picture keeps its proportions: a centred crop to the overlay's shape (the host camera gives 4:3 only,
+            // a phone's own HAL would give a preview size of the screen's shape)
+            val lw = l.rect.width(); val lh = l.rect.height()
+            val ow = ob.width; val oh = ob.height
+            val cw = if (ow.toLong() * lh > oh.toLong() * lw) (oh.toLong() * lw / lh).toInt() else ow
+            val ch = if (cw == ow) (ow.toLong() * lh / lw).toInt().coerceAtMost(oh) else oh
+            val cx = (ow - cw) / 2; val cy = (oh - ch) / 2
+            if (gb == null) { ovCrop.set(cx, cy, cx + cw, cy + ch); c.drawBitmap(ob, ovCrop, ovDst, paint); continue }
+            val rw = r.width(); val rh = r.height(); val n = rw * rh
+            if (ovGuest.size < n) { ovGuest = IntArray(n) }
+            gb.getPixels(ovGuest, 0, rw, r.left, r.top, rw, rh)
+            if (ovSrc.size < ow * oh) ovSrc = IntArray(ow * oh)
+            ob.getPixels(ovSrc, 0, ow, 0, 0, ow, oh)
+            for (y in 0 until rh) {
+                val sy = (cy + (y + r.top - l.rect.top) * ch / lh).coerceIn(0, oh - 1) * ow
+                for (x in 0 until rw) {
+                    val i = y * rw + x
+                    if (ovGuest[i] and 0xffffff == 0) ovGuest[i] = ovSrc[sy + (cx + (x + r.left - l.rect.left) * cw / lw).coerceIn(0, ow - 1)]
+                }
+            }
+            var out = ovOut
+            if (out == null || out.width != rw || out.height != rh) { out = Bitmap.createBitmap(rw, rh, Bitmap.Config.ARGB_8888); ovOut = out }
+            out.setPixels(ovGuest, 0, rw, 0, 0, rw, rh)
+            c.drawBitmap(out, null, ovDst, paint)
+        }
     }
 
     @SuppressLint("ClickableViewAccessibility")

@@ -26,3 +26,32 @@ mkdir -p "$(dirname "$OUT")"
 # for Camera.openLegacy
 "$BIN/clang" --target=armv7a-linux-androideabi21 -march=armv7-a -mthumb -DCAM_MODULE_24 -Os -fPIC -shared   -nostdlib -ffreestanding -fno-builtin -fvisibility=hidden -fno-stack-protector   -Wl,--hash-style=sysv -Wl,-z,norelro -Wl,--build-id=none -Wl,--no-undefined -Wl,-soname,camera.default.so   -o "$(dirname "$OUT")/../n64-25/system#lib#hw#camera.default.so" camera_hal.c -ldl -lc
 "$BIN/llvm-strip" "$(dirname "$OUT")/../n64-25/system#lib#hw#camera.default.so" 2>/dev/null || true
+# 2.3 with the HAL linked into CameraService (HTC): CameraHardwareInterface over aemu_cam (camera_gb.cpp). The
+# firmware's C++ classes of 2.3 come from its own libraries: link against stubs with their sonames, holding the
+# symbols the object needs, each taken from the firmware library that exports it (FW=<a 2.3 system/lib copy>;
+# lld rejects the prelinked originals)
+FW=${FW:-E:/aemu_work/htccam}
+if [ -f "$FW/libcamera_client.so" ]; then
+T=$(mktemp -d)
+CXXF="--target=armv7a-linux-androideabi21 -march=armv7-a -mthumb -Os -fPIC -ffreestanding -fno-builtin -fno-exceptions \
+  -fno-rtti -fno-threadsafe-statics -fvisibility=hidden -fvisibility-inlines-hidden -fno-stack-protector -fno-use-cxa-atexit"
+"$BIN/clang++" $CXXF -c -o "$T/cam.o" camera_gb.cpp
+LIBS=""
+for l in libcamera_client libbinder libutils liblog libstdc++ libc; do
+  "$BIN/llvm-readelf" --dyn-syms "$FW/$l.so" | awk '$7!="UND" && $5!="LOCAL"{print $8}' | sed 's/@.*//' | sort -u > "$T/$l.exp"
+done
+"$BIN/llvm-nm" -u "$T/cam.o" | awk '{print $2}' | sort -u > "$T/need"
+for l in libcamera_client libbinder libutils liblog libstdc++ libc; do
+  comm -12 "$T/need" "$T/$l.exp" > "$T/$l.use"; comm -23 "$T/need" "$T/$l.use" > "$T/rest"; mv "$T/rest" "$T/need"
+  awk '{print "void " $1 "(void){}"}' "$T/$l.use" > "$T/$l.c"
+  "$BIN/clang" --target=armv7a-linux-androideabi21 -shared -nostdlib -fPIC -w -Wl,-soname,$l.so -o "$T/$l.so" "$T/$l.c"
+  LIBS="$LIBS $T/$l.so"
+done
+if [ -s "$T/need" ]; then echo "camera_gb: not in the firmware: $(cat "$T/need")"; else
+"$BIN/clang++" --target=armv7a-linux-androideabi21 -shared -nostdlib -nostdlib++ \
+  -Wl,--hash-style=sysv -Wl,-z,norelro -Wl,--build-id=none -Wl,--no-undefined -Wl,-soname,libcamera.so \
+  -o "$(dirname "$OUT")/../gb/libcamera.so" "$T/cam.o" $LIBS
+"$BIN/llvm-strip" "$(dirname "$OUT")/../gb/libcamera.so" 2>/dev/null || true
+fi
+rm -r "$T"
+fi

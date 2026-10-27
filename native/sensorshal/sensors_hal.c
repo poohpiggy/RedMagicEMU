@@ -179,12 +179,12 @@ struct sensors_data_t_ {
     int64_t time;
     uint32_t reserved;
 };
+/* 2.0+ (eclair/froyo sensors.h) put close_data_source after open_data_source, moving activate, set_delay and wake
+ * to 0x48, 0x4c, 0x50 (seen in libandroid_servers: 1.6 reads 0x40..0x4c, 2.1/2.2 0x40..0x50, 0x44 null-checked).
+ * The slots are filled per layout at open. */
 struct control_device {
     struct hw_device common;
-    void *(*open_data_source)(struct control_device *d);
-    int (*activate)(struct control_device *d, int handle, int enabled);
-    int (*set_delay)(struct control_device *d, int32_t ms);
-    int (*wake)(struct control_device *d);
+    void *slot[5];
     int api;
 };
 struct data_device {
@@ -192,6 +192,13 @@ struct data_device {
     int (*data_open)(struct data_device *d, void *src);
     int (*data_close)(struct data_device *d);
     int (*poll)(struct data_device *d, struct sensors_data_t_ *data);
+    /* Samsung 2.x libandroid_runtime (Galaxy S I9000 2.1, JNI table: sensors_factory_test ([I)I,
+     * sensors_factory_test_yamaha (I[I)I, sensors_calibrate (I)I, sensors_set_delay (II)I) calls four more slots
+     * right after poll: 0x4c, 0x50, 0x54, 0x58. AOSP never reads past poll. */
+    int (*factory_test)(struct data_device *d, int *out);
+    int (*factory_test_yamaha)(struct data_device *d, int what, int *out);
+    int (*calibrate)(struct data_device *d, int what);
+    int (*set_delay)(struct data_device *d, int handle, int ms);
     int api, fd;
 };
 extern int dup(int fd);
@@ -209,6 +216,7 @@ static void *ctl_open_source(struct control_device *d) {
 static int ctl_activate(struct control_device *d, int handle, int en) { (void)d; if (handle == HANDLE_ACCEL) legacy_active = en; return 0; }
 static int ctl_set_delay(struct control_device *d, int32_t ms) { (void)d; (void)ms; return 0; }
 static int ctl_wake(struct control_device *d) { (void)d; return 0; }
+static int ctl_close_source(struct control_device *d) { (void)d; return 0; }
 
 static int dat_open(struct data_device *d, void *src) {
     int fd = d->api <= 3 ? (int)(long)src : (src ? ((struct native_handle_ *)src)->data[0] : -1);
@@ -230,6 +238,10 @@ static int dat_poll(struct data_device *d, struct sensors_data_t_ *out) {
         return HANDLE_ACCEL;
     }
 }
+static int dat_unsupported1(struct data_device *d, int *o) { (void)d; (void)o; return -1; }
+static int dat_unsupported2(struct data_device *d, int w, int *o) { (void)d; (void)w; (void)o; return -1; }
+static int dat_calibrate(struct data_device *d, int w) { (void)d; (void)w; return -1; }
+static int dat_set_delay(struct data_device *d, int h, int ms) { (void)d; (void)h; (void)ms; return 0; }
 static int legacy_close(struct hw_device *h) { free(h); return 0; }
 
 static int streq(const char *a, const char *b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
@@ -244,7 +256,10 @@ static int sensors_open(const struct hw_module *m, const char *id, struct hw_dev
         if (!c) return -12;
         c->common.tag = HARDWARE_DEVICE_TAG; c->common.version = 0; c->common.module = (struct hw_module *)m;
         c->common.close = legacy_close;
-        c->open_data_source = ctl_open_source; c->activate = ctl_activate; c->set_delay = ctl_set_delay; c->wake = ctl_wake;
+        int k = 0;
+        c->slot[k++] = (void *)ctl_open_source;
+        if (api >= 5) c->slot[k++] = (void *)ctl_close_source;
+        c->slot[k++] = (void *)ctl_activate; c->slot[k++] = (void *)ctl_set_delay; c->slot[k++] = (void *)ctl_wake;
         c->api = api;
         *out = &c->common;
         return 0;
@@ -255,6 +270,8 @@ static int sensors_open(const struct hw_module *m, const char *id, struct hw_dev
         dd->common.tag = HARDWARE_DEVICE_TAG; dd->common.version = 0; dd->common.module = (struct hw_module *)m;
         dd->common.close = legacy_close;
         dd->data_open = dat_open; dd->data_close = dat_close; dd->poll = dat_poll;
+        dd->factory_test = dat_unsupported1; dd->factory_test_yamaha = dat_unsupported2;
+        dd->calibrate = dat_calibrate; dd->set_delay = dat_set_delay;
         dd->api = api; dd->fd = -1;
         *out = &dd->common;
         return 0;

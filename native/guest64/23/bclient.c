@@ -422,6 +422,7 @@ static long bwrite_read32(struct bth *t, struct bwr32 *w) {
     long r = 0;
     char *big = 0; u64 bigsz = 0;
     struct btd d64;
+    int refused = 0;
     while (p + 4 <= end && nc + 20 < 512) {
         u32 cmd = *(u32 *)p, sz = (cmd >> 16) & 0x3fff, *a = (u32 *)(p + 4);
         if (p + 4 + sz > end) break;
@@ -448,12 +449,23 @@ static long bwrite_read32(struct bth *t, struct bwr32 *w) {
             cmds[nc++] = cmd + 0x40000u; cmds[nc++] = a[0]; cmds[nc++] = a[1]; cmds[nc++] = 0; break;
         case 0x40046310u:                       // BC_DEAD_BINDER_DONE: cookie
             cmds[nc++] = 0x40086310u; cmds[nc++] = a[0]; cmds[nc++] = 0; break;
+        case 0x4008630au: case 0x40046302u:     // BC_ATTEMPT_ACQUIRE, BC_ACQUIRE_RESULT
+            // the driver (binder_thread_write) refuses both with -EINVAL: the commands before them stand, the
+            // read is not done, write_consumed stops at them. 1.x libutils sends ATTEMPT_ACQUIRE from wp::promote
+            // and then waits for BR_ACQUIRE_RESULT, which never comes when the command is just dropped.
+            refused = 1; break;
         default:                                // handles and plain commands are the same in both
             if (sz <= 16) { cmds[nc++] = cmd; memcpy(cmds + nc, a, sz); nc += (sz + 3) / 4; }
         }
+        if (refused) break;
         p += 4 + sz;
     }
     w->write_consumed = (u32)(p - (char *)G(w->write_buffer));
+    if (refused) {
+        if (nc) { struct bwr w64 = { (u64)nc * 4, 0, (u64)(ul)cmds, 0, 0, 0 }; bwrite_read(t, &w64); }
+        if (big) S2(NR_munmap, big, bigsz);
+        return -EINVAL;
+    }
     // the answer arrives 64-bit in a buffer of ours, at most twice the size it will have
     u64 rs = w->read_size > w->read_consumed ? w->read_size - w->read_consumed : 0;
     char *rb = 0; u64 rbsz = 0;

@@ -158,6 +158,9 @@ static const char *xl(const char *p, char *buf, int *err) {
             if (pre(q, "self")) q += 4; else { while (*q >= '0' && *q <= '9') pid = pid * 10 + (u64)(*q++ - '0'); if (pid != (u64)S0(172 /* getpid */)) q = ""; }
             if (seq(q, "/task")) memcpy(n, "/proc/.one", 11);
         }
+        // /proc itself is the phone's: its listing holds the guest's processes (an app's /proc shows its own uid
+        // only), which ps and ProcessStats walk; the image's own /proc keeps just a few files, served by path below
+        if (seq(n, "/proc")) return p;
         memcpy(buf, g_root, g_rootlen);
         if (pre(n, "/sys/fs/selinux") || pre(n, "/sys/power") || S4(NR_faccessat, AT_FDCWD, buf, 0, 0) == 0) return buf;
         return p;
@@ -452,7 +455,7 @@ static long fb_ioctl(u32 cmd, u64 arg) {
     }
     // PUT_VSCREENINFO: fb0 has one page. 0.9-1.x EGLDisplaySurface asks for two and trusts a 0 without reading back,
     // then flips into a page that does not exist; refused, it renders into its own back buffer
-    case 0x4601: return 0;
+    case 0x4601: return ((u32 *)arg)[3] > g_fbh ? -22 /* EINVAL */ : 0;   // two pages asked: refused, as said above
     case 0x4606: case 0x4611: return 0;                 // PAN_DISPLAY, BLANK
     }
     return -25; /* ENOTTY */
@@ -712,6 +715,9 @@ static long alarm_ioctl(u32 cmd, u64 arg) {
 
 #define PB(i) ((*pbp ? *pbp : (*pbp = pb_get())) + (i) * PATH_MAX)
 
+#include "alsa.c"
+#include "v4l2.c"
+
 static long trap2(long nr, long *a, void *uc, char **pbp) {
     int err = 0;
     switch (nr) {
@@ -725,9 +731,13 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
                 if (seq(P(1), "/dev/binder") || seq(P(1), "/dev/hwbinder") || seq(P(1), "/dev/vndbinder")) return binder_open(a[2], P(1));
                 if (pre(P(1), "/dev/input/event")) return input_open(a[2]);
                 if (seq(P(1), "/dev/alarm")) return alarm_open();
+                if (g_is32 && pre(P(1), "/dev/snd/")) return snd_open(P(1), a[2]);   // ALSA for 2.x vendor HALs (alsa.c)
+                if (g_is32 && pre(P(1), "/dev/video")) return v4_open(P(1), a[2]);   // V4L2 camera for 2.x vendor HALs (v4l2.c)
                 if (seq(P(1), "/dev/cpuctl/tasks") || seq(P(1), "/dev/cpuctl/bg_non_interactive/tasks")) return cg_open(P(1), a[2]);
                 // 4.4 (open32) keeps its groups under apps/; a failed move makes setThreadPriority throw in system_server
                 if (seq(P(1), "/dev/cpuctl/apps/tasks")) return cg_open("/dev/cpuctl/tasks", a[2]);
+                // 2.0-2.1 libcutils builds "/dev/cpuctl/%s/tasks" with "" for the foreground group (seen in its log)
+                if (seq(P(1), "/dev/cpuctl//tasks")) return cg_open("/dev/cpuctl/tasks", a[2]);
                 if (seq(P(1), "/dev/cpuctl/apps/bg_non_interactive/tasks")) return cg_open("/dev/cpuctl/bg_non_interactive/tasks", a[2]);
             }
             if (seq(P(1), "/proc/meminfo")) { long r = meminfo_open(); if (r >= 0) return r; }
@@ -972,6 +982,8 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
     }
     case NR_close: {
         if (is_nl_fd((int)a[0])) nl_close((int)a[0]);
+        if (g_is32 && snd_of((int)a[0])) { snd_closed((int)a[0]); return 0; }
+        if (g_is32 && v4_of((int)a[0])) { v4_closed((int)a[0]); return 0; }
         return S1(nr, a[0]);
     }
     case NR_execve:
@@ -984,9 +996,28 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
         if (((u32)a[1] & 0xffffff00u) == 0x4600) return fb_ioctl((u32)a[1], (u64)a[2]);   /* qemu converts FBIO* itself */
         if (((a[1] >> 8) & 0xff) == 'b' && is_binder_fd((int)a[0])) return binder_ioctl((int)a[0], (u32)a[1], (u64)a[2]);
         if (((a[1] >> 8) & 0xff) == 'a' && is_alarm_fd((int)a[0])) return alarm_ioctl((u32)a[1], (u64)a[2]);
+        if (g_is32 && (((a[1] >> 8) & 0xff) == 'A' || ((a[1] >> 8) & 0xff) == 'U') && snd_of((int)a[0])) return snd_ioctl((int)a[0], (u32)a[1], (u64)a[2]);
+        if (g_is32 && ((a[1] >> 8) & 0xff) == 'V' && v4_of((int)a[0])) return v4_ioctl((int)a[0], (u32)a[1], (u64)a[2]);
+        if ((u32)a[1] == 0x80047212u) {
+            // VFAT_IOCTL_GET_VOLUME_ID (_IOR('r', 0x12, __u32)), an Android kernel addition to fs/fat/dir.c:
+            // fat_dir_ioctl returns the volume serial as the ioctl's value. FileUtils.getFatVolumeId (2.x-3.x
+            // android_os_FileUtils.cpp) names MediaProvider's external database by it, and Samsung's MediaProvider
+            // treats -1 as "volume unmounted". The card is a host directory, whose file system has no such ioctl:
+            // answer for a directory with a stable id derived from its device.
+            long r = S3(nr, a[0], a[1], a[2]);
+            struct kstat st;
+            if (r < 0 && S2(NR_fstat, a[0], &st) == 0 && (st.st_mode & 0170000) == 0040000)
+                return (long)((st.st_dev * 0x9e3779b1u) & 0x7fffffffu) | 1;
+            return r;
+        }
         return S3(nr, a[0], a[1], a[2]);
     case NR_mmap:
         if (a[2] == 1 && is_binder_fd((int)a[4])) return binder_mmap((u64)a[0], (u64)a[1], a[3]);
+        if (g_is32 && (int)a[4] >= 0 && (u64)a[5] >= 0x80000000UL - 0x10000) {   // ALSA status / control pages
+            long o = snd_mmap_off((int)a[4], (u64)a[5]);
+            if (o >= 0) return S6(nr, a[0], a[1], a[2], a[3], a[4], o);
+            if (o == -2) return -19;   /* ENODEV */
+        }
         if (g_is32 && a[2] == 1 && g_props[0] && (int)a[4] >= 0 && !gles2_for_32()) {
             // 32-bit programs only have the GLES 1 renderer: in their (private) view of the property area the
             // "GLES 2 is there" flag reads 0, so their windows are drawn without hwui. Only that page is a copy.
@@ -1311,8 +1342,10 @@ static void install_filter(void) {
     f[n++] = LD(24); f[n++] = JEQ(0, 0, L_TRAP);
     f[n++] = LD(28); f[n++] = JEQ(0, L_ALLOW, L_TRAP);
     AT(L_MMAP);                                                 // read-only file mappings: the binder buffer is one
-    f[n++] = LD(32); f[n++] = JEQ(1, 0, L_ALLOW);
+    f[n++] = LD(32); f[n++] = JEQ(1, 0, 2);
     f[n++] = LD(48); f[n++] = JEQ(0xffffffffu, L_ALLOW, L_TRAP);
+    // and the ALSA status / control pages (offsets 0x80000000, 0x81000000; control is read-write: alsa.c)
+    f[n++] = LD(56); f[n++] = JGE(0x7fff0000u, L_TRAP, L_ALLOW);
     AT(L_TRAP); f[n++] = RET(TRAP);
     AT(L_ALLOW); f[n++] = RET(ALLOW);
 #undef AT

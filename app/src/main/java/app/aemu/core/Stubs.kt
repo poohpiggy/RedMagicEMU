@@ -413,8 +413,15 @@ class VoldStub(
     /** остальные тома прошивки (съёмные карты, USB): сообщаем о них как о «нет носителя» */
     private val others: List<String> = emptyList(),
     private val api: Int = 19,
+    /** vold 1.0 (1.5-1.6) publishes the card's state itself: EXTERNAL_STORAGE_STATE, read by Environment */
+    private val setProp: ((String, String) -> Unit)? = null,
 ) {
-    @Volatile var state = MOUNTED
+    // 2.0-3.2: the card starts Idle, as from the real vold at boot. MountService.onDaemonConnected then marks it
+    // unmounted and mounts it itself on BOOT_COMPLETED; the 605 event that follows is what broadcasts MEDIA_MOUNTED,
+    // and only that broadcast makes the media scanner attach the "external" volume of MediaProvider. A card that is
+    // already Mounted is logged as "Media already mounted on daemon connection" with no broadcast, and the camera's
+    // insert into content://media/external fails with "Unknown URI".
+    @Volatile var state = if (api in 5..13) IDLE else MOUNTED
     private val label = mountPoint.substringAfterLast('/').ifEmpty { "sdcard" }
     private val clients = Collections.synchronizedList(ArrayList<LocalSocket>())
 
@@ -447,6 +454,9 @@ class VoldStub(
     }
 
     private fun answer(cmd: String, out: OutputStream) {
+        // 1.5-1.6: vold 1.0 speaks plain words, no codes (MountListener of services.jar: send_ums_status,
+        // mount_volume:<path>, eject_media:<path>, format_media:<path>; events ums_*, volume_mounted:<path>, ...)
+        if (api in 3..4) { answerV1(cmd.trim(), out); return }
         val parts = cmd.trim().split(Regex("\\s+"))
         val seq = parts.getOrNull(0)?.toIntOrNull()
         val args = if (seq != null) parts.drop(1) else parts
@@ -493,6 +503,24 @@ class VoldStub(
         after?.invoke()
     }
 
+    private fun answerV1(cmd: String, out: OutputStream) {
+        val msgs: List<String> = when {
+            // asked once when MountListener connects: USB storage is off and unplugged, then the card's state
+            cmd == "send_ums_status" -> listOf("ums_disabled", "ums_disconnected",
+                if (state == MOUNTED) "volume_mounted:$mountPoint" else "volume_unmounted:$mountPoint")
+            cmd.startsWith("mount_volume:") -> { state = MOUNTED; listOf("volume_mounted:$mountPoint") }
+            cmd.startsWith("eject_media:") -> { state = IDLE; listOf("volume_ejecting:$mountPoint", "volume_unmounted:$mountPoint") }
+            cmd.startsWith("format_media:") -> listOf("volume_unmounted:$mountPoint")
+            cmd == "enable_ums" || cmd == "disable_ums" -> listOf("ums_disabled")
+            else -> emptyList()
+        }
+        // the property first: the framework reacts to the event by reading it (strings as vold 1.0's volmgr)
+        msgs.lastOrNull { it.startsWith("volume_") }?.let { e ->
+            setProp?.invoke("EXTERNAL_STORAGE_STATE", if (e.startsWith("volume_mounted:")) "mounted" else "unmounted")
+        }
+        if (msgs.isNotEmpty()) send(out, msgs)
+    }
+
     private fun withSeq(line: String, seq: Int?): String {
         if (seq == null) return line
         val sp = line.indexOf(' ')
@@ -509,6 +537,11 @@ class VoldStub(
 
     fun announce(from: Int, to: Int) {
         if (api >= 23) return
+        if (api in 3..4) {
+            setProp?.invoke("EXTERNAL_STORAGE_STATE", if (to == MOUNTED) "mounted" else "unmounted")
+            event(if (to == MOUNTED) "volume_mounted:$mountPoint" else "volume_unmounted:$mountPoint")
+            return
+        }
         val msg = "605 Volume $label $mountPoint state changed from $from (${name(from)}) to $to (${name(to)})"
         val list = synchronized(clients) { ArrayList(clients) }
         for (c in list) runCatching { send(c.outputStream, listOf(msg)) }

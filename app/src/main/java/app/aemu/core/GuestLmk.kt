@@ -182,7 +182,9 @@ class GuestLmk(private val root: File, private val lowRam: Boolean, private val 
                     if (bg) {
                         val cur = android.os.Process.getThreadPriority(tid)
                         bgSaved.putIfAbsent(tid, cur)
-                        if (cur < 15) android.os.Process.setThreadPriority(tid, 15)
+                        // 9, not lower: the guest's Process.setProcessGroup leaves a thread whose getpriority() is >= 10
+                        // (ANDROID_PRIORITY_BACKGROUND) in the background, so the app would never come back to the front
+                        if (cur < 9) android.os.Process.setThreadPriority(tid, 9)
                     } else bgSaved.remove(tid)?.let { android.os.Process.setThreadPriority(tid, it) }
                 }
             }

@@ -38,3 +38,17 @@ done
 # Samsung's Android 6.0 (TouchWiz): a 64-bit audio_format_t in the 32-bit mediaserver
 "$BIN/clang" --target=armv7a-linux-androideabi21 -march=armv7-a -mthumb -mfloat-abi=softfp -Os -fPIC -shared   -nostdlib -ffreestanding -fno-builtin -fvisibility=hidden -fno-stack-protector -DAEMU_FORMAT64   -Wl,--hash-style=sysv -Wl,-z,norelro -Wl,--build-id=none -Wl,-soname,audio.primary.default.so   -o "$(dirname "$OUT")/audio.primary.fmt64.so" audio_hal.c -lc
 "$BIN/llvm-strip" "$(dirname "$OUT")/audio.primary.fmt64.so" 2>/dev/null || true
+# Android 2.x: libaudio.so with the C++ AudioHardwareInterface (legacy_audio.c); String8 and the log come from the
+# firmware's libutils / liblog, linked here against stubs carrying just those names
+T=$(mktemp -d)
+echo 'void _ZN7android7String8C1EPKc(void){}' > "$T/u.c"
+echo 'int __android_log_print(void){return 0;}' > "$T/l.c"
+for s in u:libutils l:liblog; do
+  "$BIN/clang" --target=armv7a-linux-androideabi21 -nostdlib -shared -fPIC -Wl,-soname,${s#*:}.so -o "$T/${s#*:}.so" "$T/${s%%:*}.c"
+done
+"$BIN/clang" --target=armv7a-linux-androideabi21 -march=armv7-a -mthumb -mfloat-abi=softfp -Os -fPIC -shared \
+  -nostdlib -ffreestanding -fno-builtin -fvisibility=hidden -fno-stack-protector \
+  -Wl,--hash-style=sysv -Wl,-z,norelro -Wl,--build-id=none -Wl,--no-undefined -Wl,-soname,libaudio.so \
+  -o "$(dirname "$OUT")/../gb/libaudio.legacy.so" legacy_audio.c -L"$T" -lutils -llog -lc
+"$BIN/llvm-strip" "$(dirname "$OUT")/../gb/libaudio.legacy.so" 2>/dev/null || true
+rm -rf "$T"

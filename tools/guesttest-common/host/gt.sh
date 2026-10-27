@@ -22,7 +22,12 @@ if [ "$1" = "-w" ]; then shift; R="files/images/$1/root/data/data/app.aemu.test/
   [ "$API" -ge 23 ] && for p in CAMERA RECORD_AUDIO; do T=15 sh $W/gsh.sh $I "pm grant app.aemu.test android.permission.$p" >/dev/null; done
   $A shell "run-as app.aemu rm -f $R"
   E=""; [ -n "$2" ] && E="--es only $2"; [ -n "$3" ] && E="$E --ei secs $3"
+  # 1.x-5.x keyguard (LockScreen): "press Menu to unlock"; wm dismiss-keyguard exists from 6.0
+  [ "$API" -lt 23 ] && T=15 sh $W/gsh.sh $I "input keyevent 82" >/dev/null 2>&1
   S="-S"; [ "$API" -lt 11 ] && S=""   # 2.x am has no -S (NullPointerException)
+  # 1.x-3.x am has no -S/force-stop: the old task would only come to the front with its old extras;
+  # NEW_TASK|CLEAR_TOP (API 1) finishes it and starts the tester anew
+  [ "${API:-0}" -lt 14 ] && E="-f 0x14000000 $E"
   T=20 sh $W/gsh.sh $I "am start $S -n app.aemu.test/.Main $E" | tail -1
   [ -n "$NOWAIT" ] && exit 0
 fi
