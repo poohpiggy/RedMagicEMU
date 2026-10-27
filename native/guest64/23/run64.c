@@ -514,7 +514,10 @@ static long input_ioctl(u32 cmd, u64 arg) {
         memset(out, 0, len);
         switch (nr - 0x20) {
         case 0: setbit(out, len, 0); setbit(out, len, 1); setbit(out, len, 3); break;
-        case 1: for (u32 k = 1; k < 0xf0; k++) setbit(out, len, k); setbit(out, len, 580); setbit(out, len, 330); break;   // + BTN_TOUCH
+        // + BTN_TOUCH. Not KEY_Q (16): EventHub (2.3+) marks a keyboard ALPHAKEY when its layout maps a key it reports
+        // to Q, and the guest then hides the on-screen keyboard (config.keyboard = QWERTY). Its events still come in:
+        // the reader does not check them against this mask, so typing from the host keyboard keeps working.
+        case 1: for (u32 k = 1; k < 0xf0; k++) if (k != 16) setbit(out, len, k); setbit(out, len, 580); setbit(out, len, 330); break;
         // ABS_X/Y/PRESSURE too: 0.9-1.6 know single touch only (the app sends it for them, mtMode 4); later readers prefer MT
         case 3: setbit(out, len, 0); setbit(out, len, 1); setbit(out, len, 24); setbit(out, len, 48); setbit(out, len, 50); setbit(out, len, 53); setbit(out, len, 54); setbit(out, len, 57); break;
         }

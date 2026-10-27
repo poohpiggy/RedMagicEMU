@@ -383,7 +383,18 @@ class TreeFixer(
                 append("key 187 APP_SWITCH\n")
             }
         }.let { t ->
-            if (oldKl == null) t else t.lines().mapNotNull { l ->
+            // the device reports keys 1-239 (run64.c input_ioctl), so the guest takes it for a full keyboard: the
+            // firmware's own Generic.kl (qwerty.kl before 2.3) gives letters, digits and the rest their meaning, for
+            // typing from the host keyboard. Only numeric scan codes ours do not set; same syntax as the firmware's.
+            if (oldKl == null) {
+                val have = t.lines().mapNotNull { it.trim().split(Regex("\\s+")).getOrNull(1) }.toSet()
+                val src = listOf("Generic.kl", "qwerty.kl").map { File(root, "system/usr/keylayout/$it") }.firstOrNull { it.isFile }
+                val extra = runCatching { src!!.readLines() }.getOrDefault(emptyList()).map { it.trim() }.filter { l ->
+                    val f = l.split(Regex("\\s+")); f.size >= 3 && f[0] == "key" && f[1].all { it.isDigit() } && f[1] !in have
+                }.distinctBy { it.split(Regex("\\s+"))[1] }
+                return@let if (extra.isEmpty()) t else t + "# the firmware's keyboard (${src!!.name})\n" + extra.joinToString("\n") + "\n"
+            }
+            t.lines().mapNotNull { l ->
                 val f = l.trim().split(Regex("\\s+"))
                 if (l.startsWith("#") || f.size < 3) return@mapNotNull l
                 val lab = oldKl[f[1]] ?: f[2].takeIf { it in oldKl.values } ?: return@mapNotNull null

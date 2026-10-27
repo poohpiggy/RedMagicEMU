@@ -205,6 +205,9 @@
     <string name="nav_dpad">トラックボール</string>
     <string name="m_minimize">最小化</string>
     <string name="m_rotate">画面を回転</string>
+    <string name="m_badge">画面ラベル</string>
+    <string name="badge_show">表示</string>
+    <string name="badge_default">デフォルト</string>
     <string name="m_reset_menu_pos">メニューボタンの位置をリセット</string>
     <string name="m_record">画面を録画</string>
     <string name="m_record_stop">録画を停止</string>

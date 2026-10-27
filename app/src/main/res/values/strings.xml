@@ -204,6 +204,9 @@
     <string name="nav_dpad">Trackball</string>
     <string name="m_minimize">Minimize</string>
     <string name="m_rotate">Rotate screen</string>
+    <string name="m_badge">Screen badge</string>
+    <string name="badge_show">Show</string>
+    <string name="badge_default">Default</string>
     <string name="m_reset_menu_pos">Reset menu button</string>
     <string name="m_record">Record screen</string>
     <string name="m_record_stop">Stop recording</string>

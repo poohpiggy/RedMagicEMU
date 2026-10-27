@@ -4,9 +4,9 @@ GL-моста /system/lib/egl/libGLES_bridge.so. Функции из SPECIAL р�
 syms = [s.strip() for s in open('symbols.txt') if s.strip()]
 SPECIAL = {'glPixelStorei', 'glTexImage2D', 'glTexSubImage2D', 'glBindBuffer', 'eglCreateContext', 'eglMakeCurrent',
            'glVertexAttribPointer', 'glEnableVertexAttribArray', 'glDisableVertexAttribArray', 'glDrawArrays', 'glDrawElements',
-           'glBindTexture', 'glEGLImageTargetTexture2DOES', 'glDeleteTextures', 'eglSwapBuffers', 'eglCreateWindowSurface', 'eglGetProcAddress', 'eglCreateImageKHR', 'glViewport', 'eglGetConfigAttrib', 'eglChooseConfig', 'eglGetConfigs', 'eglCreatePbufferSurface', 'eglInitialize', 'glBufferData', 'glBufferSubData', 'glDeleteBuffers', 'glCompileShader', 'glLinkProgram', 'eglCreateSyncKHR'}
+           'glBindTexture', 'glEGLImageTargetTexture2DOES', 'glDeleteTextures', 'eglSwapBuffers', 'eglCreateWindowSurface', 'eglGetProcAddress', 'eglCreateImageKHR', 'glViewport', 'eglGetConfigAttrib', 'eglChooseConfig', 'eglGetConfigs', 'eglCreatePbufferSurface', 'eglInitialize', 'glBufferData', 'glBufferSubData', 'glDeleteBuffers', 'glCompileShader', 'glLinkProgram', 'eglCreateSyncKHR', 'eglDestroyImageKHR'}
 # called from split.c but still exported as plain stubs
-HELPERS = {'glGenBuffers', 'glDeleteBuffers', 'glBufferData', 'glBufferSubData', 'eglCreatePbufferSurface', 'eglGetConfigAttrib', 'eglChooseConfig', 'eglGetConfigs', 'eglQuerySurface', 'glScissor', 'glMatrixMode', 'glLoadIdentity', 'glOrthof', 'glGetShaderiv', 'glGetShaderInfoLog', 'glGetProgramiv', 'glGetProgramInfoLog'}
+HELPERS = {'glGenBuffers', 'glDeleteBuffers', 'glBufferData', 'glBufferSubData', 'eglCreatePbufferSurface', 'eglGetConfigAttrib', 'eglChooseConfig', 'eglGetConfigs', 'eglQuerySurface', 'glScissor', 'glMatrixMode', 'glLoadIdentity', 'glOrthof', 'glGetShaderiv', 'glGetShaderInfoLog', 'glGetProgramiv', 'glGetProgramInfoLog', 'eglGetCurrentContext', 'glGetIntegerv', 'glGenFramebuffers', 'glBindFramebuffer', 'glFramebufferTexture2D', 'glCheckFramebufferStatus', 'glDeleteFramebuffers', 'glReadPixels'}
 import re
 # функции, которых нет в ES 1.x: в контексте ES1 переходник делает их пустыми (см. split.c)
 ES2ONLY = re.compile(r'^gl(?!.*(OES|EXT|APPLE|IMG|QCOM|NV|AMD|ANGLE|ARM)$)(.*(Shader|Program|Uniform|VertexAttrib|AttribLocation|'

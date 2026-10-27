@@ -205,6 +205,9 @@
     <string name="nav_dpad">Trackball</string>
     <string name="m_minimize">Minimieren</string>
     <string name="m_rotate">Bildschirm drehen</string>
+    <string name="m_badge">Bildschirm-Etikett</string>
+    <string name="badge_show">Anzeigen</string>
+    <string name="badge_default">Standard</string>
     <string name="m_reset_menu_pos">Menütaste zurücksetzen</string>
     <string name="m_record">Bildschirm aufnehmen</string>
     <string name="m_record_stop">Aufnahme beenden</string>

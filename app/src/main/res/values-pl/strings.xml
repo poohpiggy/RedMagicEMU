@@ -205,6 +205,9 @@
     <string name="nav_dpad">Trackball</string>
     <string name="m_minimize">Minimalizuj</string>
     <string name="m_rotate">Obróć ekran</string>
+    <string name="m_badge">Etykieta na ekranie</string>
+    <string name="badge_show">Pokaż</string>
+    <string name="badge_default">Domyślnie</string>
     <string name="m_reset_menu_pos">Resetuj przycisk menu</string>
     <string name="m_record">Nagrywaj ekran</string>
     <string name="m_record_stop">Zatrzymaj nagrywanie</string>

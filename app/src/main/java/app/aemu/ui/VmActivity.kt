@@ -12,6 +12,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.rounded.ScreenRotation
+import androidx.compose.material.icons.rounded.Label
 import androidx.compose.material.icons.rounded.BatteryStd
 import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.Videocam
@@ -36,6 +37,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
+import androidx.compose.material3.TextButton
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.IntOffset
@@ -172,6 +174,7 @@ class VmActivity : ComponentActivity() {
         // the overlay pads itself (status bar, navigation bar, keyboard): the terminal stays above the keyboard
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
         lockOrientation()
+        loadBadge()
         val id = intent.getStringExtra(EXTRA_ID)
         val cur = VmHost.vm
         val img = ((if (id != null) ImageStore.get(this, id) else null) ?: cur?.img)
@@ -321,24 +324,51 @@ class VmActivity : ComponentActivity() {
         if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(rx, f, Context.RECEIVER_EXPORTED) else registerReceiver(rx, f)
     }
 
+    // A hardware keyboard (the phone's own, or the PC's through scrcpy) types into the guest: its keys go in as the
+    // Linux key codes the guest's layout (dhd-touch.kl, TreeFixer.keyLayout) maps to Android keys.
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        val code = map(keyCode) ?: return super.onKeyDown(keyCode, event)
+        val code = map(keyCode, event) ?: return super.onKeyDown(keyCode, event)
         if (event.repeatCount == 0) vm.input.key(code, true)
         return true
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
-        val code = map(keyCode) ?: return super.onKeyUp(keyCode, event)
+        val code = map(keyCode, event) ?: return super.onKeyUp(keyCode, event)
         vm.input.key(code, false)
         return true
     }
 
-    private fun map(k: Int): Int? = when (k) {
+    private fun map(k: Int, e: KeyEvent): Int? = when (k) {
         KeyEvent.KEYCODE_VOLUME_UP -> InputService.KEY_VOLUMEUP
         KeyEvent.KEYCODE_VOLUME_DOWN -> InputService.KEY_VOLUMEDOWN
         KeyEvent.KEYCODE_MENU -> InputService.KEY_MENU
         KeyEvent.KEYCODE_SEARCH -> InputService.KEY_SEARCH
-        else -> null
+        // Back stays the host's (leaving the emulator), as before
+        KeyEvent.KEYCODE_BACK -> null
+        else -> if (::vm.isInitialized && vm.state == GuestVm.State.RUNNING && !e.isSystem) Keys.KEYS[k] else null
+    }
+
+    private object Keys {
+        /** Android key code → Linux input key code (linux/input-event-codes.h; the pairs of AOSP's Generic.kl) */
+        val KEYS: Map<Int, Int> = HashMap<Int, Int>().apply {
+            val letters = intArrayOf(30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44)
+            for (i in 0 until 26) put(KeyEvent.KEYCODE_A + i, letters[i])
+            put(KeyEvent.KEYCODE_0, 11); for (i in 1..9) put(KeyEvent.KEYCODE_0 + i, 1 + i)
+            put(KeyEvent.KEYCODE_SPACE, 57); put(KeyEvent.KEYCODE_ENTER, 28); put(KeyEvent.KEYCODE_NUMPAD_ENTER, 28)
+            put(KeyEvent.KEYCODE_DEL, 14); put(KeyEvent.KEYCODE_FORWARD_DEL, 111); put(KeyEvent.KEYCODE_TAB, 15)
+            put(KeyEvent.KEYCODE_ESCAPE, 1)
+            put(KeyEvent.KEYCODE_SHIFT_LEFT, 42); put(KeyEvent.KEYCODE_SHIFT_RIGHT, 54)
+            put(KeyEvent.KEYCODE_ALT_LEFT, 56); put(KeyEvent.KEYCODE_ALT_RIGHT, 100)
+            put(KeyEvent.KEYCODE_CTRL_LEFT, 29); put(KeyEvent.KEYCODE_CTRL_RIGHT, 97); put(KeyEvent.KEYCODE_CAPS_LOCK, 58)
+            put(KeyEvent.KEYCODE_MINUS, 12); put(KeyEvent.KEYCODE_EQUALS, 13); put(KeyEvent.KEYCODE_LEFT_BRACKET, 26)
+            put(KeyEvent.KEYCODE_RIGHT_BRACKET, 27); put(KeyEvent.KEYCODE_SEMICOLON, 39); put(KeyEvent.KEYCODE_APOSTROPHE, 40)
+            put(KeyEvent.KEYCODE_GRAVE, 41); put(KeyEvent.KEYCODE_BACKSLASH, 43); put(KeyEvent.KEYCODE_COMMA, 51)
+            put(KeyEvent.KEYCODE_PERIOD, 52); put(KeyEvent.KEYCODE_SLASH, 53)
+            put(KeyEvent.KEYCODE_DPAD_UP, 103); put(KeyEvent.KEYCODE_DPAD_DOWN, 108); put(KeyEvent.KEYCODE_DPAD_LEFT, 105)
+            put(KeyEvent.KEYCODE_DPAD_RIGHT, 106); put(KeyEvent.KEYCODE_DPAD_CENTER, 232)
+            put(KeyEvent.KEYCODE_MOVE_HOME, 102); put(KeyEvent.KEYCODE_MOVE_END, 107)
+            put(KeyEvent.KEYCODE_PAGE_UP, 104); put(KeyEvent.KEYCODE_PAGE_DOWN, 109)
+        }
     }
 
     override fun onResume() {
@@ -370,7 +400,7 @@ class VmActivity : ComponentActivity() {
         }
     }
 
-    private enum class Dlg { NONE, SMS, CALL, BATTERY, ADB, DEVICE, APPS }
+    private enum class Dlg { NONE, SMS, CALL, BATTERY, ADB, DEVICE, APPS, BADGE }
 
     // position of the floating menu button, kept across launches
     private val uiPrefs by lazy { getSharedPreferences("vm_ui", MODE_PRIVATE) }
@@ -389,6 +419,33 @@ class VmActivity : ComponentActivity() {
         requestedOrientation = if (o == "l") android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
             else android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
     }
+    /** A label over the screen (default "AEmulator <version> beta") so testers can post screenshots; menu → Badge. */
+    private val defaultBadge get() = "AEmulator ${app.aemu.BuildConfig.VERSION_NAME} beta"
+    private var badgeOn by mutableStateOf(false)
+    private var badgeText by mutableStateOf("")
+    private fun loadBadge() { badgeOn = uiPrefs.getBoolean("badge_on", false); badgeText = uiPrefs.getString("badge_text", null) ?: defaultBadge }
+    private fun saveBadge() { uiPrefs.edit().putBoolean("badge_on", badgeOn).putString("badge_text", badgeText).apply() }
+
+    @Composable
+    private fun BadgeDialog(onDone: () -> Unit) {
+        var on by remember { mutableStateOf(badgeOn) }
+        var text by remember { mutableStateOf(badgeText) }
+        AlertDialog(onDismissRequest = onDone,
+            title = { Text(stringResource(R.string.m_badge)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(stringResource(R.string.badge_show), Modifier.weight(1f))
+                        Switch(on, { on = it })
+                    }
+                    OutlinedTextField(text, { text = it }, singleLine = true, enabled = on)
+                    TextButton(onClick = { text = defaultBadge }, enabled = on) { Text(stringResource(R.string.badge_default)) }
+                }
+            },
+            confirmButton = { TextButton(onClick = { badgeOn = on; badgeText = text.ifBlank { defaultBadge }; saveBadge(); onDone() }) { Text(stringResource(android.R.string.ok)) } },
+            dismissButton = { TextButton(onClick = onDone) { Text(stringResource(android.R.string.cancel)) } })
+    }
+
     private fun saveMenuOffset() { uiPrefs.edit().putFloat("menu_x", menuOffset.x).putFloat("menu_y", menuOffset.y).apply() }
 
     private val askMic = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok -> if (ok) vm.mic.permissionGranted() }
@@ -758,6 +815,14 @@ class VmActivity : ComponentActivity() {
                 modifier = Modifier.align(Alignment.Center),
             ) { BootCard(seconds) }
 
+            if (badgeOn && !showLog && !showTerm && !(drawing && state == GuestVm.State.BOOTING && vm.screenUpAt == 0L)) {
+                // a plain Box: Material's Surface takes the touches, this lets them through to the guest screen
+                Box(Modifier.align(Alignment.TopStart).displayCutoutPadding().statusBarsPadding().padding(8.dp)
+                    .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.55f), MaterialTheme.shapes.small)) {
+                    Text(badgeText, color = androidx.compose.ui.graphics.Color.White, style = MaterialTheme.typography.labelLarge,
+                        maxLines = 1, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp))
+                }
+            }
             if (drawing && state == GuestVm.State.BOOTING && !showLog && vm.screenUpAt == 0L) {
                 Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.9f),
                     modifier = Modifier.align(Alignment.TopStart).displayCutoutPadding().statusBarsPadding().padding(8.dp)) {
@@ -796,6 +861,8 @@ class VmActivity : ComponentActivity() {
                         onClick = { menu = false; moveTaskToBack(true) })
                     DropdownMenuItem(text = { Text(stringResource(R.string.m_rotate)) }, leadingIcon = { Icon(Icons.Rounded.ScreenRotation, null) },
                         onClick = { menu = false; lockOrientation(toggle = true) })
+                    DropdownMenuItem(text = { Text(stringResource(R.string.m_badge)) }, leadingIcon = { Icon(Icons.Rounded.Label, null) },
+                        onClick = { menu = false; dialog = Dlg.BADGE })
                     HorizontalDivider()
                     DropdownMenuItem(text = { Text(stringResource(R.string.vol_up)) }, leadingIcon = { Icon(Icons.Rounded.VolumeUp, null) },
                         onClick = { vm.input.press(InputService.KEY_VOLUMEUP) })
@@ -863,6 +930,7 @@ class VmActivity : ComponentActivity() {
                 Dlg.ADB -> AdbDialog { dialog = Dlg.NONE }
                 Dlg.DEVICE -> DeviceDialog { dialog = Dlg.NONE }
                 Dlg.APPS -> AppsDialog { dialog = Dlg.NONE }
+                Dlg.BADGE -> BadgeDialog { dialog = Dlg.NONE }
                 Dlg.NONE -> {}
             }
 

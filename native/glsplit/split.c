@@ -75,6 +75,11 @@ __attribute__((visibility("default"))) void glPixelStorei(GLenum pname, GLint pa
 static void va_bind_note(GLenum target, unsigned buffer);
 static void va_context(void *ctx);
 static void img_forget_bound(void);
+#define GL_TEXTURE_2D_ 0x0DE1
+static volatile int g_timg_any;   /* some EGLImage of a GL texture exists: only then the texture calls are looked at */
+static void timg_upload(GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, const void *px, int whole);
+static void tsize_note(GLsizei w, GLsizei h);
+static int es1_current(void);
 
 __attribute__((visibility("default"))) void glBindBuffer(GLenum target, unsigned buffer) {
     if (target == GL_PIXEL_UNPACK_BUFFER) t_pbo = buffer != 0;
@@ -163,7 +168,10 @@ __attribute__((visibility("default"))) void glTexImage2D(GLenum target, GLint le
     const void *p = tighten(w, h, format, type, pixels, &need);
     if (need) unpack_tight(1);
     f(target, level, ifmt, w, h, border, format, type, p);
-    if (need) { unpack_tight(0); free((void *)p); }
+    if (need) unpack_tight(0);
+    if (target == GL_TEXTURE_2D_ && level == 0 && !es1_current()) tsize_note(w, h);
+    if (g_timg_any && target == GL_TEXTURE_2D_ && level == 0) timg_upload(0, 0, w, h, format, type, p, 1);
+    if (need) free((void *)p);
 }
 
 __attribute__((visibility("default"))) void glTexSubImage2D(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h,
@@ -173,7 +181,9 @@ __attribute__((visibility("default"))) void glTexSubImage2D(GLenum target, GLint
     const void *p = tighten(w, h, format, type, pixels, &need);
     if (need) unpack_tight(1);
     f(target, level, x, y, w, h, format, type, p);
-    if (need) { unpack_tight(0); free((void *)p); }
+    if (need) unpack_tight(0);
+    if (g_timg_any && target == GL_TEXTURE_2D_ && level == 0) timg_upload(x, y, w, h, format, type, p, 0);
+    if (need) free((void *)p);
 }
 
 /*
@@ -691,9 +701,185 @@ static void img_forget_bound(void) {
     if (e && e->target == GL_TEXTURE_2D) e->tex = 0;
 }
 
+/* ------------------------------------------------------------ EGLImage of a GL texture (EGL_KHR_gl_texture_2D_image)
+ *
+ * 3.x libEGL lists EGL_KHR_gl_texture_2D_image in its fixed extension string, but the bridge makes images of
+ * window buffers only: eglCreateImageKHR(EGL_GL_TEXTURE_2D_KHR) gave EGL_NO_IMAGE_KHR. 3.x WebKit paints page
+ * tiles on its own thread and context and hands them to the UI context through such images ("GLUtils: EGL ERROR -
+ * eglCreateImage() returned 0"): every page stayed white. Here the image is the source texture's pixels, kept on
+ * the guest side. Uploads into the source (glTexImage2D/glTexSubImage2D, level 0) update it and bump its version;
+ * a texture of another context targeted at the image (glEGLImageTargetTexture2DOES) gets the pixels then, and again
+ * whenever it is bound after a newer version: what shared storage looks like to the image's user. Pixels the
+ * texture already had when the image was made are read back through a framebuffer (ES2 and later contexts).
+ */
+#define MAXTIMG 128
+#define MAXTLINK 256
+struct timg { int used; void *ctx; unsigned tex; GLsizei w, h; GLenum fmt, type; int bpp; unsigned char *px; unsigned ver; };
+struct tlink { void *ctx; unsigned tex; struct timg *img; unsigned ver; };
+static struct timg g_timg[MAXTIMG];
+static struct tlink g_tlink[MAXTLINK];
+static volatile int g_tlock;
+static void tl(void) { while (__sync_lock_test_and_set(&g_tlock, 1)) syscall(158 /* sched_yield */); }
+static void tu(void) { __sync_lock_release(&g_tlock); }
+typedef void *(*CurCtxFn)(void);
+static void *cur_ctx(void) { return ((CurCtxFn)aemu_split_resolve(IDX_eglGetCurrentContext))(); }
+/* the 2D texture bound on this thread: g_bound2d is one for the process, and WebKit's tile thread uploads while the
+   UI thread binds others (pthread key: old bionic has no __thread) */
+static unsigned g_bkey; static volatile int g_bkey_state;
+static int bkey(void) {
+    if (g_bkey_state == 2) return 1;
+    if (__sync_bool_compare_and_swap(&g_bkey_state, 0, 1)) {
+        if (pthread_key_create(&g_bkey, 0) != 0) { g_bkey_state = 0; return 0; }
+        g_bkey_state = 2; return 1;
+    }
+    return g_bkey_state == 2;
+}
+static void t_bound_set(unsigned tex) { if (bkey()) pthread_setspecific(g_bkey, (void *)(unsigned long)tex); }
+static unsigned t_bound(void) { return bkey() ? (unsigned)(unsigned long)pthread_getspecific(g_bkey) : g_bound2d; }
+static struct timg *timg_of(void *image) {
+    struct timg *t = (struct timg *)image;
+    return t >= g_timg && t < g_timg + MAXTIMG && t->used ? t : 0;
+}
+/* the image whose source is texture tex of context ctx */
+static struct timg *timg_source(void *ctx, unsigned tex) {
+    for (int i = 0; i < MAXTIMG; i++) if (g_timg[i].used && g_timg[i].ctx == ctx && g_timg[i].tex == tex) return &g_timg[i];
+    return 0;
+}
+static void timg_store(struct timg *t, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, const void *px, int whole) {
+    int bpp = bytes_per_pixel(format, type);
+    if (!bpp || !px) {
+        if (whole) { free(t->px); t->px = 0; t->w = w; t->h = h; t->fmt = format; t->type = type; t->bpp = bpp; t->ver++; }
+        return;
+    }
+    if (whole || !t->px || t->fmt != format || t->type != type) {
+        if (!whole && (x != 0 || y != 0 || w != t->w || h != t->h)) return;   /* a part in another format: nothing to merge into */
+        unsigned char *n = (unsigned char *)malloc((unsigned long)w * h * bpp);
+        if (!n) return;
+        free(t->px); t->px = n; t->w = w; t->h = h; t->fmt = format; t->type = type; t->bpp = bpp;
+    }
+    if (x < 0 || y < 0 || x + w > t->w || y + h > t->h) return;
+    unsigned long row = (unsigned long)w * bpp, stride = (unsigned long)t->w * bpp;
+    for (GLsizei r = 0; r < h; r++)
+        copy_bytes(t->px + (unsigned long)(y + r) * stride + (unsigned long)x * bpp, (const unsigned char *)px + (unsigned long)r * row, row);
+    t->ver++;
+}
+static void timg_upload(GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, const void *px, int whole) {
+    if (t_pbo) return;
+    void *ctx = cur_ctx();
+    tl();
+    struct timg *t = timg_source(ctx, t_bound());
+    if (t) timg_store(t, x, y, w, h, format, type, px, whole);
+    else if (whole) for (int i = 0; i < MAXTLINK; i++)   /* a target given storage of its own is no longer the image's */
+        if (g_tlink[i].img && g_tlink[i].ctx == ctx && g_tlink[i].tex == t_bound()) g_tlink[i].img = 0;
+    tu();
+}
+/* the image's pixels into the texture bound now (the caller holds the lock) */
+static void timg_put(struct timg *t, GLenum target) {
+    if (!t->px) return;
+    unpack_tight(1);
+    ((TexImageFn)aemu_split_resolve(IDX_glTexImage2D))(target, 0, (GLint)t->fmt, t->w, t->h, 0, t->fmt, t->type, t->px);
+    unpack_tight(0);
+}
+static void timg_bound(unsigned tex) {
+    if (!tex) return;
+    void *ctx = cur_ctx();
+    tl();
+    for (int i = 0; i < MAXTLINK; i++) {
+        struct tlink *l = &g_tlink[i];
+        if (l->img && l->ctx == ctx && l->tex == tex) {
+            if (l->img->used && l->ver != l->img->ver) { timg_put(l->img, GL_TEXTURE_2D_); l->ver = l->img->ver; }
+            break;
+        }
+    }
+    tu();
+}
+static void timg_target(GLenum target, void *image) {
+    void *ctx = cur_ctx();
+    unsigned tex = t_bound();
+    tl();
+    struct timg *t = timg_of(image);
+    struct tlink *l = 0;
+    for (int i = 0; i < MAXTLINK && !l; i++) if (g_tlink[i].img && g_tlink[i].ctx == ctx && g_tlink[i].tex == tex) l = &g_tlink[i];
+    for (int i = 0; i < MAXTLINK && !l; i++) if (!g_tlink[i].img) l = &g_tlink[i];
+    if (t && l && tex) { l->ctx = ctx; l->tex = tex; l->img = t; l->ver = t->ver; timg_put(t, target); }
+    tu();
+}
+static void timg_deleted(GLsizei n, const unsigned *tex) {
+    void *ctx = cur_ctx();
+    tl();
+    for (GLsizei k = 0; tex && k < n; k++)
+        for (int i = 0; i < MAXTLINK; i++) if (g_tlink[i].img && g_tlink[i].ctx == ctx && g_tlink[i].tex == tex[k]) g_tlink[i].img = 0;
+    tu();
+}
+/* pixels the texture already has: read back through a framebuffer */
+typedef void (*GetIntFn)(GLenum, GLint *);
+typedef void (*GenFbFn)(GLsizei, unsigned *);
+typedef void (*BindFbFn)(GLenum, unsigned);
+typedef void (*FbTexFn)(GLenum, GLenum, GLenum, unsigned, GLint);
+typedef GLenum (*FbStatusFn)(GLenum);
+typedef void (*ReadPixFn)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *);
+typedef void (*DelFbFn)(GLsizei, const unsigned *);
+static void timg_readback(struct timg *t) {
+    if (es1_current() || t->w <= 0 || t->h <= 0) return;
+    unsigned char *px = (unsigned char *)malloc((unsigned long)t->w * t->h * 4);
+    if (!px) return;
+    GLint old = 0; unsigned fb = 0;
+    ((GetIntFn)aemu_split_resolve(IDX_glGetIntegerv))(0x8CA6 /* FRAMEBUFFER_BINDING */, &old);
+    ((GenFbFn)aemu_split_resolve(IDX_glGenFramebuffers))(1, &fb);
+    ((BindFbFn)aemu_split_resolve(IDX_glBindFramebuffer))(0x8D40 /* FRAMEBUFFER */, fb);
+    ((FbTexFn)aemu_split_resolve(IDX_glFramebufferTexture2D))(0x8D40, 0x8CE0 /* COLOR_ATTACHMENT0 */, GL_TEXTURE_2D_, t->tex, 0);
+    int ok = ((FbStatusFn)aemu_split_resolve(IDX_glCheckFramebufferStatus))(0x8D40) == 0x8CD5 /* COMPLETE */;
+    PixelStoreFn ps = (PixelStoreFn)aemu_split_resolve(IDX_glPixelStorei);
+    if (ok) {
+        ps(0x0D05 /* PACK_ALIGNMENT */, 1);
+        ((ReadPixFn)aemu_split_resolve(IDX_glReadPixels))(0, 0, t->w, t->h, 0x1908 /* RGBA */, 0x1401 /* UNSIGNED_BYTE */, px);
+        ps(0x0D05, 4);
+    }
+    ((BindFbFn)aemu_split_resolve(IDX_glBindFramebuffer))(0x8D40, (unsigned)old);
+    ((DelFbFn)aemu_split_resolve(IDX_glDeleteFramebuffers))(1, &fb);
+    if (!ok) { free(px); return; }
+    free(t->px); t->px = px; t->fmt = 0x1908; t->type = 0x1401; t->bpp = 4; t->ver++;
+}
+/* sizes of level-0 2D textures per context, for the read-back */
+struct tsize { void *ctx; unsigned tex; GLsizei w, h; };
+static struct tsize g_tsize[512];
+static void tsize_note(GLsizei w, GLsizei h) {
+    void *ctx = cur_ctx(); unsigned tex = t_bound(); int fr = -1;
+    for (int i = 0; i < 512; i++) {
+        if (g_tsize[i].ctx == ctx && g_tsize[i].tex == tex) { g_tsize[i].w = w; g_tsize[i].h = h; return; }
+        if (!g_tsize[i].ctx && fr < 0) fr = i;
+    }
+    if (fr < 0) fr = (int)(tex & 511);
+    g_tsize[fr].ctx = ctx; g_tsize[fr].tex = tex; g_tsize[fr].w = w; g_tsize[fr].h = h;
+}
+static void *timg_create(void *ctx, unsigned tex, const GLint *attribs) {
+    GLint level = 0;
+    for (int i = 0; attribs && attribs[i] != EGL_NONE && i < 32; i += 2) if (attribs[i] == 0x30BC /* GL_TEXTURE_LEVEL */) level = attribs[i + 1];
+    if (!tex || level != 0) return 0;
+    void *cur = cur_ctx();
+    if (!ctx) ctx = cur;
+    tl();
+    struct timg *t = timg_source(ctx, tex);
+    for (int i = 0; i < MAXTIMG && !t; i++) if (!g_timg[i].used) t = &g_timg[i];
+    if (t) {
+        if (!t->used) { t->ctx = ctx; t->tex = tex; t->w = t->h = 0; t->px = 0; t->ver = 1; t->used = 1; }
+        for (int i = 0; i < 512; i++) if (g_tsize[i].ctx == ctx && g_tsize[i].tex == tex) { t->w = g_tsize[i].w; t->h = g_tsize[i].h; }
+        if (!t->px && ctx == cur) timg_readback(t);
+        g_timg_any = 1;
+    }
+    tu();
+    return t;
+}
+static void timg_destroy(struct timg *t) {
+    tl();
+    for (int i = 0; i < MAXTLINK; i++) if (g_tlink[i].img == t) g_tlink[i].img = 0;
+    free(t->px); t->px = 0; t->used = 0;
+    tu();
+}
+
 __attribute__((visibility("default"))) void glBindTexture(GLenum target, unsigned tex) {
     ((BindTexFn)aemu_split_resolve(IDX_glBindTexture))(target, tex);
-    if (target == GL_TEXTURE_2D) g_bound2d = tex;
+    if (target == GL_TEXTURE_2D) { g_bound2d = tex; t_bound_set(tex); if (g_timg_any) timg_bound(tex); }
     else if (target == GL_TEXTURE_EXTERNAL_OES) g_boundext = tex;
     else return;
     static int on = -1;
@@ -706,6 +892,7 @@ __attribute__((visibility("default"))) void glBindTexture(GLenum target, unsigne
 }
 
 __attribute__((visibility("default"))) void glEGLImageTargetTexture2DOES(GLenum target, void *image) {
+    if (timg_of(image)) { timg_target(target, image); return; }
     ((ImageTargetFn)aemu_split_resolve(IDX_glEGLImageTargetTexture2DOES))(target, image);
     unsigned tex = target == GL_TEXTURE_EXTERNAL_OES ? g_boundext : g_bound2d;
     if (!tex) return;
@@ -717,6 +904,7 @@ __attribute__((visibility("default"))) void glEGLImageTargetTexture2DOES(GLenum 
 
 __attribute__((visibility("default"))) void glDeleteTextures(GLsizei n, const unsigned *tex) {
     for (GLsizei i = 0; tex && i < n; i++) { struct img_tex *e = img_find(tex[i]); if (e) e->tex = 0; }
+    if (g_timg_any) timg_deleted(n, tex);
     ((DeleteTexFn)aemu_split_resolve(IDX_glDeleteTextures))(n, tex);
 }
 
@@ -753,6 +941,7 @@ __attribute__((constructor)) static void hold_std_fds(void) {
 typedef void *(*CreateImageFn)(void *dpy, void *ctx, unsigned target, void *buf, const GLint *attribs);
 __attribute__((visibility("default"))) void *eglCreateImageKHR(void *dpy, void *ctx, unsigned target, void *buf, const GLint *attribs) {
     CreateImageFn f = (CreateImageFn)aemu_split_resolve(IDX_eglCreateImageKHR);
+    if (target == 0x30B1 /* EGL_GL_TEXTURE_2D_KHR */) return timg_create(ctx, (unsigned)(unsigned long)buf, attribs);
     /* (the descriptors may be taken before this library is loaded: a buffer already sitting on 0 moves up, its
      * handle follows it, and /dev/null takes 0 so later buffers never land there) */
     if (target == 0x3140 && buf) {
@@ -801,8 +990,19 @@ __attribute__((visibility("default"))) void *eglCreateSyncKHR(void *dpy, unsigne
 }
 
 typedef void *(*ProcFn)(const char *);
+typedef unsigned (*DestroyImageFn)(void *, void *);
+__attribute__((visibility("default"))) unsigned eglDestroyImageKHR(void *dpy, void *image) {
+    struct timg *t = timg_of(image);
+    if (t) { timg_destroy(t); return 1; }
+    return ((DestroyImageFn)aemu_split_resolve(IDX_eglDestroyImageKHR))(dpy, image);
+}
+
 __attribute__((visibility("default"))) void *eglGetProcAddress(const char *name) {
     if (name && !__builtin_strcmp(name, "eglCreateSyncKHR")) return (void *)eglCreateSyncKHR;
+    /* the bridge's own entries would skip the texture images */
+    if (name && !__builtin_strcmp(name, "eglCreateImageKHR")) return (void *)eglCreateImageKHR;
+    if (name && !__builtin_strcmp(name, "eglDestroyImageKHR")) return (void *)eglDestroyImageKHR;
+    if (name && !__builtin_strcmp(name, "glEGLImageTargetTexture2DOES")) return (void *)glEGLImageTargetTexture2DOES;
     static const char *const names[] = { "eglSwapBuffersWithDamageKHR", "eglSwapBuffersWithDamageEXT", "eglSetDamageRegionKHR" };
     static void *const fns[] = { (void *)swap_with_damage, (void *)swap_with_damage, (void *)set_damage_region };
     for (int i = 0; name && i < 3; i++) {

@@ -203,6 +203,9 @@
     <string name="nav_dpad">Трекбол</string>
     <string name="m_minimize">Свернуть</string>
     <string name="m_rotate">Повернуть экран</string>
+    <string name="m_badge">Плашка на экране</string>
+    <string name="badge_show">Показывать</string>
+    <string name="badge_default">По умолчанию</string>
     <string name="m_reset_menu_pos">Сбросить положение кнопки</string>
     <string name="m_record">Запись экрана</string>
     <string name="m_record_stop">Остановить запись</string>

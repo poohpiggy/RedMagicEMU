@@ -72,16 +72,6 @@ eglDestroyContext:
     mov r12, r0
     pop {r0-r3, lr}
     bx r12
-    .global eglDestroyImageKHR
-    .type eglDestroyImageKHR,%function
-    .align 2
-eglDestroyImageKHR:
-    push {r0-r3, lr}
-    movw r0, #13
-    bl aemu_split_resolve
-    mov r12, r0
-    pop {r0-r3, lr}
-    bx r12
     .global eglDestroySurface
     .type eglDestroySurface,%function
     .align 2

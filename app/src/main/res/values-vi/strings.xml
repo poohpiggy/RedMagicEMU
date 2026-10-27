@@ -205,6 +205,9 @@
     <string name="nav_dpad">Trackball</string>
     <string name="m_minimize">Thu nhỏ</string>
     <string name="m_rotate">Xoay màn hình</string>
+    <string name="m_badge">Nhãn màn hình</string>
+    <string name="badge_show">Hiển thị</string>
+    <string name="badge_default">Mặc định</string>
     <string name="m_reset_menu_pos">Đặt lại nút menu</string>
     <string name="m_record">Quay màn hình</string>
     <string name="m_record_stop">Dừng quay</string>

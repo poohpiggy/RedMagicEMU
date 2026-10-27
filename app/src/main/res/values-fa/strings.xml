@@ -205,6 +205,9 @@
     <string name="nav_dpad">گوی ردیاب</string>
     <string name="m_minimize">کوچک کردن</string>
     <string name="m_rotate">چرخش صفحه</string>
+    <string name="m_badge">برچسب صفحه</string>
+    <string name="badge_show">نمایش</string>
+    <string name="badge_default">پیش‌فرض</string>
     <string name="m_reset_menu_pos">بازنشانی دکمهٔ منو</string>
     <string name="m_record">ضبط صفحه</string>
     <string name="m_record_stop">توقف ضبط</string>
