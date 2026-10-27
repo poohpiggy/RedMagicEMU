@@ -206,6 +206,17 @@
     <string name="m_badge">Плашка на экране</string>
     <string name="badge_show">Показывать</string>
     <string name="badge_default">По умолчанию</string>
+    <string name="m_hud">Панель производительности</string>
+    <string name="hud_corner">Угол</string>
+    <string name="hud_fps">FPS экрана</string>
+    <string name="hud_touch">Отклик на касание</string>
+    <string name="hud_cpu">Процессор (эмулятор)</string>
+    <string name="hud_ram">Память эмулятора</string>
+    <string name="hud_phone_ram">Свободная память телефона</string>
+    <string name="hud_procs">Процессы</string>
+    <string name="hud_freq">Частота процессора</string>
+    <string name="hud_temp">Температура батареи</string>
+    <string name="hud_uptime">Время работы</string>
     <string name="m_reset_menu_pos">Сбросить положение кнопки</string>
     <string name="m_record">Запись экрана</string>
     <string name="m_record_stop">Остановить запись</string>

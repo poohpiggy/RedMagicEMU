@@ -208,6 +208,17 @@
     <string name="m_badge">Плашка на екрані</string>
     <string name="badge_show">Показувати</string>
     <string name="badge_default">Типово</string>
+    <string name="m_hud">Панель продуктивності</string>
+    <string name="hud_corner">Кут</string>
+    <string name="hud_fps">FPS екрана</string>
+    <string name="hud_touch">Відгук на дотик</string>
+    <string name="hud_cpu">Процесор (емулятор)</string>
+    <string name="hud_ram">Пам\'ять емулятора</string>
+    <string name="hud_phone_ram">Вільна пам\'ять телефона</string>
+    <string name="hud_procs">Процеси</string>
+    <string name="hud_freq">Частота процесора</string>
+    <string name="hud_temp">Температура батареї</string>
+    <string name="hud_uptime">Час роботи</string>
     <string name="m_reset_menu_pos">Скинути положення кнопки</string>
     <string name="m_record">Запис екрана</string>
     <string name="m_record_stop">Зупинити запис</string>

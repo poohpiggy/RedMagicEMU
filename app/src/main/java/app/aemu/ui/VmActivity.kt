@@ -13,6 +13,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.rounded.ScreenRotation
 import androidx.compose.material.icons.rounded.Label
+import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.BatteryStd
 import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.Videocam
@@ -68,6 +69,8 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -175,6 +178,7 @@ class VmActivity : ComponentActivity() {
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
         lockOrientation()
         loadBadge()
+        loadHud()
         val id = intent.getStringExtra(EXTRA_ID)
         val cur = VmHost.vm
         val img = ((if (id != null) ImageStore.get(this, id) else null) ?: cur?.img)
@@ -400,7 +404,7 @@ class VmActivity : ComponentActivity() {
         }
     }
 
-    private enum class Dlg { NONE, SMS, CALL, BATTERY, ADB, DEVICE, APPS, BADGE }
+    private enum class Dlg { NONE, SMS, CALL, BATTERY, ADB, DEVICE, APPS, BADGE, HUD }
 
     // position of the floating menu button, kept across launches
     private val uiPrefs by lazy { getSharedPreferences("vm_ui", MODE_PRIVATE) }
@@ -444,6 +448,97 @@ class VmActivity : ComponentActivity() {
             },
             confirmButton = { TextButton(onClick = { badgeOn = on; badgeText = text.ifBlank { defaultBadge }; saveBadge(); onDone() }) { Text(stringResource(android.R.string.ok)) } },
             dismissButton = { TextButton(onClick = onDone) { Text(stringResource(android.R.string.cancel)) } })
+    }
+
+    /** Performance overlay: which items, in which corner (0 top start, 1 top end, 2 bottom start, 3 bottom end). */
+    private var hudOn by mutableStateOf(false)
+    private var hudCorner by mutableStateOf(0)
+    private var hudItems by mutableStateOf(setOf("fps", "cpu", "ram"))
+    private fun loadHud() {
+        hudOn = uiPrefs.getBoolean("hud_on", false); hudCorner = uiPrefs.getInt("hud_corner", 0)
+        hudItems = uiPrefs.getStringSet("hud_items", null)?.toSet() ?: setOf("fps", "cpu", "ram")
+    }
+    private fun saveHud() { uiPrefs.edit().putBoolean("hud_on", hudOn).putInt("hud_corner", hudCorner).putStringSet("hud_items", hudItems).apply() }
+    private val hud by lazy { PerfHud(this) }
+
+    @Composable
+    private fun HudDialog(onDone: () -> Unit) {
+        var on by remember { mutableStateOf(hudOn) }
+        var corner by remember { mutableStateOf(hudCorner) }
+        var items by remember { mutableStateOf(hudItems) }
+        val labels = listOf(
+            "fps" to R.string.hud_fps, "touch" to R.string.hud_touch, "cpu" to R.string.hud_cpu, "ram" to R.string.hud_ram,
+            "phone_ram" to R.string.hud_phone_ram, "procs" to R.string.hud_procs, "freq" to R.string.hud_freq,
+            "temp" to R.string.hud_temp, "uptime" to R.string.hud_uptime)
+        AlertDialog(onDismissRequest = onDone,
+            title = { Text(stringResource(R.string.m_hud)) },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(stringResource(R.string.badge_show), Modifier.weight(1f))
+                        Switch(on, { on = it })
+                    }
+                    Text(stringResource(R.string.hud_corner), style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
+                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                        listOf("↖", "↗", "↙", "↘").forEachIndexed { i, l ->
+                            SegmentedButton(selected = corner == i, onClick = { corner = i }, shape = SegmentedButtonDefaults.itemShape(i, 4), enabled = on) { Text(l) }
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    for ((k, r) in labels) Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        androidx.compose.material3.Checkbox(k in items, { c -> items = if (c) items + k else items - k }, enabled = on)
+                        Text(stringResource(r))
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { hudOn = on; hudCorner = corner; hudItems = items; saveHud(); onDone() }) { Text(stringResource(android.R.string.ok)) } },
+            dismissButton = { TextButton(onClick = onDone) { Text(stringResource(android.R.string.cancel)) } })
+    }
+
+    /** The overlay itself: sampled once a second while shown, drawn without taking touches. */
+    @Composable
+    private fun HudPanel(modifier: Modifier) {
+        var lines by remember { mutableStateOf(listOf<String>()) }
+        var fpsLine by remember { mutableStateOf<String?>(null) }
+        val items = hudItems
+        LaunchedEffect(items) {
+            while (true) {
+                val out = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    val l = ArrayList<String>()
+                    val need = items.any { it == "cpu" || it == "ram" || it == "procs" }
+                    val o = if (need) runCatching { hud.ours() }.getOrNull() else null
+                    if ("touch" in items) l += if (::guest.isInitialized && guest.touchMs >= 0) "Touch %d ms".format(guest.touchMs) else "Touch -"
+                    if ("cpu" in items && o != null) l += "CPU %.0f%%".format(o.cpuPct)
+                    if ("ram" in items && o != null) l += "RAM %d MB".format(o.rssMb)
+                    if ("phone_ram" in items) l += "Free %d MB".format(runCatching { hud.phoneFreeMb() }.getOrDefault(0L))
+                    if ("procs" in items && o != null) l += "Procs %d".format(o.procs)
+                    if ("freq" in items) l += "CPU %d MHz".format(hud.maxFreqMhz())
+                    if ("temp" in items) l += runCatching { hud.batteryTempC() }.getOrNull()?.let { "Temp %.1f°C".format(it) } ?: "Temp -"
+                    if ("uptime" in items && ::vm.isInitialized && vm.bootDoneAt > 0) {
+                        val sec = (System.currentTimeMillis() - vm.bootDoneAt) / 1000
+                        l += "Up %d:%02d:%02d".format(sec / 3600, sec / 60 % 60, sec % 60)
+                    }
+                    l
+                }
+                lines = out
+                delay(1000)
+            }
+        }
+        // FPS on its own, 4 times a second (GuestScreen counts it over 250 ms windows)
+        LaunchedEffect(items) {
+            fpsLine = null
+            while ("fps" in items) {
+                fpsLine = "FPS %.0f".format(if (::guest.isInitialized) guest.fps else 0f)
+                delay(250)
+            }
+        }
+        val shown = listOfNotNull(fpsLine) + lines
+        if (shown.isEmpty()) return
+        Column(modifier.background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.55f), MaterialTheme.shapes.small)
+            .padding(horizontal = 8.dp, vertical = 4.dp)) {
+            for (l in shown) Text(l, color = androidx.compose.ui.graphics.Color.White, style = MaterialTheme.typography.labelMedium,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, maxLines = 1)
+        }
     }
 
     private fun saveMenuOffset() { uiPrefs.edit().putFloat("menu_x", menuOffset.x).putFloat("menu_y", menuOffset.y).apply() }
@@ -815,6 +910,13 @@ class VmActivity : ComponentActivity() {
                 modifier = Modifier.align(Alignment.Center),
             ) { BootCard(seconds) }
 
+            if (hudOn && !showLog && !showTerm) {
+                val a = when (hudCorner) { 1 -> Alignment.TopEnd; 2 -> Alignment.BottomStart; 3 -> Alignment.BottomEnd; else -> Alignment.TopStart }
+                // below the badge when both are in the top start corner; clear of the menu button and nav bar in the others
+                val below = if (hudCorner == 0 && badgeOn) 36.dp else 0.dp
+                HudPanel(Modifier.align(a).displayCutoutPadding().statusBarsPadding().navigationBarsPadding()
+                    .padding(start = 8.dp, top = 8.dp + below + (if (hudCorner == 1) 48.dp else 0.dp), end = if (hudCorner % 2 == 1) 64.dp else 8.dp, bottom = 8.dp))
+            }
             if (badgeOn && !showLog && !showTerm && !(drawing && state == GuestVm.State.BOOTING && vm.screenUpAt == 0L)) {
                 // a plain Box: Material's Surface takes the touches, this lets them through to the guest screen
                 Box(Modifier.align(Alignment.TopStart).displayCutoutPadding().statusBarsPadding().padding(8.dp)
@@ -863,6 +965,8 @@ class VmActivity : ComponentActivity() {
                         onClick = { menu = false; lockOrientation(toggle = true) })
                     DropdownMenuItem(text = { Text(stringResource(R.string.m_badge)) }, leadingIcon = { Icon(Icons.Rounded.Label, null) },
                         onClick = { menu = false; dialog = Dlg.BADGE })
+                    DropdownMenuItem(text = { Text(stringResource(R.string.m_hud)) }, leadingIcon = { Icon(Icons.Rounded.Speed, null) },
+                        onClick = { menu = false; dialog = Dlg.HUD })
                     HorizontalDivider()
                     DropdownMenuItem(text = { Text(stringResource(R.string.vol_up)) }, leadingIcon = { Icon(Icons.Rounded.VolumeUp, null) },
                         onClick = { vm.input.press(InputService.KEY_VOLUMEUP) })
@@ -931,6 +1035,7 @@ class VmActivity : ComponentActivity() {
                 Dlg.DEVICE -> DeviceDialog { dialog = Dlg.NONE }
                 Dlg.APPS -> AppsDialog { dialog = Dlg.NONE }
                 Dlg.BADGE -> BadgeDialog { dialog = Dlg.NONE }
+                Dlg.HUD -> HudDialog { dialog = Dlg.NONE }
                 Dlg.NONE -> {}
             }
 

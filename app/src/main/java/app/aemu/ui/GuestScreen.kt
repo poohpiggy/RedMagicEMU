@@ -28,6 +28,9 @@ class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(c
         set(v) { field = v; postInvalidate() }
     @Volatile var fps = 0f
         private set
+    /** how long the guest took to answer the last touch with a frame, ms (-1: none yet) */
+    @Volatile var touchMs = -1L
+        private set
     /** frames this screen has shown since the view started, by either path (the testers compare it with the guest's count) */
     @Volatile var shown = 0L
         private set
@@ -97,9 +100,9 @@ class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(c
                 shown += n - directSeen
                 directSeen = n
                 if (!passthrough) { passthrough = true; countSeen = fbCount(); directFrames = 0; directAt = now }
-                if (now - directAt > 1000) { fps = directFrames * 1000f / (now - directAt); directFrames = 0; directAt = now; android.util.Log.d("aemu-screen", "gpu %.1f fps".format(fps)) }
+                if (now - directAt > 250) { fps = directFrames * 1000f / (now - directAt); directFrames = 0; directAt = now; android.util.Log.d("aemu-screen", "gpu %.1f fps".format(fps)) }
             } else if (passthrough) {
-                if (now - directAt > 1000) { fps = 0f; directAt = now }
+                if (now - directAt > 250) { fps = 0f; directAt = now }
                 // the composer went back to fb0 (a frame the GPU does not have): this view shows it again
                 if (fbCount() != countSeen) { passthrough = false; lastHash = 0 }
             }
@@ -169,7 +172,7 @@ class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(c
                 answered()
                 val now = System.currentTimeMillis()
                 if (changedAt == 0L) changedAt = now
-                if (now - changedAt > 1000) { fps = changed * 1000f / (now - changedAt); changed = 0; changedAt = now; android.util.Log.d("aemu-screen", "fb0 %.1f fps".format(fps)) }
+                if (now - changedAt > 250) { fps = changed * 1000f / (now - changedAt); changed = 0; changedAt = now; android.util.Log.d("aemu-screen", "fb0 %.1f fps".format(fps)) }
             }
             postInvalidate()
         }
@@ -276,6 +279,7 @@ class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(c
         if (t == 0L) return
         app.aemu.core.InputService.touchAt = 0L
         val late = android.os.SystemClock.uptimeMillis() - t
+        touchMs = late
         if (late > 1000) {
             val line = "%tT touch answered after %d ms".format(System.currentTimeMillis(), late)
             android.util.Log.w("aemu-stall", line)

@@ -207,6 +207,17 @@
     <string name="m_badge">Screen badge</string>
     <string name="badge_show">Show</string>
     <string name="badge_default">Default</string>
+    <string name="m_hud">Performance overlay</string>
+    <string name="hud_corner">Corner</string>
+    <string name="hud_fps">Screen FPS</string>
+    <string name="hud_touch">Touch response</string>
+    <string name="hud_cpu">Emulator CPU</string>
+    <string name="hud_ram">Emulator memory</string>
+    <string name="hud_phone_ram">Phone free memory</string>
+    <string name="hud_procs">Processes</string>
+    <string name="hud_freq">CPU clock</string>
+    <string name="hud_temp">Battery temperature</string>
+    <string name="hud_uptime">Uptime</string>
     <string name="m_reset_menu_pos">Reset menu button</string>
     <string name="m_record">Record screen</string>
     <string name="m_record_stop">Stop recording</string>
