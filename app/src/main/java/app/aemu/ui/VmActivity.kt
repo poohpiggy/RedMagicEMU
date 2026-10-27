@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.rounded.ScreenRotation
 import androidx.compose.material.icons.rounded.BatteryStd
 import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.Videocam
@@ -170,6 +171,7 @@ class VmActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // the overlay pads itself (status bar, navigation bar, keyboard): the terminal stays above the keyboard
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+        lockOrientation()
         val id = intent.getStringExtra(EXTRA_ID)
         val cur = VmHost.vm
         val img = ((if (id != null) ImageStore.get(this, id) else null) ?: cur?.img)
@@ -374,6 +376,19 @@ class VmActivity : ComponentActivity() {
     private val uiPrefs by lazy { getSharedPreferences("vm_ui", MODE_PRIVATE) }
     private var menuOffset by mutableStateOf(Offset.Zero)
     private fun loadMenuOffset() { menuOffset = Offset(uiPrefs.getFloat("menu_x", 0f), uiPrefs.getFloat("menu_y", 0f)) }
+    /**
+     * The window keeps one orientation while a machine runs: the phone turning in the hand does not turn the guest's
+     * screen. The menu's "Rotate screen" switches it and the choice is kept; the first time it is the orientation
+     * the window opened in.
+     */
+    private fun lockOrientation(toggle: Boolean = false) {
+        val now = if (resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE) "l" else "p"
+        var o = uiPrefs.getString("orient", null) ?: now
+        if (toggle) o = if (o == "l") "p" else "l"
+        uiPrefs.edit().putString("orient", o).apply()
+        requestedOrientation = if (o == "l") android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            else android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+    }
     private fun saveMenuOffset() { uiPrefs.edit().putFloat("menu_x", menuOffset.x).putFloat("menu_y", menuOffset.y).apply() }
 
     private val askMic = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok -> if (ok) vm.mic.permissionGranted() }
@@ -779,6 +794,8 @@ class VmActivity : ComponentActivity() {
                     // the machine keeps running behind its notification
                     DropdownMenuItem(text = { Text(stringResource(R.string.m_minimize)) }, leadingIcon = { Icon(Icons.Rounded.Close, null) },
                         onClick = { menu = false; moveTaskToBack(true) })
+                    DropdownMenuItem(text = { Text(stringResource(R.string.m_rotate)) }, leadingIcon = { Icon(Icons.Rounded.ScreenRotation, null) },
+                        onClick = { menu = false; lockOrientation(toggle = true) })
                     HorizontalDivider()
                     DropdownMenuItem(text = { Text(stringResource(R.string.vol_up)) }, leadingIcon = { Icon(Icons.Rounded.VolumeUp, null) },
                         onClick = { vm.input.press(InputService.KEY_VOLUMEUP) })

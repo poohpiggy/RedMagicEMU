@@ -204,6 +204,7 @@
     <string name="nav_search">搜索</string>
     <string name="nav_dpad">轨迹球</string>
     <string name="m_minimize">最小化</string>
+    <string name="m_rotate">旋转屏幕</string>
     <string name="m_reset_menu_pos">重置菜单按钮位置</string>
     <string name="m_record">录制屏幕</string>
     <string name="m_record_stop">停止录制</string>
