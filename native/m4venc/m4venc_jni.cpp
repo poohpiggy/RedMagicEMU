@@ -16,12 +16,7 @@ struct enc {
     uint8_t *yuv;   /* I420 */
 };
 
-/* the lowest level whose limits (mp4enc_api.cpp profile_level_max_mbsPerSec / _bitrate) take this size; when the
- * frame rate is beyond even Core@L2, the rate the encoder budgets for is that level's limit — frames are still all
- * encoded (noFrameSkipped), only the bits per frame are planned for the lower rate */
-static const int kMbs[6] = { 1485, 1485, 5940, 11880, 5940, 23760 };
-static const int kRate[6] = { 64000, 64000, 128000, 384000, 384000, 2000000 };
-
+/* The encoder picks the lowest level that fits (SetProfile_BufferSize) up to the one given here: Simple @ L5 */
 extern "C" JNIEXPORT jlong JNICALL Java_app_aemu_core_M4vEncoder_nInit(JNIEnv *, jclass, jint coding, jint w, jint h,
                                                                        jint fps, jint bitrate) {
     if (w <= 0 || h <= 0 || (w & 15) || (h & 15) || fps <= 0) return 0;
@@ -29,28 +24,23 @@ extern "C" JNIEXPORT jlong JNICALL Java_app_aemu_core_M4vEncoder_nInit(JNIEnv *,
     if (!e) return 0;
     e->w = w; e->h = h; e->h263 = coding == 3;
     e->yuv = (uint8_t *)malloc((size_t)w * h * 3 / 2);
-    int mbs = (w / 16) * (h / 16);
-    for (int lvl = 0; lvl < 6; lvl++) {
-        if (!e->h263 && lvl != 5 && (mbs * fps > kMbs[lvl] || bitrate > kRate[lvl])) continue;
-        VideoEncOptions o;
-        memset(&o, 0, sizeof o);
-        if (!PVGetDefaultEncOption(&o, 0)) break;
+    VideoEncOptions o;
+    memset(&o, 0, sizeof o);
+    if (PVGetDefaultEncOption(&o, 0)) {
         o.encMode = e->h263 ? H263_MODE : COMBINE_MODE_WITH_ERR_RES;
         o.packetSize = 32;
         o.rvlcEnable = PV_OFF;
         o.numLayers = 1;
         o.timeIncRes = 1000;
-        float rate = (float)fps;
-        if (!e->h263 && mbs * rate > kMbs[lvl]) rate = (float)kMbs[lvl] / mbs;
-        o.tickPerSrc = (int)(1000 / rate);
+        o.tickPerSrc = 1000 / fps;
         o.encWidth[0] = w; o.encHeight[0] = h;
-        o.encFrameRate[0] = rate;
-        o.bitRate[0] = bitrate > 0 ? (bitrate > kRate[5] && !e->h263 ? kRate[5] : bitrate) : 384000;
+        o.encFrameRate[0] = (float)fps;
+        o.bitRate[0] = bitrate > 0 ? bitrate : 384000;
         o.iQuant[0] = 15; o.pQuant[0] = 12; o.quantType[0] = 0;
         o.rcType = VBR_1;
         o.vbvDelay = 5.0f;
         o.noFrameSkipped = PV_ON;
-        o.intraPeriod = (int)rate;   /* one second */
+        o.intraPeriod = fps;   /* one second */
         o.numIntraMB = 0;
         o.sceneDetect = PV_ON;
         o.searchRange = 16;
@@ -58,9 +48,8 @@ extern "C" JNIEXPORT jlong JNICALL Java_app_aemu_core_M4vEncoder_nInit(JNIEnv *,
         o.gobHeaderInterval = 0;
         o.useACPred = PV_TRUE;
         o.intraDCVlcTh = 0;
-        o.profile_level = (ProfileLevelType)(e->h263 ? CORE_PROFILE_LEVEL2 : lvl);
+        o.profile_level = e->h263 ? CORE_PROFILE_LEVEL2 : SIMPLE_PROFILE_LEVEL5;
         if (PVInitVideoEncoder(&e->ctl, &o)) { e->sync = 1; return (jlong)(intptr_t)e; }
-        if (e->h263) break;
     }
     free(e->yuv); free(e);
     return 0;

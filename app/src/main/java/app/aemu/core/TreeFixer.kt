@@ -1068,6 +1068,23 @@ class TreeFixer(
                 copied++
             }
         }.onFailure { log("camera: HAL not replaced: ${it.message}") }
+        // 1.5/1.6: SurfaceFlinger shows YUV buffers (video) only through copybit, its OpenGL fallback draws just the Y
+        // plane (Donut LayerBase::loadTexture); with no copybit.*.so of the firmware's own, the emulator's
+        // (native/copybithal, Donut copybit_image_t: offset/base/fd — Eclair's differs) is installed as the default one
+        if (img.api <= 4) runCatching {
+            val hw = File(root, "system/lib/hw")
+            val mine = File(hw, "copybit.default.so")
+            val sf = File(root, "system/lib/libsurfaceflinger.so")
+            val others = hw.listFiles()?.any { it.name.startsWith("copybit.") && it.name != mine.name } ?: false
+            if (!others && sf.isFile && String(sf.readBytes(), Charsets.ISO_8859_1).contains("copybit")) {
+                val fresh = EngineAssets.open(ctx, "engines/common/copybit.default.so").use { it.readBytes() }
+                if (!mine.isFile || !fresh.contentEquals(mine.readBytes())) {
+                    hw.mkdirs(); mine.writeBytes(fresh); mine.setReadable(true, false)
+                    log("copybit: the emulator's 1.x copybit HAL installed")
+                    copied++
+                }
+            }
+        }.onFailure { log("copybit: not installed: ${it.message}") }
         // Qualcomm's OMX video encoder drives the Q6 DSP (/dev/q6venc, which returns run-length data the library packs
         // itself): the emulator's component of the same name and factory (native/omxvenc, encoding on the phone)
         // takes its place wherever libOmxCore.so loads libOmxVidEnc.so and that library opens /dev/q6venc

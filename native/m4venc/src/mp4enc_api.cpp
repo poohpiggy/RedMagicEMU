@@ -68,30 +68,33 @@ const static Int mpeg_nqmat_def[64]  =
 
 /* Profiles and levels */
 /* Simple profile(level 0-3) and Core profile (level 1-2) */
-/* {SPL0, SPL1, SPL2, SPL3, CPL1, CPL2, CPL2, CPL2} , SPL0: Simple Profile@Level0, CPL1: Core Profile@Level1, the last two are redundant for easy table manipulation */
+/* {SPL0, SPL1, SPL2, SPL3, CPL1, CPL2, SPL4a, SPL5} , SPL0: Simple Profile@Level0, CPL1: Core Profile@Level1.
+ * AEmulator: the last two (redundant copies of CPL2 in AOSP) hold Simple Profile @ Level 4a and @ Level 5 from
+ * ISO/IEC 14496-2 Annex N (profile_and_level_indication 0x04 / 0x05; 36000 / 40500 MB/s; 4000 / 8000 kbit/s;
+ * video packet 16384 bits; VBV 80 / 112 x 16384 bits), so VGA / D1 at 30 fps has a level */
 const static Int profile_level_code[8] =
 {
-    0x08, 0x01, 0x02, 0x03, 0x21, 0x22, 0x22, 0x22
+    0x08, 0x01, 0x02, 0x03, 0x21, 0x22, 0x04, 0x05
 };
 
 const static Int profile_level_max_bitrate[8] =
 {
-    64000, 64000, 128000, 384000, 384000, 2000000, 2000000, 2000000
+    64000, 64000, 128000, 384000, 384000, 2000000, 4000000, 8000000
 };
 
 const static Int profile_level_max_packet_size[8] =
 {
-    2048, 2048, 4096, 8192, 4096, 8192, 8192, 8192
+    2048, 2048, 4096, 8192, 4096, 8192, 16384, 16384
 };
 
 const static Int profile_level_max_mbsPerSec[8] =
 {
-    1485, 1485, 5940, 11880, 5940, 23760, 23760, 23760
+    1485, 1485, 5940, 11880, 5940, 23760, 36000, 40500
 };
 
 const static Int profile_level_max_VBV_size[8] =
 {
-    163840, 163840, 655360, 655360, 262144, 1310720, 1310720, 1310720
+    163840, 163840, 655360, 655360, 262144, 1310720, 1310720, 1835008
 };
 
 
@@ -243,10 +246,12 @@ OSCL_EXPORT_REF Bool    PVInitVideoEncoder(VideoEncControls *encoderControl, Vid
     encParams->nLayers = encOption->numLayers;
 
     /* Check whether the input packetsize is valid (Note: put code here (before any memory allocation) in order to avoid memory leak */
-    if ((Int)profile_level < (Int)(SIMPLE_SCALABLE_PROFILE_LEVEL0))  /* non-scalable profile */
+    if ((Int)profile_level < (Int)(SIMPLE_SCALABLE_PROFILE_LEVEL0) ||
+            (Int)profile_level >= (Int)SIMPLE_PROFILE_LEVEL4A)  /* non-scalable profile */
     {
         profile_level_table = (Int *)profile_level_max_packet_size;
-        profile_table_index = (Int)profile_level;
+        profile_table_index = (Int)profile_level >= (Int)SIMPLE_PROFILE_LEVEL4A ?
+                              (Int)profile_level - (Int)SIMPLE_PROFILE_LEVEL4A + 6 : (Int)profile_level;
         if (encParams->nLayers != 1)
         {
             goto CLEAN_UP;
@@ -3065,8 +3070,8 @@ Bool SetProfile_BufferSize(VideoEncData *video, float delay, Int bInitialized)
     base_VBV_size       = PV_MAX(base_VBV_size, MIN_BUFF);
 
     /* if the buffer is larger than maximum buffer size, we'll clip it */
-    if (base_VBV_size > profile_level_max_VBV_size[5])
-        base_VBV_size = profile_level_max_VBV_size[5];
+    if (base_VBV_size > profile_level_max_VBV_size[7])
+        base_VBV_size = profile_level_max_VBV_size[7];
 
 
     /* Check if the buffer exceeds the maximum buffer size given the maximum profile and level */

@@ -1,3 +1,4 @@
 src/, include/, NOTICE: the PacketVideo MPEG-4 / H.263 encoder from AOSP
-(platform/frameworks/av media/module/codecs/m4v_h263/enc, Apache 2.0), unchanged.
+(platform/frameworks/av media/module/codecs/m4v_h263/enc, Apache 2.0); one change: Simple Profile
+@ Level 4a / 5 added (mp4enc_api.cpp level tables, ProfileLevelType), marked "AEmulator".
 m4venc_jni.cpp: the host side of the guest's OMX video encoder (VideoEncoderFeed.kt).

@@ -104,7 +104,11 @@ typedef enum
 
     CORE_SCALABLE_PROFILE_LEVEL1 = 10,
     CORE_SCALABLE_PROFILE_LEVEL2,
-    CORE_SCALABLE_PROFILE_LEVEL3
+    CORE_SCALABLE_PROFILE_LEVEL3,
+
+    /* AEmulator: Simple Profile @ Level 4a / 5 (ISO/IEC 14496-2 Annex N), tables in mp4enc_api.cpp */
+    SIMPLE_PROFILE_LEVEL4A = 13,
+    SIMPLE_PROFILE_LEVEL5
 
 } ProfileLevelType;
 
