@@ -216,6 +216,7 @@ public:
                    preview_cb_(0), rec_cb_(0), af_cb_(0), shutter_cb_(0), raw_cb_(0), jpeg_cb_(0), user_(0), recUser_(0), afUser_(0), picUser_(0) {
         memset(lock_, 0, sizeof lock_);
         memset((void *)busy_, 0, sizeof busy_);
+        memset((void *)recBusy_, 0, sizeof recBusy_);
         size_t n = sizeof DEFAULTS;
         params_ = (char *)malloc(n);
         memcpy(params_, DEFAULTS, n);
@@ -226,6 +227,14 @@ public:
             buf_[i] = newMem(heap_[i], 0, YUYV_SIZE);
         }
         bufSize_ = YUYV_SIZE;
+        /* recording frames: yuv420sp (NV21), as the firmware's QualcommCameraHardware gives them (its only YUV
+         * format string is "yuv420sp"; AndroidCameraInput passes them on as X-YUV-420 to the video encoder) */
+        for (int i = 0; i < NHEAP; i++) {
+            recHeap_[i] = newHeap(MAXW * MAXH * 3 / 2, "aemu-record", &b);
+            recFrame_[i] = (uint8_t *)b->getBase();
+            recBuf_[i] = newMem(recHeap_[i], 0, NV21_SIZE);
+        }
+        recSize_ = NV21_SIZE;
         nv21_ = (uint8_t *)malloc(MAXW * MAXH * 3 / 2);
         rawHeap_ = newHeap(RAW_SIZE, "aemu-raw", &b);
         raw_ = (uint8_t *)b->getBase();
@@ -290,7 +299,7 @@ public:
     void stopRecording() { recording_ = false; LOG("recording stopped after %d frames", sent_); }
     bool recordingEnabled() { return recording_; }
     void releaseRecordingFrame(const sp<IMemory> &m) {
-        for (int i = 0; i < NHEAP; i++) if (buf_[i].get() == m.get()) busy_[i] = 0;
+        for (int i = 0; i < NHEAP; i++) if (recBuf_[i].get() == m.get()) recBusy_[i] = 0;
     }
     int autoFocus(autofocus_callback cb, void *user) {
         LOG("autoFocus");
@@ -466,11 +475,20 @@ private:
                 toYuyv(nv21_, frame_[i], fw_, fh_);
                 if (previewing_ && preview_cb_) preview_cb_(buf_[i], i, user_);
                 if (recording_ && rec_cb_) {
-                    struct { long s, ns; } t;
-                    clock_gettime(1 /* CLOCK_MONOTONIC: systemTime() */, &t);
-                    busy_[i] = 1;
-                    rec_cb_((int64_t)t.s * 1000000000LL + t.ns, buf_[i], recUser_);
-                    sent_++;
+                    int r = -1;
+                    for (int k = 0; k < NHEAP; k++) if (!recBusy_[k]) { r = k; break; }
+                    if (r >= 0) {   /* all four with the encoder: this frame is dropped, as a busy DSP would */
+                        if ((int)len != recSize_) {
+                            for (int k = 0; k < NHEAP; k++) recBuf_[k] = newMem(recHeap_[k], 0, len);
+                            recSize_ = (int)len;
+                        }
+                        memcpy(recFrame_[r], nv21_, len);
+                        struct { long s, ns; } t;
+                        clock_gettime(1 /* CLOCK_MONOTONIC: systemTime() */, &t);
+                        recBusy_[r] = 1;
+                        rec_cb_((int64_t)t.s * 1000000000LL + t.ns, recBuf_[r], recUser_);
+                        sent_++;
+                    }
                 }
             } else if (h[0] == 2) {
                 if (len > jcap) { free(jpg); jpg = (uint8_t *)malloc(len); jcap = jpg ? len : 0; if (!jpg) break; }
@@ -545,7 +563,11 @@ private:
     void *user_, *recUser_, *afUser_, *picUser_;
     char *params_;
     long lock_[4];   /* pthread_mutex_t of bionic: one int, zero = unlocked */
-    sp<IMemoryHeap> heap_[NHEAP], rawHeap_;
+    sp<IMemoryHeap> heap_[NHEAP], rawHeap_, recHeap_[NHEAP];
+    sp<IMemory> recBuf_[NHEAP];
+    uint8_t *recFrame_[NHEAP];
+    volatile int recBusy_[NHEAP];
+    int recSize_;
     sp<IMemory> buf_[NHEAP];
     uint8_t *frame_[NHEAP], *raw_;
 };

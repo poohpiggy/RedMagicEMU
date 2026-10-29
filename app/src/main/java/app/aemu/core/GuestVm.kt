@@ -114,6 +114,8 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     val mic = AudioIn(ctx, paths.root, ::log)
     /** the phone's cameras for the guest (camera HAL → /dev/socket/aemu_cam) */
     val camera = CameraFeed(ctx, paths, ::log)
+    /** the phone's video encoder for the guest's OMX encoder (native/omxvenc → /dev/socket/aemu_venc) */
+    val venc = VideoEncoderFeed(paths, ::log)
     /** hardware overlays of 2.x (overlay HAL → /dev/socket/aemu_ovl), drawn over the screen */
     val overlays = OverlayFeed(paths, ::log)
     @Volatile private var lmk: GuestLmk? = null
@@ -535,6 +537,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         sensors.start()
         mic.start()
         camera.start()
+        venc.start()
         overlays.start()
         if (img.api >= 21) logd.start()
         if (img.api >= 14) runCatching { dns.ensure() }
@@ -544,7 +547,11 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             if (kernel.ramBudget) f.writeText((GuestRunner.guestRamMb(img.api, s.ramMb) * 1024L).toString()) else f.delete()
         }
         // internal storage size chosen in the image settings (kernel 23 reports it in statfs)
-        runCatching { File(paths.root, "dev/.aemu-disk").let { if (s.diskMb > 0) it.writeText(s.diskMb.toString()) else it.delete() } }
+        // Without a choice, Android up to 2.3 sees at most 2000 MB: StatFs gives int blocks there and code of that time
+        // multiplies them by the block size as int (Sony's 1.6 keyguard: 62 GB free wrapped to a negative size →
+        // "Memory full"); phones of that time had /data well under 2 GB
+        val diskMb = if (s.diskMb > 0) s.diskMb else if (img.api <= 10) 2000 else 0
+        runCatching { File(paths.root, "dev/.aemu-disk").let { if (diskMb > 0) it.writeText(diskMb.toString()) else it.delete() } }
         lmk = GuestLmk(paths.root, s.lowRam, ::log, s.ramMb, cgroupSockets = open32).also { it.start() }
         val netCfg = if (s.netProxy) net.start() else GuestRunner.NetConfig()
         runner.sdcardHost = sd
@@ -1389,7 +1396,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         log("stopping system")
         runCatching { guestRunner.run(listOf("/system/bin/sync"), 5_000) }
         killAll()
-        adb.stop(); props.stop(); props.stopAbstract();input.stop(); frames.stop(); ril.stop(); vold.stop(); audio.stop(); net.stop(); dns.stop(); events.stop(); logd.stop(); lights.stop(); sensors.stop(); mic.stop(); camera.stop(); overlays.stop(); GlHost.stop()
+        adb.stop(); props.stop(); props.stopAbstract();input.stop(); frames.stop(); ril.stop(); vold.stop(); audio.stop(); net.stop(); dns.stop(); events.stop(); logd.stop(); lights.stop(); sensors.stop(); mic.stop(); camera.stop(); venc.stop(); overlays.stop(); GlHost.stop()
         extraStubs.forEach { it.stop() }; extraStubs.clear()
         lmk?.stop(); lmk = null
         Keeper.release(ctx)

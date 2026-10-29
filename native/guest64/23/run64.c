@@ -744,6 +744,63 @@ static long alarm_ioctl(u32 cmd, u64 arg) {
     return -EINVAL;
 }
 
+/* /dev/pmem, /dev/pmem_adsp, /dev/pmem_camera… (Qualcomm 1.x-2.x, drivers/misc/pmem.c; ioctls from
+ * bionic libc/kernel/common/linux/android_pmem.h): physically contiguous memory for the DSP and the GPU. Each open
+ * is an allocation, made by the first mmap (pmem_mmap) or PMEM_ALLOCATE; PMEM_CONNECT makes a descriptor share
+ * another's allocation (a sub-heap). Here an allocation is a memfd; nothing reads its "physical" address. */
+static int is_pmem_fd(int fd) {
+    char p[40], t[48];
+    int n = 0; p[n++] = '/'; for (const char *c = "proc/self/fd/"; *c; c++) p[n++] = *c;
+    char d[12]; int k = 0; unsigned v = (unsigned)fd; do { d[k++] = (char)('0' + v % 10); v /= 10; } while (v);
+    while (k) p[n++] = d[--k];
+    p[n] = 0;
+    long r = S4(NR_readlinkat, AT_FDCWD, p, t, sizeof t - 1);
+    if (r < 0) return 0;
+    t[r] = 0;
+    return pre(t, "/memfd:aemu-pmem");
+}
+/* read-write file mappings at offset 0 pass the seccomp filter untrapped, so an allocation cannot wait for the first
+ * mmap: each open gets the whole pool's size (PMEM_GET_TOTAL_SIZE) up front; a memfd is sparse, pages come on use */
+#define PMEM_POOL (32u << 20)
+static long pmem_open(long flags) {
+    long fd = S2(NR_memfd_create, "aemu-pmem", (flags & 02000000) ? 1 : 0);
+    if (fd >= 0) S2(NR_ftruncate, fd, (long)PMEM_POOL);
+    return fd;
+}
+static long pmem_size(int fd) { struct kstat st; return S2(NR_fstat, fd, &st) < 0 ? 0 : (long)st.st_size; }
+static long pmem_ioctl(int fd, u32 cmd, u64 arg) {
+    switch (cmd & 0xff) {
+    case 1: {                                   // GET_PHYS: struct pmem_region { offset, len } (32-bit longs)
+        u32 *r = (u32 *)arg;
+        struct kstat st;
+        if (!r || S2(NR_fstat, fd, &st) < 0) return -14;
+        r[0] = 0x20000000u + (u32)((st.st_ino & 0x3ff) << 20);   // a stable, page-aligned stand-in address
+        r[1] = (u32)st.st_size;
+        return 0;
+    }
+    case 2: case 4: return 0;                   // MAP / UNMAP a region of a connected descriptor
+    case 3: {                                   // GET_SIZE
+        u32 *r = (u32 *)arg;
+        if (!r) return -14;
+        r[0] = 0; r[1] = (u32)pmem_size(fd);
+        return 0;
+    }
+    case 5: return (u32)arg <= PMEM_POOL ? 0 : -12;   // ALLOCATE: the pool is already there
+    case 6: {                                   // CONNECT: share the master's allocation
+        long fl = S3(25 /*fcntl*/, fd, 1 /*F_GETFD*/, 0);
+        long r = S3(24 /*dup3*/, (int)arg, fd, fl > 0 ? 02000000 : 0);
+        return r < 0 ? r : 0;
+    }
+    case 7: {                                   // GET_TOTAL_SIZE
+        u32 *r = (u32 *)arg;
+        if (!r) return -14;
+        r[0] = 0; r[1] = PMEM_POOL;
+        return 0;
+    }
+    }
+    return -25;   /* ENOTTY */
+}
+
 #define PB(i) ((*pbp ? *pbp : (*pbp = pb_get())) + (i) * PATH_MAX)
 
 #include "alsa.c"
@@ -766,6 +823,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
                 // logger_aio_write). Here it is a plain file, so a writer opened without O_APPEND (1.6 liblog:
                 // open(O_WRONLY), mediaserver) wrote over the start of the file and its records were lost.
                 if (pre(P(1), "/dev/log/") && (a[2] & 3)) a[2] |= 02000 /*O_APPEND*/;
+                if (g_is32 && pre(P(1), "/dev/pmem")) return pmem_open(a[2]);
                 if (g_is32 && pre(P(1), "/dev/snd/")) return snd_open(P(1), a[2]);   // ALSA for 2.x vendor HALs (alsa.c)
                 if (g_is32 && pre(P(1), "/dev/video")) return v4_open(P(1), a[2]);   // V4L2 camera for 2.x vendor HALs (v4l2.c)
                 if (seq(P(1), "/dev/cpuctl/tasks") || seq(P(1), "/dev/cpuctl/bg_non_interactive/tasks")) return cg_open(P(1), a[2]);
@@ -1032,6 +1090,8 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
         if (((u32)a[1] & 0xffffff00u) == 0x4600) return fb_ioctl((u32)a[1], (u64)a[2]);   /* qemu converts FBIO* itself */
         if (((a[1] >> 8) & 0xff) == 'b' && is_binder_fd((int)a[0])) return binder_ioctl((int)a[0], (u32)a[1], (u64)a[2]);
         if (((a[1] >> 8) & 0xff) == 'a' && is_alarm_fd((int)a[0])) return alarm_ioctl((u32)a[1], (u64)a[2]);
+        if (g_is32 && ((a[1] >> 8) & 0xff) == 'p' && ((u32)a[1] & 0xff) - 1u < 7u && is_pmem_fd((int)a[0]))
+            return pmem_ioctl((int)a[0], (u32)a[1], ((u32)a[1] & 0xff) == 6 ? (u64)a[2] /* CONNECT: a descriptor */ : (u64)G(a[2]));
         if (g_is32 && (((a[1] >> 8) & 0xff) == 'A' || ((a[1] >> 8) & 0xff) == 'U') && snd_of((int)a[0])) return snd_ioctl((int)a[0], (u32)a[1], (u64)a[2]);
         if (g_is32 && ((a[1] >> 8) & 0xff) == 'V' && v4_of((int)a[0])) return v4_ioctl((int)a[0], (u32)a[1], (u64)a[2]);
         if ((u32)a[1] == 0x80047212u) {
@@ -1049,6 +1109,9 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
         return S3(nr, a[0], a[1], a[2]);
     case NR_mmap:
         if (a[2] == 1 && is_binder_fd((int)a[4])) return binder_mmap((u64)a[0], (u64)a[1], a[3]);
+        // pmem_mmap: the first mapping of a descriptor with nothing allocated allocates its length
+        if (g_is32 && (int)a[4] >= 0 && is_pmem_fd((int)a[4]) && pmem_size((int)a[4]) < (long)((u64)a[5] + (u64)a[1]))
+            S2(NR_ftruncate, a[4], (long)((u64)a[5] + (u64)a[1]));
         if (g_is32 && (int)a[4] >= 0 && (u64)a[5] >= 0x80000000UL - 0x10000) {   // ALSA status / control pages
             long o = snd_mmap_off((int)a[4], (u64)a[5]);
             if (o >= 0) return S6(nr, a[0], a[1], a[2], a[3], a[4], o);

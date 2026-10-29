@@ -1,0 +1,3 @@
+src/, include/, NOTICE: the PacketVideo MPEG-4 / H.263 encoder from AOSP
+(platform/frameworks/av media/module/codecs/m4v_h263/enc, Apache 2.0), unchanged.
+m4venc_jni.cpp: the host side of the guest's OMX video encoder (VideoEncoderFeed.kt).

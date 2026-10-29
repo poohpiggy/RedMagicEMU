@@ -1068,6 +1068,26 @@ class TreeFixer(
                 copied++
             }
         }.onFailure { log("camera: HAL not replaced: ${it.message}") }
+        // Qualcomm's OMX video encoder drives the Q6 DSP (/dev/q6venc, which returns run-length data the library packs
+        // itself): the emulator's component of the same name and factory (native/omxvenc, encoding on the phone)
+        // takes its place wherever libOmxCore.so loads libOmxVidEnc.so and that library opens /dev/q6venc
+        if (img.api <= 10) runCatching {
+            val enc = File(root, "system/lib/libOmxVidEnc.so")
+            val parked = File(root, "system/.aemu-parked/system#lib#libOmxVidEnc.so")
+            val orig = if (parked.isFile) parked else enc
+            val core = File(root, "system/lib/libOmxCore.so")
+            if (orig.isFile && core.isFile &&
+                String(core.readBytes(), Charsets.ISO_8859_1).contains("libOmxVidEnc.so") &&
+                String(orig.readBytes(), Charsets.ISO_8859_1).contains("/dev/q6venc")) {
+                val fresh = EngineAssets.open(ctx, "engines/common/libOmxVidEnc.aemu.so").use { it.readBytes() }
+                if (!fresh.contentEquals(enc.readBytes())) {
+                    if (!parked.exists()) { parked.parentFile?.mkdirs(); enc.copyTo(parked) }
+                    enc.writeBytes(fresh); enc.setReadable(true, false)
+                    log("video encoder: the emulator's OMX encoder installed")
+                    copied++
+                }
+            }
+        }.onFailure { log("video encoder: not replaced: ${it.message}") }
         // 2.x: the emulator's libaudio.so (legacy_audio.c) instead of the firmware's (which drives the vendor's sound
         // chip, or with ro.kernel.qemu gives AudioHardwareGeneric: microphone at 8 kHz only) — when nothing but the
         // factory is taken from libaudio.so; its virtual tables follow the firmware's own (LegacyAudio.map).
@@ -1334,6 +1354,27 @@ class TreeFixer(
             File(root, "dev/$n").let { if (!it.exists()) { it.parentFile?.mkdirs(); it.createNewFile() } }
         }
         File(root, "dev/cpuctl").takeIf { it.exists() }?.let { wipe(it) }
+        if (kk32) pmemNodes()
+    }
+
+    /** Qualcomm 1.x-2.x: the pmem devices the firmware's libraries name (/dev/pmem, /dev/pmem_adsp…), served by the
+     *  kernel (run64.c pmem_*). Their libraries test for the node first (libOmxCore OMX_GetHandle: stat /dev/pmem_adsp).
+     *  The names are read from the libraries once (dev/.aemu-pmem). */
+    private fun pmemNodes() {
+        val list = File(root, "dev/.aemu-pmem")
+        val names = if (list.isFile) list.readLines().filter { it.isNotBlank() } else {
+            val found = sortedSetOf<String>()
+            val re = Regex("/dev/(pmem[a-z0-9_]*)")
+            for (dir in listOf("system/lib", "system/lib/hw", "system/bin")) for (f in File(root, dir).listFiles().orEmpty()) {
+                if (!f.isFile || f.length() > (16L shl 20) || isLink(f)) continue
+                val t = runCatching { String(f.readBytes(), Charsets.ISO_8859_1) }.getOrNull() ?: continue
+                if (!t.contains("/dev/pmem")) continue
+                re.findAll(t).forEach { found += it.groupValues[1] }
+            }
+            runCatching { list.writeText(found.joinToString("\n", postfix = "\n")) }
+            found.toList()
+        }
+        for (n in names) File(root, "dev/$n").let { if (!it.exists()) it.createNewFile() }
     }
 
     /**
