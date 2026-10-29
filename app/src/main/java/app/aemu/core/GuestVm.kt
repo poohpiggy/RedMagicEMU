@@ -294,9 +294,9 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             log("GPU bridge: $r")
             glBridge = r.startsWith("ok"); glInfo = r
         }
-        // Android 1.x: the emulator's GLES 1 driver (libhEGL.so, TreeFixer) talks to the same host renderer
-        if (engine == Engine.N64 && img.api <= 4 && s.gpu &&
-            runCatching { String(File(paths.root, "system/lib/libhEGL.so").readBytes(), Charsets.ISO_8859_1).contains("AEmulator GPU bridge") }.getOrDefault(false)) {
+        // Android 1.x: the emulator's GLES 1 driver (libhEGL.so or libhgl.so, TreeFixer) talks to the same host renderer
+        if (engine == Engine.N64 && img.api <= 4 && s.gpu && listOf("libhEGL.so", "libhgl.so").any { n ->
+                runCatching { String(File(paths.root, "system/lib/$n").readBytes(), Charsets.ISO_8859_1).contains("AEmulator GPU bridge") }.getOrDefault(false) }) {
             paths.socket("aemu_gl").parentFile?.mkdirs()
             val r = GlHost.start(paths.socket("aemu_gl").absolutePath)
             log("GPU bridge (GLES 1 of 1.x): $r")

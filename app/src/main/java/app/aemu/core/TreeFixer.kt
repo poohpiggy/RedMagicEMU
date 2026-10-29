@@ -1088,11 +1088,18 @@ class TreeFixer(
         // Android 1.x: libEGL takes a "hardware" EGL/GLES 1 driver by fixed names (Qualcomm's variant: libhEGL.so +
         // libhGLESv1_CM.so) next to libagl; the vendor's drives its GPU (/dev/kgsl...) and fails here, so everything
         // drew in software. The emulator's driver of those names draws on the phone's GPU (native/glbridge guest1.c,
-        // host1.c); the vendor's files are parked. Done when libEGL.so names libhEGL.so (the loader, not a vendor).
+        // host1.c); the vendor's files are parked. Done by the names libEGL.so loads (the loader, not a vendor): Qualcomm's
+        // libhEGL.so + libhGLESv1_CM.so, or AOSP Cupcake/Donut's single libhgl.so (egl.cpp load_driver("libhgl.so")).
         if (img.api <= 4) runCatching {
             val egl = File(root, "system/lib/libEGL.so")
-            if (egl.isFile && String(egl.readBytes(), Charsets.ISO_8859_1).contains("libhEGL.so")) {
-                for ((asset, name) in listOf("libhEGL.aemu.so" to "libhEGL.so", "libhGLESv1_CM.aemu.so" to "libhGLESv1_CM.so")) {
+            val names = if (egl.isFile) String(egl.readBytes(), Charsets.ISO_8859_1) else ""
+            val drv = when {
+                names.contains("libhEGL.so") -> listOf("libhEGL.aemu.so" to "libhEGL.so", "libhGLESv1_CM.aemu.so" to "libhGLESv1_CM.so")
+                names.contains("libhgl.so") -> listOf("libhgl.aemu.so" to "libhgl.so")
+                else -> emptyList()
+            }
+            if (drv.isNotEmpty()) {
+                for ((asset, name) in drv) {
                     val f = File(root, "system/lib/$name")
                     val parked = File(root, "system/.aemu-parked/system#lib#$name")
                     val fresh = EngineAssets.open(ctx, "engines/common/$asset").use { it.readBytes() }

@@ -3,7 +3,7 @@
  * phone's GPU through the GLES bridge's host (host1.c).
  *
  * Android 1.x libEGL (Donut, and Qualcomm's variant of it) loads a software implementation (libagl.so) and a hardware
- * one (libhEGL.so + libhGLESv1_CM.so, or libhgl.so), lists the configs of both - hardware first - and dispatches each
+ * one (libhEGL.so + libhGLESv1_CM.so, or libhgl.so - this same library under that name, SELF_SO), lists the configs of both - hardware first - and dispatches each
  * context's calls to the implementation its config came from (opengl/libs/EGL/egl.cpp: MAKE_CONFIG(impl, index),
  * gl_hooks_t filled by dlsym of every name). Windows are egl_native_window_t (opengl/include/EGL/eglnatives.h): the
  * driver draws into base + offset (stride, format) and calls swapBuffers(), which flips and may move the buffer.
@@ -55,6 +55,11 @@ extern int pthread_mutex_unlock(pthread_mutex_t *m);
 extern int __android_log_print(int prio, const char *tag, const char *fmt, ...);
 #define LOG(...) __android_log_print(4, "aemu-gl1", __VA_ARGS__)
 #define EXPORT __attribute__((visibility("default")))
+/* this library's own name: libhEGL.so (Qualcomm's loader, with libhGLESv1_CM.so) or libhgl.so (AOSP Cupcake/Donut
+ * egl.cpp: load_driver("libhgl.so") takes EGL and GL from one library) - build1.sh builds both */
+#ifndef SELF_SO
+#define SELF_SO "libhEGL.so"
+#endif
 
 /* ---- EGL constants (EGL 1.2) ---- */
 #define EGL_FALSE 0
@@ -871,7 +876,7 @@ EXPORT void (*eglGetProcAddress(const char *name))(void) {
     static void *self;
     if (!name || name[0] != 'g' || name[1] != 'l') return 0;
     for (int i = 0; i < N1_FUNCS; i++) if (!strcmp(kNames1[i], name)) {
-        if (!self) self = dlopen("libhEGL.so", 0);
+        if (!self) self = dlopen(SELF_SO, 0);
         return self ? (void (*)(void))dlsym(self, name) : 0;
     }
     return 0;
