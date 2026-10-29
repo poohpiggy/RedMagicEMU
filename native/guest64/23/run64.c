@@ -467,18 +467,28 @@ static long fb_ioctl(u32 cmd, u64 arg) {
 // guest's EventHub are answered here: a direct multi-touch screen with the navigation and volume keys.
 static char g_input[108];
 static int g_infds[4];                          // descriptors + 1
+static u8 g_indev[4];                           // 0: the touch screen (event0), 1: the keys (event1)
 
-static int is_input_fd(int fd) { for (int i = 0; i < 4; i++) if (g_infds[i] == fd + 1) return 1; return 0; }
+// Two devices, as on a phone: the touch panel and the keypad. A reader that takes the screen's node for itself keeps
+// everything else on it from the framework: tslib's input-raw (1.6 ports) reads EV_KEY BTN_TOUCH only and drops the
+// rest, so Back/Home/Menu sent with the touches never arrived. The app sends each connection the events of its device
+// (the first byte written names it).
+static int input_dev(int fd) { for (int i = 0; i < 4; i++) if (g_infds[i] == fd + 1) return g_indev[i]; return -1; }
+static int is_input_fd(int fd) { return input_dev(fd) >= 0; }
 
-static long input_open(long flags) {
+static long input_open(const char *path, long flags) {
     if (!g_input[0]) return -ENOENT;
+    const char *n = path + 16;                  // after "/dev/input/event"
+    if (!(n[0] == '0' || n[0] == '1') || n[1]) return -ENOENT;
+    u8 dev = (u8)(n[0] - '0');
     long s = S3(NR_socket, 1, 1 | (flags & 02004000), 0);
     if (s < 0) return s;
     struct sockaddr_un sa; sa.family = 1;
     u64 l = slen(g_input); memcpy(sa.path, g_input, l + 1);
     long r = S3(NR_connect, s, &sa, 2 + l + 1);
     if (r < 0) { S1(NR_close, s); return r; }
-    for (int i = 0; i < 4; i++) if (!g_infds[i] || g_infds[i] == (int)s + 1) { g_infds[i] = (int)s + 1; break; }
+    S3(NR_write, s, &dev, 1);
+    for (int i = 0; i < 4; i++) if (!g_infds[i] || g_infds[i] == (int)s + 1) { g_infds[i] = (int)s + 1; g_indev[i] = dev; break; }
     return s;
 }
 
@@ -500,30 +510,48 @@ static long cg_open(const char *path, long flags) {
 
 static void setbit(u8 *m, u64 len, u32 bit) { if (bit / 8 < len) m[bit / 8] |= (u8)(1 << (bit % 8)); }
 
-static long input_ioctl(u32 cmd, u64 arg) {
+// drivers/input/evdev.c bits_to_user(): a bitmap request gets min(BITS_TO_LONGS(max) * sizeof(long), _IOC_SIZE) bytes,
+// never the whole buffer it names (compat: 32-bit longs). tslib input-raw asks EVIOCGBIT(0, 32) and (EV_ABS, 64) into
+// a 4- and an 8-byte local; the full size overwrote its saved registers and it returned to 0 (Xperia 1.6 inputraw.so)
+static u32 bits_len(u32 max, u32 len) {
+    u32 w = g_is32 ? 4 : 8, n = (max + w * 8 - 1) / (w * 8) * w;
+    return n < len ? n : len;
+}
+
+static long input_ioctl(int dev, u32 cmd, u64 arg) {
     u32 nr = cmd & 0xff, len = (cmd >> 16) & 0x3fff;
     u8 *out = (u8 *)arg;
     if (!g_fbw) fb_geom();
-    if (nr == 0x01) { *(int *)arg = 0x010001; return 0; }                        // EVIOCGVERSION
+    if (nr == 0x01) { *(int *)arg = 0x010000; return 0; }   // EVIOCGVERSION: 2.6.29-35 EV_VERSION; tslib input-raw (Xperia 1.6 inputraw.so) wants exactly this
     if (nr == 0x02) { u16 *id = (u16 *)arg; id[0] = 0x18; id[1] = 1; id[2] = 1; id[3] = 1; return 0; }   // EVIOCGID
-    if (nr == 0x06) { static const char name[] = "dhd-touch"; u64 n = sizeof name < len ? sizeof name : len; memcpy(out, name, n); return (long)n; }
+    if (nr == 0x06) {                                                            // name: the key layout (<name>.kl) goes by it
+        const char *name = dev ? "dhd-keypad" : "dhd-touch"; u64 n = slen(name) + 1; if (n > len) n = len;
+        memcpy(out, name, n); return (long)n;
+    }
     if (nr == 0x07 || nr == 0x08) return -ENOENT;                                // phys, uniq
-    if (nr == 0x09) { memset(out, 0, len); setbit(out, len, 1); return len; }    // INPUT_PROP_DIRECT
-    if (nr == 0x18 || nr == 0x19 || nr == 0x1b) { memset(out, 0, len); return len; }   // key, led, switch state
+    if (nr == 0x09) { len = bits_len(0x1f, len); memset(out, 0, len); if (!dev) setbit(out, len, 1); return len; }   // INPUT_PROP_DIRECT (INPUT_PROP_MAX)
+    if (nr == 0x18 || nr == 0x19 || nr == 0x1b) {                                // key, led, switch state
+        len = bits_len(nr == 0x18 ? 0x2ff : nr == 0x19 ? 0x0f : 0x10, len); memset(out, 0, len); return len;
+    }
     if (nr >= 0x20 && nr < 0x40) {                                               // EVIOCGBIT(type)
+        static const u16 maxbit[] = { 0x1f, 0x2ff, 0x0f, 0x3f, 0x07, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0f, 0x07, 0, 0, 0x7f };
+        u32 t = nr - 0x20;                                                       // EV_ MAX values: input-event-codes.h
+        if (t >= sizeof maxbit / sizeof *maxbit || !maxbit[t]) return -EINVAL;
+        len = bits_len(maxbit[t], len);
         memset(out, 0, len);
         switch (nr - 0x20) {
-        case 0: setbit(out, len, 0); setbit(out, len, 1); setbit(out, len, 3); break;
+        case 0: setbit(out, len, 0); setbit(out, len, 1); if (!dev) setbit(out, len, 3); break;
         // + BTN_TOUCH. Not KEY_Q (16): EventHub (2.3+) marks a keyboard ALPHAKEY when its layout maps a key it reports
         // to Q, and the guest then hides the on-screen keyboard (config.keyboard = QWERTY). Its events still come in:
         // the reader does not check them against this mask, so typing from the host keyboard keeps working.
-        case 1: for (u32 k = 1; k < 0xf0; k++) if (k != 16) setbit(out, len, k); setbit(out, len, 580); setbit(out, len, 330); break;
+        case 1: if (!dev) { setbit(out, len, 330); break; }                      // the screen: BTN_TOUCH only
+                for (u32 k = 1; k < 0xf0; k++) if (k != 16) setbit(out, len, k); setbit(out, len, 580); break;
         // ABS_X/Y/PRESSURE too: 0.9-1.6 know single touch only (the app sends it for them, mtMode 4); later readers prefer MT
-        case 3: setbit(out, len, 0); setbit(out, len, 1); setbit(out, len, 24); setbit(out, len, 48); setbit(out, len, 50); setbit(out, len, 53); setbit(out, len, 54); setbit(out, len, 57); break;
+        case 3: if (dev) break; setbit(out, len, 0); setbit(out, len, 1); setbit(out, len, 24); setbit(out, len, 48); setbit(out, len, 50); setbit(out, len, 53); setbit(out, len, 54); setbit(out, len, 57); break;
         }
         return len;
     }
-    if (nr >= 0x40 && nr < 0x80) {                                               // EVIOCGABS(axis)
+    if (nr >= 0x40 && nr < 0x80) {  if (dev) return -EINVAL;                                             // EVIOCGABS(axis)
         // the size comes from the request: 2.3's input_absinfo has no resolution (20 bytes, not 24) and the
         // extra word overwrote InputReader's saved registers
         int a[6] = { 0, 0, 0, 0, 0, 0 }; u32 ax = nr - 0x40;
@@ -732,7 +760,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
                     return S2(NR_memfd_create, "aemu-ashmem", ((a[2] & 02000000) ? 1 : 0) | 2 /*MFD_ALLOW_SEALING*/);
                 }
                 if (seq(P(1), "/dev/binder") || seq(P(1), "/dev/hwbinder") || seq(P(1), "/dev/vndbinder")) return binder_open(a[2], P(1));
-                if (pre(P(1), "/dev/input/event")) return input_open(a[2]);
+                if (pre(P(1), "/dev/input/event")) return input_open(P(1), a[2]);
                 if (seq(P(1), "/dev/alarm")) return alarm_open();
                 if (g_is32 && pre(P(1), "/dev/snd/")) return snd_open(P(1), a[2]);   // ALSA for 2.x vendor HALs (alsa.c)
                 if (g_is32 && pre(P(1), "/dev/video")) return v4_open(P(1), a[2]);   // V4L2 camera for 2.x vendor HALs (v4l2.c)
@@ -985,6 +1013,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
     }
     case NR_close: {
         if (is_nl_fd((int)a[0])) nl_close((int)a[0]);
+        for (int i = 0; i < 4; i++) if (g_infds[i] == (int)a[0] + 1) g_infds[i] = 0;
         if (g_is32 && snd_of((int)a[0])) { snd_closed((int)a[0]); return 0; }
         if (g_is32 && v4_of((int)a[0])) { v4_closed((int)a[0]); return 0; }
         return S1(nr, a[0]);
@@ -995,7 +1024,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
         if (((a[1] >> 8) & 0xff) == ASHMEM_MAGIC) return ashmem_ioctl((int)a[0], (u32)a[1], (u64)a[2]);
         // the pointer is the guest's: add qemu's guest_base back (2.3's zygote, linked at 0x8000, runs with one;
         // without it EventHub read empty capability bits and dropped the touchscreen)
-        if (((a[1] >> 8) & 0xff) == 'E' && is_input_fd((int)a[0])) return input_ioctl((u32)a[1], (u64)G(a[2]));
+        if (((a[1] >> 8) & 0xff) == 'E' && is_input_fd((int)a[0])) return input_ioctl(input_dev((int)a[0]), (u32)a[1], (u64)G(a[2]));
         if (((u32)a[1] & 0xffffff00u) == 0x4600) return fb_ioctl((u32)a[1], (u64)a[2]);   /* qemu converts FBIO* itself */
         if (((a[1] >> 8) & 0xff) == 'b' && is_binder_fd((int)a[0])) return binder_ioctl((int)a[0], (u32)a[1], (u64)a[2]);
         if (((a[1] >> 8) & 0xff) == 'a' && is_alarm_fd((int)a[0])) return alarm_ioctl((u32)a[1], (u64)a[2]);

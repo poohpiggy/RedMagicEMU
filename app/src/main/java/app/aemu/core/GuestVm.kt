@@ -425,6 +425,12 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         if (engine == Engine.N64) overrides["persist.sys.binary_xml"] = "true"
         overrides["net.dns1"] = "8.8.8.8"
         overrides["net.dns2"] = "1.1.1.1"
+        // what a vendor RIL (or its pppd) sets for the data interface it brings up (Stubs.IFACE): 1.x-2.2's
+        // PdpConnection takes the servers from net.<iface>.dns1/2, not from the SETUP_DATA_CALL answer, and
+        // MobileDataStateTracker copies them over net.dnsN and blanks the rest; without them every lookup waited out
+        // bionic's 5 s timeout on a server that is not there
+        overrides["net.rmnet0.dns1"] = "8.8.8.8"
+        overrides["net.rmnet0.dns2"] = "1.1.1.1"
         // в прошивках старая база часовых поясов — передаём текущее смещение, а не название зоны
         overrides["persist.sys.timezone"] = gmtZone()
         if (img.api < 3) {
@@ -452,6 +458,11 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             if (!(vndkLessVendor && k == "ro.vndk.version")) later.putIfAbsent(k, v)
         }
         if (engine == Engine.N64 && kernel.derivedIdentity) deriveIdentity(later)
+        // a firmware whose build.prop lost ro.product.manufacturer (Build.MANUFACTURER, API 4; vendor apps check it):
+        // the maker that signed the platform, from framework-res.apk's certificate (its O=, without the legal form)
+        if (img.api >= 4 && !later.containsKey("ro.product.manufacturer") && listOf("system/build.prop", "vendor/build.prop", "default.prop")
+                .none { n -> runCatching { File(paths.root, n).readText().contains("ro.product.manufacturer=") }.getOrDefault(false) })
+            runCatching { platformMaker() }.getOrNull()?.let { later["ro.product.manufacturer"] = it }
         // Without Treble's own check (it needs SELinux), system_server of 12 compares the partitions' fingerprints
         // and shows "There's an internal problem with your device" when the vendor's is of another build - which it
         // is on every phone updated from an earlier release.
@@ -1497,6 +1508,25 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             fun p(k: String) = all[k] ?: "unknown"
             later.putIfAbsent("ro.build.fingerprint", p("ro.product.brand") + "/" + p("ro.product.name") + "/" + p("ro.product.device") + ":" +
                 p("ro.build.version.release") + "/" + p("ro.build.id") + "/" + p("ro.build.version.incremental") + ":" + p("ro.build.type") + "/" + p("ro.build.tags"))
+        }
+    }
+
+    /** the organisation of the platform signing certificate (framework-res.apk, PKCS#7 in META-INF), or null for
+     *  AOSP's test keys (O=Android) */
+    private fun platformMaker(): String? {
+        val apk = File(paths.root, "system/framework/framework-res.apk").takeIf { it.isFile } ?: return null
+        java.util.zip.ZipFile(apk).use { z ->
+            val e = z.entries().asSequence().firstOrNull { it.name.startsWith("META-INF/") && it.name.uppercase().let { n -> n.endsWith(".RSA") || n.endsWith(".DSA") || n.endsWith(".EC") } } ?: return null
+            val cert = z.getInputStream(e).use { java.security.cert.CertificateFactory.getInstance("X.509").generateCertificates(it) }
+                .filterIsInstance<java.security.cert.X509Certificate>().firstOrNull() ?: return null
+            // RFC 2253 name: "CN=...,O=...,C=..." (a comma inside a value is escaped as "\,")
+            val o = Regex("""(?:^|,)O=((?:[^,\\]|\\.)+)""").find(cert.subjectX500Principal.getName("RFC2253"))?.groupValues?.get(1)
+                ?.replace(Regex("""\\(.)"""), "$1") ?: return null
+            var s = o.trim()
+            // legal forms and the trade suffixes vendors put after the maker's name
+            val tail = Regex("""(?i)[\s,]+(AB|AG|Inc\.?|Ltd\.?|Co\.?|LLC|GmbH|Corp\.?|Corporation|Limited|Company|S\.A\.|Oy|Mobile|Communications|Electronics|Telecom(munications)?)$""")
+            while (true) { val t = s.replace(tail, ""); if (t == s) break; s = t }
+            return s.takeIf { it.isNotEmpty() && !it.equals("Android", true) }
         }
     }
 

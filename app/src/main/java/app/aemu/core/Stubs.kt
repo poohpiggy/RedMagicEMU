@@ -145,10 +145,11 @@ class RilStub(
             val (err, payload) = runCatching {
                 when {
                     request == RIL_REQUEST_SIM_IO -> 0 to simIo(b)
-                    // Qualcomm's own requests travel as OEM_HOOK_RAW with a "QOEMHOOK" header. The telephony of CAF
-                    // builds treats a failure as "this modem has no such request" and goes on; a success with a
-                    // made-up payload is parsed and crashes com.android.phone (MIUI 7 on 5.0: modem capability)
-                    request == RIL_REQUEST_OEM_HOOK_RAW && isQcomHook(body) -> E_GENERIC_FAILURE to ByteArray(0)
+                    // OEM_HOOK_RAW: the bytes both ways are the vendor's own format (ril.h), so there is nothing to
+                    // make up. Callers take a failure as "this modem has no such request" and go on; a success with a
+                    // made-up payload is parsed and crashes com.android.phone (CAF's QOEMHOOK modem capability on
+                    // MIUI 7; Sony's SemcPhoneUtil.cachePersoIndicator on 1.6 copies past a short SIM-lock answer)
+                    request == RIL_REQUEST_OEM_HOOK_RAW -> E_GENERIC_FAILURE to ByteArray(0)
                     else -> handle(request)
                 }
             }.getOrElse { 0 to ByteArray(0) }
@@ -185,11 +186,6 @@ class RilStub(
             val err = if (request == RIL_REQUEST_RADIO_POWER || data != null) 0 else E_RADIO_NOT_AVAILABLE
             frame(o, le(0) + le(serial) + le(err) + (data ?: ByteArray(0)))
         }
-    }
-
-    private fun isQcomHook(body: ByteArray): Boolean {
-        val tag = "QOEMHOOK".toByteArray()
-        return body.size >= 12 + tag.size && tag.indices.all { body[12 + it] == tag[it] }
     }
 
     private fun handle(req: Int): Pair<Int, ByteArray> {

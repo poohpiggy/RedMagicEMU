@@ -375,6 +375,9 @@ class TreeFixer(
             append("key ${InputService.KEY_VOLUMEUP} VOLUME_UP WAKE\n")
             if (img.api >= 11) append("key 113 VOLUME_MUTE\n")   // unknown before 3.0: 0.9-2.3 drop the whole file
             append("key 212 CAMERA\n")
+            // KEY_FOCUS (input-event-codes.h 0x210): the half press of a camera key, which camera apps take before
+            // CAMERA (Sony's own es209ra_keypad.kl maps it too); KEYCODE_FOCUS exists from 1.0
+            if (img.api >= 1) append("key 528 FOCUS\n")
             append("key 103 DPAD_UP\nkey 108 DPAD_DOWN\nkey 105 DPAD_LEFT\nkey 106 DPAD_RIGHT\nkey 232 DPAD_CENTER\n")
             // APP_SWITCH exists from 3.0; older layouts reject unknown labels and drop the whole file
             if (img.api >= 11) {
@@ -412,11 +415,13 @@ class TreeFixer(
         }
         val targets = listOf(
             f, vf,
+            // the keys come on their own device (event1, see makeDevNodes): the same layout under its name
+            File(root, "system/usr/keylayout/dhd-keypad.kl"), File(root, "vendor/usr/keylayout/dhd-keypad.kl"),
             File(root, "system/usr/keylayout/Vendor_18d1_Product_0001.kl"),
             File(root, "system/usr/keylayout/AEmulator_Touchscreen.kl")
         )
         for (target in targets) {
-            if (target == vf && !File(root, "vendor/usr/keylayout").isDirectory) continue
+            if (target.path.contains("/vendor/usr/") && !File(root, "vendor/usr/keylayout").isDirectory) continue
             if (runCatching { target.readText() }.getOrNull() != text) {
                 runCatching { target.parentFile?.mkdirs(); target.writeText(text); target.setReadable(true, false) }
                     .onFailure { log("key layout (${target.name}): ${it.message}") }
@@ -1047,6 +1052,22 @@ class TreeFixer(
                 copied++
             }
         }.onFailure { log("camera: HAL not replaced: ${it.message}") }
+        // 1.6 with SEMC's CameraService (preview frames come with the index of one of four heaps:
+        // Client::previewCallback(const sp<IMemory>&, int, void*)), whose own HAL drives /dev/msm_camera: the
+        // emulator's HAL for that interface (camera_semc16.cpp), stock kept in .aemu-parked
+        val semc16 = !extIface && img.api <= 4 && runCatching {
+            String(File(root, "system/lib/libcameraservice.so").readBytes(), Charsets.ISO_8859_1)
+                .contains("_ZN7android13CameraService6Client15previewCallbackERKNS_2spINS_7IMemoryEEEiPv")
+        }.getOrDefault(false)
+        if (semc16) runCatching {
+            val fresh = EngineAssets.open(ctx, "engines/common/libcamera.semc16.so").use { it.readBytes() }
+            if (!cam.isFile || !fresh.contentEquals(cam.readBytes())) {
+                if (cam.isFile && !parkedCam.exists()) { parkedCam.parentFile?.mkdirs(); cam.copyTo(parkedCam) }
+                cam.writeBytes(fresh); cam.setReadable(true, false)
+                log("camera: the emulator's 1.6 camera HAL (SEMC interface) installed")
+                copied++
+            }
+        }.onFailure { log("camera: HAL not replaced: ${it.message}") }
         // 2.x: the emulator's libaudio.so (legacy_audio.c) instead of the firmware's (which drives the vendor's sound
         // chip, or with ro.kernel.qemu gives AudioHardwareGeneric: microphone at 8 kHz only) — when nothing but the
         // factory is taken from libaudio.so; its virtual tables follow the firmware's own (LegacyAudio.map)
@@ -1071,7 +1092,7 @@ class TreeFixer(
             }
         }.onFailure { log("audio: HAL not replaced: ${it.message}") }
         // 2.3, Qualcomm: the camera HAL needs the modem (ONCRPC) and quits mediaserver without it — a HAL with no cameras
-        if (img.api <= 10 && !extIface && cam.isFile && !parkedCam.exists() && cam.length() > 4096) {
+        if (img.api <= 10 && !extIface && !semc16 && cam.isFile && !parkedCam.exists() && cam.length() > 4096) {
             val text = runCatching { String(cam.readBytes(), Charsets.ISO_8859_1) }.getOrDefault("")
             if (listOf("libcald", "liboemcamera", "oncrpc").any { text.contains(it) }) runCatching {
                 File(root, "system/.aemu-parked").mkdirs()
@@ -1080,7 +1101,7 @@ class TreeFixer(
                 log("camera: the firmware's 2.3 HAL needs the modem, replaced with an empty one (stock kept)")
                 copied++
             }
-        } else if (img.api <= 10 && !extIface && parkedCam.isFile && cam.isFile && cam.length() <= 4096) {
+        } else if (img.api <= 10 && !extIface && !semc16 && parkedCam.isFile && cam.isFile && cam.length() <= 4096) {
             // an empty HAL put here by an older build: refresh it (1.x-2.2 need the openCameraHardware export)
             runCatching {
                 val fresh = EngineAssets.open(ctx, "engines/common/libcamera.none.so").use { it.readBytes() }
@@ -1297,6 +1318,8 @@ class TreeFixer(
 
     private fun makeDevNodes() {
         File(root, "dev/input/event0").let { if (!it.isFile) { it.parentFile?.mkdirs(); it.createNewFile() } }
+        // the keys as a device of their own, where the engine's kernel serves one (Kernel64.keypadNode)
+        File(root, "dev/input/event1").let { if (engine == Engine.N64 && kernel.keypadNode) { if (!it.isFile) it.createNewFile() } else it.delete() }
         File(root, "dev/socket").mkdirs()
         File(root, "dev/graphics").mkdirs()
         // a directory in the file's place: open() fails with EISDIR whatever the flags

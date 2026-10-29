@@ -8,5 +8,5 @@ mkdir -p "$(dirname "$OUT")"
 "$BIN/clang" --target=armv7a-linux-androideabi21 -march=armv7-a -mthumb -Os -fPIC -shared \
   -nostdlib -ffreestanding -fno-builtin -fvisibility=hidden -fno-stack-protector \
   -Wl,--hash-style=sysv -Wl,-z,norelro -Wl,--build-id=none -Wl,--no-undefined -Wl,-soname,overlay.default.so \
-  -o "$OUT" overlay_hal.c -lc
+  -o "$OUT" overlay_hal.c -lc -ldl
 "$BIN/llvm-strip" "$OUT" 2>/dev/null || true

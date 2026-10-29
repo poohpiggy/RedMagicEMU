@@ -22,6 +22,7 @@ typedef int GLsizei;
 typedef void GLvoid;
 
 extern void *dlopen(const char *name, int flags);
+extern const char *dlerror(void);
 extern void *dlsym(void *handle, const char *name);
 extern void *malloc(unsigned int n);
 extern void free(void *p);
@@ -41,7 +42,11 @@ __attribute__((visibility("hidden"))) void *aemu_split_resolve(unsigned idx) {
     if (g_any_es1 && kEs2Only[idx] && es1_current()) return (void *)zero_fn;
     void *f = g_fn[idx];
     if (f) return f;
-    if (!g_lib) g_lib = dlopen("/system/lib/egl/libGLES_bridge.so", 0);
+    if (!g_lib) {
+        g_lib = dlopen("/system/lib/egl/libGLES_bridge.so", 0);
+        static int said;
+        if (!g_lib && !said) { said = 1; const char *e = dlerror(); __android_log_print(6, "aemu-gl", "libGLES_bridge.so: %s", e ? e : "?"); }
+    }
     if (g_lib) f = dlsym(g_lib, kNames[idx]);
     if (!f) f = (void *)trap;
     g_fn[idx] = f;

@@ -28,6 +28,7 @@ import java.nio.ByteOrder
  * "zoom <ratio×100>": digital zoom of every frame (preview, recording and picture).
  * "size <w> <h>": NV21 previews of that size (the 640×480 frame cropped to its shape in the centre and scaled);
  * type-3 frames then carry it in their header. Pictures stay 640×480.
+ * "upright" (1.x HALs: no display orientation exists): the overlay's picture is turned by the sensor orientation.
  * "ovl <id>" (2.3 HALs that show the preview through an overlay, camera_gb.cpp): the host draws each preview frame
  * into that overlay itself (OverlayFeed), so the picture does not travel through the guest; "ovl 0" stops it.
  * Frames are 640×480 straight from the sensor (the HAL reports the sensor orientation, the guest rotates).
@@ -49,6 +50,8 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         @Volatile private var shot = false
         @Volatile private var onlyNv21 = false
         @Volatile private var overlay = 0
+        @Volatile private var upright = false
+        @Volatile private var sensorOrient = 90
         @Volatile private var zoom = 100
         @Volatile private var outW = W
         @Volatile private var outH = H
@@ -68,11 +71,12 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                     val line = r.readLine() ?: break
                     val p = line.trim().split(' ')
                     when (p[0]) {
-                        "open" -> open(p.getOrNull(1) == "1")
+                        "open" -> if (java.io.File(paths.bin, "camera.test").exists()) openTest() else open(p.getOrNull(1) == "1")
                         "start" -> streaming = true
                         "stop" -> streaming = false
                         "shot" -> shot = true
                         "nv21" -> onlyNv21 = true
+                        "upright" -> upright = true
                         "size" -> {
                             val w = p.getOrNull(1)?.toIntOrNull() ?: W; val h = p.getOrNull(2)?.toIntOrNull() ?: H
                             if (w in 16..1920 && h in 16..1080 && w % 2 == 0 && h % 2 == 0) { outH = h; outW = w }
@@ -106,6 +110,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             val want = if (front) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
             val id = cm.cameraIdList.firstOrNull { cm.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == want }
                 ?: cm.cameraIdList.firstOrNull() ?: run { log("camera: the phone has no camera"); return }
+            sensorOrient = cm.getCameraCharacteristics(id).get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
             val ir = ImageReader.newInstance(W, H, ImageFormat.YUV_420_888, 2)
             reader = ir
             ir.setOnImageAvailableListener({ r -> r.acquireLatestImage()?.use { frame(it) } }, handler)
@@ -136,6 +141,31 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             if (!streaming && !shot) return
             val t0 = System.nanoTime()
             toNv21(img)
+            process(t0)
+        }
+
+        /** the test picture instead of the camera (a file "camera.test" in the image's run directory): see TestScene */
+        private fun openTest() {
+            val cm = ctx.getSystemService(CameraManager::class.java)
+            val orient = runCatching { cm.cameraIdList.firstNotNullOfOrNull { id -> cm.getCameraCharacteristics(id)
+                .takeIf { it.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK }
+                ?.get(CameraCharacteristics.SENSOR_ORIENTATION) } }.getOrNull() ?: 90
+            sensorOrient = orient
+            val scene = TestScene(W, H, orient)
+            log("camera: test picture for the guest (sensor orientation $orient)")
+            val start = android.os.SystemClock.uptimeMillis()
+            val tick = object : Runnable {
+                var n = 0
+                override fun run() {
+                    if (!thread.isAlive) return
+                    if (streaming || shot) { val t0 = System.nanoTime(); scene.draw(n++, nv21); runCatching { process(t0) } }
+                    handler.postAtTime(this, start + (n + 1) * 1000L / 30)
+                }
+            }
+            handler.post(tick)
+        }
+
+        private fun process(t0: Long) {
             val z = zoom
             if (z > 100) zoomNv21(z)
             runCatching {
@@ -150,7 +180,10 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                 val ow = outW; val oh = outH
                 val frame = if (ow == W && oh == H) nv21 else resized(ow, oh)
                 val ov = overlay
-                if (ov != 0) OverlayFeed.show(ov, frame, ow * oh * 3 / 2, ow, oh, OverlayFeed.NV21)
+                // "upright": the picture turned clockwise by the sensor orientation (HAL_TRANSFORM_ROT_90 4, ROT_180 3,
+                // ROT_270 7), as a 1.x phone's own HAL shows its preview: no display orientation reaches it
+                val turn = if (!upright) 0 else when (sensorOrient) { 90 -> 4; 180 -> 3; 270 -> 7; else -> 0 }
+                if (ov != 0) OverlayFeed.show(ov, frame, ow * oh * 3 / 2, ow, oh, OverlayFeed.NV21, unplaced = true, turn = turn)
                 if (!onlyNv21) toRgba()
                 val t1 = System.nanoTime()
                 if (onlyNv21) send(3, frame, ow * oh * 3 / 2, w = ow, h = oh) else send(1, rgba, rgba.size, nv21)
@@ -264,5 +297,67 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
     companion object {
         const val W = 640
         const val H = 480
+    }
+}
+
+/**
+ * A known picture for checking a guest's camera path: the scene as a person holding the phone upright would see it
+ * (an arrow pointing up with "UP", the corners marked TL red, TR green, BL blue, BR white, the colour bars
+ * R G B C M Y W K left to right, a bar running left to right once a second and the frame number), turned into the
+ * sensor's own frame by the host back camera's SENSOR_ORIENTATION (CameraCharacteristics: the clockwise turn that
+ * makes the sensor image upright on the screen in its natural orientation), as the real sensor delivers it.
+ * A guest that shows its preview right shows the arrow up and TL in the top left corner; a mirrored or turned
+ * picture shows at once which way it is wrong, and the running bar and the counter show dropped or uneven frames.
+ */
+class TestScene(private val w: Int, private val h: Int, private val orient: Int) {
+    private val sw = if (orient % 180 == 0) w else h   // the upright scene
+    private val sh = if (orient % 180 == 0) h else w
+    private val bmp = android.graphics.Bitmap.createBitmap(sw, sh, android.graphics.Bitmap.Config.ARGB_8888)
+    private val cv = android.graphics.Canvas(bmp)
+    private val pt = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+    private val px = IntArray(sw * sh)
+
+    fun draw(n: Int, out: ByteArray) {
+        cv.drawColor(0xff404040.toInt())
+        val bars = intArrayOf(0xffff0000.toInt(), 0xff00ff00.toInt(), 0xff0000ff.toInt(), 0xff00ffff.toInt(),
+            0xffff00ff.toInt(), 0xffffff00.toInt(), 0xffffffff.toInt(), 0xff000000.toInt())
+        val by = sh * 2 / 3f; val bh = sh / 6f
+        for (i in bars.indices) { pt.color = bars[i]; cv.drawRect(i * sw / 8f, by, (i + 1) * sw / 8f, by + bh, pt) }
+        val c = sw / 8f
+        fun corner(x: Float, y: Float, col: Int, t: String) {
+            pt.color = col; cv.drawRect(x, y, x + c, y + c, pt)
+            pt.color = if (col == 0xffffffff.toInt()) 0xff000000.toInt() else 0xffffffff.toInt(); pt.textSize = c * 0.45f
+            cv.drawText(t, x + c * 0.12f, y + c * 0.65f, pt)
+        }
+        corner(0f, 0f, 0xffff0000.toInt(), "TL"); corner(sw - c, 0f, 0xff00ff00.toInt(), "TR")
+        corner(0f, sh - c, 0xff0000ff.toInt(), "BL"); corner(sw - c, sh - c, 0xffffffff.toInt(), "BR")
+        // the arrow up
+        pt.color = 0xffffffff.toInt()
+        val ax = sw / 2f; val top = sh * 0.08f; val aw = sw * 0.18f
+        val path = android.graphics.Path().apply { moveTo(ax, top); lineTo(ax + aw, top + aw); lineTo(ax + aw / 3, top + aw)
+            lineTo(ax + aw / 3, sh * 0.5f); lineTo(ax - aw / 3, sh * 0.5f); lineTo(ax - aw / 3, top + aw); lineTo(ax - aw, top + aw); close() }
+        cv.drawPath(path, pt)
+        pt.textSize = sh / 14f; pt.color = 0xffffff00.toInt()
+        cv.drawText("UP", ax - pt.measureText("UP") / 2, sh * 0.58f, pt)
+        pt.textSize = sh / 18f; pt.color = 0xffffffff.toInt()
+        cv.drawText("#$n", c * 1.2f, c * 0.7f, pt)
+        // one sweep a second at 30 frames
+        val x = (n % 30) * sw / 30f
+        pt.color = 0xffff8000.toInt(); cv.drawRect(x, by - bh / 2, x + sw / 30f, by, pt)
+        bmp.getPixels(px, 0, sw, 0, 0, sw, sh)
+        // into the sensor's frame: the sensor image turned clockwise by orient is the scene, so the sensor pixel
+        // (sx, sy) is the scene pixel turned back
+        val n2 = w * h
+        for (sy in 0 until h) for (sx in 0 until w) {
+            val (x0, y0) = when (orient) { 90 -> Pair(h - 1 - sy, sx); 180 -> Pair(w - 1 - sx, h - 1 - sy); 270 -> Pair(sy, w - 1 - sx); else -> Pair(sx, sy) }
+            val p = px[y0 * sw + x0]
+            val r = (p shr 16) and 255; val g = (p shr 8) and 255; val b = p and 255
+            out[sy * w + sx] = ((66 * r + 129 * g + 25 * b + 128 shr 8) + 16).toByte()
+            if (sx and 1 == 0 && sy and 1 == 0) {
+                val o = n2 + (sy / 2) * w + sx
+                out[o] = ((112 * r - 94 * g - 18 * b + 128 shr 8) + 128).toByte()       // V
+                out[o + 1] = ((-38 * r - 74 * g + 112 * b + 128 shr 8) + 128).toByte()  // U
+            }
+        }
     }
 }

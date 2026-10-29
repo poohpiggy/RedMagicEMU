@@ -19,7 +19,7 @@ import java.util.concurrent.ConcurrentHashMap
  * GuestScreen draws every visible overlay that has a frame into its rectangle.
  */
 class OverlayFeed(paths: VmPaths, private val log: (String) -> Unit) {
-    class Layer { val rect = Rect(); @Volatile var visible = false; @Volatile var bmp: Bitmap? = null; var px = IntArray(0); @Volatile var tr = 0; var rot = IntArray(0) }
+    class Layer { val rect = Rect(); @Volatile var visible = false; @Volatile var placed = false;  @Volatile var bmp: Bitmap? = null; var px = IntArray(0); @Volatile var tr = 0; var rot = IntArray(0) }
 
     private val server = UnixServer(paths.socket("aemu_ovl"), "overlay") { c -> serve(c) }
 
@@ -35,6 +35,13 @@ class OverlayFeed(paths: VmPaths, private val log: (String) -> Unit) {
             while (true) {
                 inp.readFully(hd, 0, 4)
                 when (bb.getInt(0)) {
+                    4 -> {
+                        inp.readFully(hd, 4, 24)
+                        val id = bb.getInt(4); val t = (bb.getInt(24) shr 8) and 7
+                        log("overlay $id: transform $t, not placed")
+                        layers.getOrPut(id) { Layer() }.tr = t
+                        changed()
+                    }
                     1, 3 -> {
                         inp.readFully(hd, 4, 24)
                         val id = bb.getInt(4)
@@ -44,6 +51,7 @@ class OverlayFeed(paths: VmPaths, private val log: (String) -> Unit) {
                         else layers.getOrPut(id) { Layer() }.apply {
                             rect.set(bb.getInt(8), bb.getInt(12), bb.getInt(8) + bb.getInt(16), bb.getInt(12) + bb.getInt(20))
                             visible = (bb.getInt(24) and 1) != 0
+                            placed = true
                             tr = (bb.getInt(24) shr 8) and 7
                         }
                         changed()
@@ -69,7 +77,6 @@ class OverlayFeed(paths: VmPaths, private val log: (String) -> Unit) {
         /** GuestScreen redraws when an overlay moves or gets a frame */
         @Volatile var onChange: (() -> Unit)? = null
         private fun changed() { onChange?.invoke() }
-
         private fun four(s: String) = s[0].code or (s[1].code shl 8) or (s[2].code shl 16) or (s[3].code shl 24)
         val NV21 = four("NV21"); private val YU12 = four("YU12"); private val YUYV = four("YUYV")
         private val NV61 = four("NV61"); private val RGBP = four("RGBP")
@@ -83,13 +90,21 @@ class OverlayFeed(paths: VmPaths, private val log: (String) -> Unit) {
         }
 
         /** a frame for overlay <id> (from the V4L2 driver, or from CameraFeed for a camera HAL that names its overlay) */
-        fun show(id: Int, data: ByteArray, len: Int, w: Int, h: Int, fourcc: Int) {
-            // only for an overlay SurfaceFlinger placed: a frame late after "gone" must not bring it back
-            val l = layers[id] ?: return
+        /** turn: HAL_TRANSFORM of the picture itself, applied when SurfaceFlinger sets none (CameraFeed: an upright
+         *  preview for a camera HAL of 1.x, which has no display orientation) */
+        fun show(id: Int, data: ByteArray, len: Int, w: Int, h: Int, fourcc: Int, unplaced: Boolean = false, turn: Int = 0) {
+            // only for an overlay SurfaceFlinger placed: a frame late after "gone" must not bring it back. The camera
+            // HAL's own overlay may come first: 1.6's SurfaceFlinger sets an overlay's position only when its layer's
+            // geometry changes after the overlay was made (LayerBuffer::OverlaySource: onTransaction sets the flag
+            // onVisibilityResolved waits for; the constructor clears it), so a camera started on a laid-out
+            // SurfaceView never places it. Until it does, the overlay covers the screen: GuestScreen shows it only
+            // where SurfaceFlinger left the screen black, which is the SurfaceView's hole
+            val l = layers[id] ?: if (unplaced) layers.getOrPut(id) { Layer() } else return
+            if (unplaced && !l.placed) l.visible = true
             synchronized(l) {
                 if (l.px.size != w * h) l.px = IntArray(w * h)
                 if (!toArgb(data, len, w, h, fourcc, l.px)) return
-                val t = l.tr
+                val t = if (l.tr != 0) l.tr else turn
                 var px = l.px; var bw = w; var bh = h
                 if (t != 0) { if (l.rot.size != w * h) l.rot = IntArray(w * h); transform(l.px, w, h, t, l.rot); px = l.rot; if ((t and 4) != 0) { bw = h; bh = w } }
                 var b = l.bmp

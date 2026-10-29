@@ -15,7 +15,9 @@
  * private ioctl on the same fd, to send buffer <n> to the app as the frame of overlay <id>. The app draws it over
  * the guest's screen in the overlay's rectangle.
  *
- * Only libc is used.
+ * 1.6 (LayerBuffer::OverlaySource without a drawing of its own): see "undrawn holes" below.
+ *
+ * Only libc and libdl are used.
  */
 #include <stdint.h>
 #include <stddef.h>
@@ -29,6 +31,10 @@ extern int close(int fd);
 extern int ioctl(int fd, int req, ...);
 extern int getpid(void);
 extern void *memcpy(void *d, const void *s, unsigned long n);
+extern void *dlopen(const char *name, int flags);
+extern void *dlsym(void *h, const char *name);
+extern int pipe(int *fds);
+extern long read(int fd, void *buf, unsigned long n);
 #define EXPORT __attribute__((visibility("default")))
 #define HARDWARE_MODULE_TAG 0x484d4f44   /* HMOD */
 #define HARDWARE_DEVICE_TAG 0x48574454   /* HWDT */
@@ -115,7 +121,76 @@ static int ctl_get(struct control_device *d, int name) {
     default: return 1;                 /* alignments */
     }
 }
-static struct overlay *ctl_create(struct control_device *d, uint32_t w, uint32_t h, int32_t format) {
+/* ---- undrawn holes (1.6) ----
+ * 1.6's LayerBuffer::OverlaySource has no onDraw: its vtable (_ZTVN7android11LayerBuffer13OverlaySourceE, Sony's
+ * libsurfaceflinger 0x365c0) keeps LayerBuffer::Source::onDraw, an empty function (0x24f80), which
+ * LayerBuffer::onDraw calls through slot +8 (0x26db2). So nothing is drawn where the overlay is and the screen keeps
+ * the pixels of whatever was there before; the app cannot tell that from a picture. From 2.0 on AOSP's
+ * OverlaySource::onDraw clears its region: mLayer.clearWithOpenGL(clip). Its position also never comes: the source's
+ * onVisibilityResolved (0x25c88) calls setPosition with the layer's transformed bounds (layer +0x78..+0x84) only
+ * after onTransaction has seen the layer change (flag +0xc, cleared by the constructor 0x267d0).
+ * createOverlay is called by that constructor (0x267fe) with the new source in r7 (0x267be) and its vtable already
+ * stored (0x267de); a source whose class draws nothing gets its own copy of the vtable with that onDraw, which also
+ * places the overlay where the layer is. Fields of the source (constructor): +8 the layer, +0x10 the overlay. */
+enum { VT_WORDS = 11, VT_ONDRAW = 4, MAXSRC = 4 };
+static uint32_t g_vt[VT_WORDS];
+static void (*g_clear)(const void *layer, const void *region);
+static struct control_device *g_ctl;
+
+static int readable(const void *p, unsigned long n) {
+    static int fds[2] = { -1, -1 };
+    if (fds[0] < 0 && pipe(fds) != 0) return 0;
+    char t[16];
+    if (n > sizeof t || write(fds[1], p, n) != (long)n) return 0;   /* EFAULT for an address that is not mapped */
+    read(fds[0], t, n);
+    return 1;
+}
+
+static int ctl_set_pos(struct control_device *d, struct overlay *o, int x, int y, uint32_t w, uint32_t h);
+
+static void hole_draw(const void *src, const void *clip) {
+    const uint8_t *layer = *(const uint8_t *const *)((const uint8_t *)src + 8);
+    struct overlay *o = *(struct overlay *const *)((const uint8_t *)src + 0x10);
+    if (layer && g_clear) g_clear(layer, clip);
+    if (layer && o && g_ctl && !o->pw) {
+        const int *b = (const int *)(layer + 0x78);
+        if (b[2] > b[0] && b[3] > b[1]) ctl_set_pos(g_ctl, o, b[0], b[1], (uint32_t)(b[2] - b[0]), (uint32_t)(b[3] - b[1]));
+    }
+}
+
+static void adopt_source(struct control_device *d, void *src) {
+    static int ready = -1;
+    if (ready < 0) {
+        ready = 0;
+        void *sf = dlopen("libsurfaceflinger.so", 0);
+        const uint32_t *vt = sf ? dlsym(sf, "_ZTVN7android11LayerBuffer13OverlaySourceE") : 0;
+        void *empty = sf ? dlsym(sf, "_ZNK7android11LayerBuffer6Source6onDrawERKNS_6RegionE") : 0;
+        g_clear = sf ? dlsym(sf, "_ZNK7android9LayerBase15clearWithOpenGLERKNS_6RegionE") : 0;
+        /* only a class that keeps the empty onDraw (from 2.0 OverlaySource has its own) */
+        if (vt && empty && g_clear && (vt[VT_ONDRAW] | 1) == ((uint32_t)(uintptr_t)empty | 1)) {
+            memcpy(g_vt, vt, sizeof g_vt);
+            g_vt[VT_ONDRAW] = (uint32_t)(uintptr_t)hole_draw;
+            g_vt[0] = (uint32_t)(uintptr_t)vt;   /* unused offset-to-top slot: where the copy came from */
+            ready = 1;
+        }
+    }
+    if (ready != 1 || !src || ((uintptr_t)src & 3) || !readable(src, 4)) return;
+    const uint32_t *orig = (const uint32_t *)(uintptr_t)g_vt[0];
+    if (*(const uint32_t *const *)src != orig + 2) return;   /* r7 is not a source being built */
+    g_vt[0] = 0;
+    *(const uint32_t **)src = g_vt + 2;
+    g_vt[0] = (uint32_t)(uintptr_t)orig;
+    g_ctl = d;
+}
+
+static struct overlay *ctl_create_c(struct control_device *d, uint32_t w, uint32_t h, int32_t format, void *caller_r7);
+/* the caller's r7 is passed on as a fifth argument (on the stack) */
+__attribute__((naked)) static struct overlay *ctl_create(struct control_device *d, uint32_t w, uint32_t h, int32_t format) {
+    __asm__ volatile("push {r4, lr}; sub sp, #8; str r7, [sp]; bl ctl_create_c; add sp, #8; pop {r4, pc}");
+}
+
+__attribute__((used)) static struct overlay *ctl_create_c(struct control_device *d, uint32_t w, uint32_t h, int32_t format, void *caller_r7) {
+    adopt_source(d, caller_r7);
     struct overlay *o = calloc(1, sizeof *o);
     if (!o) return 0;
     o->w = w; o->h = h; o->format = format; o->w_stride = w; o->h_stride = h;
@@ -127,7 +202,12 @@ static struct overlay *ctl_create(struct control_device *d, uint32_t w, uint32_t
 }
 static void ctl_destroy(struct control_device *d, struct overlay *o) { if (!o) return; send_msg(d, 3, o, 0); free(o); }
 static int ctl_set_pos(struct control_device *d, struct overlay *o, int x, int y, uint32_t w, uint32_t h) {
-    (void)d; o->x = x; o->y = y; o->pw = w; o->ph = h; return 0;
+    if (o->pw == w && o->ph == h && o->x == x && o->y == y) return 0;
+    o->x = x; o->y = y; o->pw = w; o->ph = h;
+    /* 1.6 has no stage/commit (SurfaceFlinger's OverlaySource calls setPosition and setParameter only): tell the
+     * app now; 2.x repeats it at commit */
+    send_msg(d, 1, o, w && h);
+    return 0;
 }
 static int ctl_get_pos(struct control_device *d, struct overlay *o, int *x, int *y, uint32_t *w, uint32_t *h) {
     (void)d; *x = o->x; *y = o->y; *w = o->pw; *h = o->ph; return 0;
@@ -135,9 +215,12 @@ static int ctl_get_pos(struct control_device *d, struct overlay *o, int *x, int 
 /* hardware/overlay.h (2.3): OVERLAY_ROTATION_DEG 1, OVERLAY_TRANSFORM 4 with HAL_TRANSFORM_* values;
  * LayerBuffer::OverlaySource sets the transform from the orientation CameraService created the overlay with */
 static int ctl_set_param(struct control_device *d, struct overlay *o, int p, int v) {
-    (void)d;
+    int tr = o->tr;
     if (p == 4) o->tr = v & 7;
     else if (p == 1) o->tr = v == 90 ? 4 : v == 180 ? 3 : v == 270 ? 7 : 0;
+    /* not placed yet (1.6 sets the transform in OverlaySource's constructor, the position only later or never):
+     * the transform alone, so the app turns the picture of an overlay it has to place itself */
+    if (o->tr != tr) send_msg(d, o->pw && o->ph ? 1 : 4, o, 1);
     return 0;
 }
 static int ctl_stage(struct control_device *d, struct overlay *o) { (void)d; (void)o; return 0; }

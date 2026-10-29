@@ -205,13 +205,14 @@ class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(c
         val gb = if (passthrough) null else bmp
         for (l in app.aemu.core.OverlayFeed.layers.values) {
             val ob = l.bmp ?: continue
-            if (!l.visible || l.rect.isEmpty) continue
-            val r = android.graphics.Rect(l.rect)
+            val lr = if (l.placed) l.rect else android.graphics.Rect(0, 0, w, h)   // not placed yet: the whole screen
+            if (!l.visible || lr.isEmpty) continue
+            val r = android.graphics.Rect(lr)
             if (!r.intersect(0, 0, w, h)) continue
             ovDst.set(r.left * width / w, r.top * height / h, r.right * width / w, r.bottom * height / h)
             // the picture keeps its proportions: a centred crop to the overlay's shape (the host camera gives 4:3 only,
             // a phone's own HAL would give a preview size of the screen's shape)
-            val lw = l.rect.width(); val lh = l.rect.height()
+            val lw = lr.width(); val lh = lr.height()
             val ow = ob.width; val oh = ob.height
             val cw = if (ow.toLong() * lh > oh.toLong() * lw) (oh.toLong() * lw / lh).toInt() else ow
             val ch = if (cw == ow) (ow.toLong() * lh / lw).toInt().coerceAtMost(oh) else oh
@@ -223,10 +224,10 @@ class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(c
             if (ovSrc.size < ow * oh) ovSrc = IntArray(ow * oh)
             ob.getPixels(ovSrc, 0, ow, 0, 0, ow, oh)
             for (y in 0 until rh) {
-                val sy = (cy + (y + r.top - l.rect.top) * ch / lh).coerceIn(0, oh - 1) * ow
+                val sy = (cy + (y + r.top - lr.top) * ch / lh).coerceIn(0, oh - 1) * ow
                 for (x in 0 until rw) {
                     val i = y * rw + x
-                    if (ovGuest[i] and 0xffffff == 0) ovGuest[i] = ovSrc[sy + (cx + (x + r.left - l.rect.left) * cw / lw).coerceIn(0, ow - 1)]
+                    if (ovGuest[i] and 0xffffff == 0) ovGuest[i] = ovSrc[sy + (cx + (x + r.left - lr.left) * cw / lw).coerceIn(0, ow - 1)]
                 }
             }
             var out = ovOut

@@ -86,6 +86,9 @@ enum class Kernel64(
     /** Where the firmware declares no Ethernet service, the engine's network process registers an empty one: the
      *  guest's network is an Ethernet one, and a vendor's System UI may ask the service about it unchecked (TouchWiz). */
     val ethernetStandIn: Boolean = false,
+    /** the kernel serves the keys as /dev/input/event1, apart from the touch screen (event0), as a phone's keypad is:
+     *  a reader that owns the screen's node (tslib in 1.6 ports) then cannot swallow them (run64.c input_open) */
+    val keypadNode: Boolean = false,
     /** The engine's network process registers the guest's network with ConnectivityService (NetStub): without one
      *  the system reports no active network and browsers stay offline. The 32-bit engine takes it by API range (5.0-7.x). */
     val registeredNetwork: Boolean = false,
@@ -233,7 +236,7 @@ enum class Kernel64(
                 "825000 728000 633000 543000 413000 275000 206000 165000 138000\n"),
         procFiles = mapOf("asound/cards" to "--- no soundcards ---\n")),
     // Android 6.0
-    A6("23", 23..23, ramBudget = true, gpuBridge32 = "libGLES.so", gpuBridge32Open = true, gpuBridge64 = true, gpuBridgeMode = "3", registeredNetwork = true, exynosHandles = true, irFollowsHal = true, wideAudioFormat = true, xmlSettings = true, bootImageInCache = true, ethernetStandIn = true, treble = false, eglDir = "system/lib64/egl", gles = "1", absentFeatures = emptyList(),
+    A6("23", 23..23, keypadNode = true, ramBudget = true, gpuBridge32 = "libGLES.so", gpuBridge32Open = true, gpuBridge64 = true, gpuBridgeMode = "3", registeredNetwork = true, exynosHandles = true, irFollowsHal = true, wideAudioFormat = true, xmlSettings = true, bootImageInCache = true, ethernetStandIn = true, treble = false, eglDir = "system/lib64/egl", gles = "1", absentFeatures = emptyList(),
         // Qualcomm's boot animation (MIUI 9) reads the list of sound cards and takes a missing file for an open one
         // (it dies at once and the boot goes on without an animation); the phone's own list is not readable
         procFiles = mapOf("asound/cards" to "--- no soundcards ---\n"),

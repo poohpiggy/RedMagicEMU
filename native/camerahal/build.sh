@@ -55,3 +55,31 @@ if [ -s "$T/need" ]; then echo "camera_gb: not in the firmware: $(cat "$T/need")
 fi
 rm -r "$T"
 fi
+# 1.6 with SEMC's CameraService (X10): CameraHardwareInterface of 1.6 with SEMC's slots over aemu_cam
+# (camera_semc16.cpp). Same stub linking as above, against a 1.6 system/lib copy (FW16): binder classes in
+# libutils, CameraParameters in libui.
+FW16=${FW16:-E:/aemu_work/semc16}
+if [ -f "$FW16/libui.so" ]; then
+T=$(mktemp -d)
+CXXF="--target=armv7a-linux-androideabi21 -march=armv7-a -mthumb -Os -fPIC -ffreestanding -fno-builtin -fno-exceptions \
+  -fno-rtti -fno-threadsafe-statics -fvisibility=hidden -fvisibility-inlines-hidden -fno-stack-protector -fno-use-cxa-atexit"
+"$BIN/clang++" $CXXF -c -o "$T/cam.o" camera_semc16.cpp
+LIBS=""
+for l in libui libutils liblog libstdc++ libdl libc; do
+  "$BIN/llvm-readelf" --dyn-syms "$FW16/$l.so" | awk '$7!="UND" && $5!="LOCAL"{print $8}' | sed 's/@.*//' | sort -u > "$T/$l.exp"
+done
+"$BIN/llvm-nm" -u "$T/cam.o" | awk '{print $2}' | sort -u > "$T/need"
+for l in libui libutils liblog libstdc++ libdl libc; do
+  comm -12 "$T/need" "$T/$l.exp" > "$T/$l.use"; comm -23 "$T/need" "$T/$l.use" > "$T/rest"; mv "$T/rest" "$T/need"
+  awk '{print "void " $1 "(void){}"}' "$T/$l.use" > "$T/$l.c"
+  "$BIN/clang" --target=armv7a-linux-androideabi21 -shared -nostdlib -fPIC -w -Wl,-soname,$l.so -o "$T/$l.so" "$T/$l.c"
+  LIBS="$LIBS $T/$l.so"
+done
+if [ -s "$T/need" ]; then echo "camera_semc16: not in the firmware: $(cat "$T/need")"; else
+"$BIN/clang++" --target=armv7a-linux-androideabi21 -shared -nostdlib -nostdlib++ \
+  -Wl,--hash-style=sysv -Wl,-z,norelro -Wl,--build-id=none -Wl,--no-undefined -Wl,-soname,libcamera.so \
+  -o "$(dirname "$OUT")/libcamera.semc16.so" "$T/cam.o" $LIBS
+"$BIN/llvm-strip" "$(dirname "$OUT")/libcamera.semc16.so" 2>/dev/null || true
+fi
+rm -r "$T"
+fi

@@ -2,6 +2,7 @@ package app.aemu.core
 
 import android.os.Process
 import android.os.SystemClock
+import java.io.ByteArrayOutputStream
 import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -21,7 +22,7 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
      * over from a system_server that died) fills the socket buffer, and a blocking write on the UI thread was an ANR.
      * As the kernel's evdev does for a client that falls behind (evdev.c __pass_event), a full queue drops packets.
      */
-    private class Client(val out: OutputStream, val pid: Int) {
+    private class Client(val out: OutputStream, val pid: Int, val dev: Int) {
         private val q = java.util.concurrent.LinkedBlockingQueue<ByteArray>(256)
         @Volatile var dead = false
         init {
@@ -53,14 +54,17 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
     private val server = UnixServer(paths.inputSock, "input") { c ->
         runCatching { c.sendBufferSize = 64 * 1024 }
         val pid = runCatching { c.peerCredentials.pid }.getOrDefault(-1)
-        clients.removeAll { old ->
-            (old.pid == pid && pid > 0).also { if (it) old.close() }
-        }
-        val me = Client(c.outputStream, pid)
-        clients.add(me)
-        log("input: guest connected (pid $pid, clients ${clients.size})")
-        // держим соединение, пока гость его не закроет
         val ins = c.inputStream
+        // The guest kernel's first byte names the device it opened: 0 the touch screen (event0), 1 the keys (event1).
+        // A kernel that sends nothing gets the whole stream on one device, as before.
+        val dev = runCatching { c.soTimeout = 500; ins.read().also { c.soTimeout = 0 } }.getOrDefault(-1).let { if (it == 0 || it == 1) it else -1 }
+        clients.removeAll { old ->
+            (old.pid == pid && pid > 0 && old.dev == dev).also { if (it) old.close() }
+        }
+        val me = Client(c.outputStream, pid, dev)
+        clients.add(me)
+        log("input: guest connected (pid $pid, device $dev, clients ${clients.size})")
+        // держим соединение, пока гость его не закроет
         val buf = ByteArray(64)
         while (true) {
             val n = try { ins.read(buf) } catch (e: Exception) { -1 }
@@ -235,11 +239,31 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
             val src = ByteBuffer.wrap(a).order(ByteOrder.LITTLE_ENDIAN); val dst = ByteBuffer.wrap(o).order(ByteOrder.LITTLE_ENDIAN)
             repeat(a.size / EV) { dst.putLong(src.int.toLong()); dst.putLong(src.int.toLong()); dst.putShort(src.short); dst.putShort(src.short); dst.putInt(src.int) }
         }
+        var parts: Array<ByteArray>? = null
         for (c in clients) {
-            if (c.dead) dead.add(c) else c.post(w)
+            if (c.dead) { dead.add(c); continue }
+            if (c.dev < 0) { c.post(w); continue }
+            val p = parts ?: split(w, if (wide) 24 else EV).also { parts = it }
+            if (p[c.dev].isNotEmpty()) c.post(p[c.dev])
         }
         if (dead.isNotEmpty()) clients.removeAll(dead.toSet())
         sent += a.size / EV
+    }
+
+    /** The stream for the screen [0] and for the keys [1]: EV_KEY other than BTN_TOUCH goes to the keys, the rest to
+     *  the screen; a SYN_REPORT ends a packet on both, where it closes something. */
+    private fun split(w: ByteArray, size: Int): Array<ByteArray> {
+        val o = arrayOf(ByteArrayOutputStream(), ByteArrayOutputStream())
+        val has = booleanArrayOf(false, false)
+        val bb = ByteBuffer.wrap(w).order(ByteOrder.LITTLE_ENDIAN)
+        var i = 0
+        while (i + size <= w.size) {
+            val type = bb.getShort(i + size - 8).toInt(); val code = bb.getShort(i + size - 6).toInt() and 0xffff
+            if (type == EV_SYN && code == SYN_REPORT) { for (d in 0..1) if (has[d]) { o[d].write(w, i, size); has[d] = false } }
+            else { val d = if (type == EV_KEY && code != BTN_TOUCH) 1 else 0; o[d].write(w, i, size); has[d] = true }
+            i += size
+        }
+        return arrayOf(o[0].toByteArray(), o[1].toByteArray())
     }
 
     companion object {
