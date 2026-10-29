@@ -762,6 +762,10 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
                 if (seq(P(1), "/dev/binder") || seq(P(1), "/dev/hwbinder") || seq(P(1), "/dev/vndbinder")) return binder_open(a[2], P(1));
                 if (pre(P(1), "/dev/input/event")) return input_open(P(1), a[2]);
                 if (seq(P(1), "/dev/alarm")) return alarm_open();
+                // /dev/log/* is the kernel's logger: every write is a record of its own (drivers/misc/logger.c,
+                // logger_aio_write). Here it is a plain file, so a writer opened without O_APPEND (1.6 liblog:
+                // open(O_WRONLY), mediaserver) wrote over the start of the file and its records were lost.
+                if (pre(P(1), "/dev/log/") && (a[2] & 3)) a[2] |= 02000 /*O_APPEND*/;
                 if (g_is32 && pre(P(1), "/dev/snd/")) return snd_open(P(1), a[2]);   // ALSA for 2.x vendor HALs (alsa.c)
                 if (g_is32 && pre(P(1), "/dev/video")) return v4_open(P(1), a[2]);   // V4L2 camera for 2.x vendor HALs (v4l2.c)
                 if (seq(P(1), "/dev/cpuctl/tasks") || seq(P(1), "/dev/cpuctl/bg_non_interactive/tasks")) return cg_open(P(1), a[2]);

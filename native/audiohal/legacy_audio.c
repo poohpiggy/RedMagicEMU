@@ -54,7 +54,7 @@ static fnp g_vt[NCLS][MAXSLOTS];
 static int g_ok;
 
 struct obj { fnp *vt; };
-struct hw { fnp *vt; int fd; int mic_mute; void *out, *in; };
+struct hw { fnp *vt; int fd; int mic_mute; void *out, *in; int mode; uint32_t routes[3]; };
 struct out { fnp *vt; struct hw *hw; };
 struct in { fnp *vt; struct hw *hw; int fd, started, channels; uint32_t rate, mask; };
 
@@ -76,7 +76,24 @@ static void hw_dtor0(struct hw *h) { hw_dtor(h); free(h); }
 static int hw_init(struct hw *h) { return h->fd >= 0 ? 0 : -19; }
 static int hw_voice(struct hw *h, float v) { (void)h; (void)v; return 0; }
 static int hw_master(struct hw *h, float v) { (void)h; (void)v; return INVALID_OPERATION; }   /* AudioFlinger then scales in software */
-static int hw_mode(struct hw *h, int m) { (void)h; (void)m; return 0; }
+static int hw_mode(struct hw *h, int m) { h->mode = m; return 0; }
+/* 1.6 (Donut AudioHardwareInterface: setRouting/getRouting/getMode/setParameter/doRouting); routes per mode as the
+   firmware's AudioHardwareBase keeps them (Sony X10 libaudio.so 0x5788 setRouting / 0x57bc getRouting: MODE_CURRENT -1,
+   NUM_MODES 3, else BAD_VALUE) */
+static int hw_setrouting(struct hw *h, int mode, uint32_t routes) {
+    if (mode == -1) mode = h->mode;
+    if (mode < 0 || mode > 2) return BAD_VALUE;
+    h->routes[mode] = routes;
+    return 0;
+}
+static int hw_getrouting(struct hw *h, int mode, uint32_t *routes) {
+    if (mode == -1) mode = h->mode;
+    if (mode < 0 || mode > 2) return BAD_VALUE;
+    if (routes) *routes = h->routes[mode];
+    return 0;
+}
+static int hw_getmode(struct hw *h, int *m) { if (m) *m = h->mode; return 0; }
+static int hw_setparam(struct hw *h, const char *k, const char *v) { (void)h; (void)k; (void)v; return 0; }
 static int hw_setmute(struct hw *h, int m) { h->mic_mute = m & 0xff; return 0; }
 static int hw_getmute(struct hw *h, uint8_t *m) { if (m) *m = (uint8_t)h->mic_mute; return 0; }
 static int hw_setparams(struct hw *h, const void *kv) { (void)h; (void)kv; return 0; }
@@ -216,6 +233,29 @@ static void *hw_open_in(struct hw *h, uint32_t devices, int *format, uint32_t *c
 }
 static void hw_close_in(struct hw *h, struct obj *i) { (void)h; if (i) ((void (*)(void *))i->vt[1])(i); }
 
+/* 1.6: openOutputStream(int format, int channelCount, uint32_t sampleRate, status_t *status) and
+   openInputStream(int inputSource, int format, int channelCount, uint32_t sampleRate, status_t *status, acoustics)
+   take values, not pointers (Sony X10 libaudio.so: AudioHardwareGeneric::openOutputStreamEiijPi, openInputStreamEiiijPi…) */
+static void *hw_open_out16(struct hw *h, int format, int count, uint32_t rate, int *status) {
+    int st = 0;
+    void *o = 0;
+    if ((format && format != PCM_16_BIT) || (count && count != 2) || (rate && rate != OUT_RATE)) st = BAD_VALUE;
+    else { uint32_t ch = 0; int f = 0; uint32_t r = 0; o = hw_open_out(h, 0, &f, &ch, &r, &st); }
+    if (status) *status = st;
+    return o;
+}
+static void *hw_open_in16(struct hw *h, int source, int format, int count, uint32_t rate, int *status, int acoustics) {
+    (void)source;
+    int f = format, st = 0;
+    uint32_t r = rate, ch = count == 2 ? CH_IN_STEREO : CH_IN_MONO;
+    void *i = 0;
+    if (count < 0 || count > 2) st = BAD_VALUE; else i = hw_open_in(h, 0, &f, &ch, &r, &st, acoustics);
+    if (status) *status = st;
+    return i;
+}
+static int out_chcount(struct out *o) { (void)o; return 2; }
+static int in_chcount(struct in *i) { return i->channels; }
+
 /* ---- the tables, by the firmware's order ---- */
 struct meth { const char *name; fnp fn; };
 static const struct meth M_HW[] = {
@@ -225,19 +265,23 @@ static const struct meth M_HW[] = {
     { "getParameters", (fnp)hw_getparams }, { "getInputBufferSize", (fnp)hw_inbuf },
     { "openOutputStream", (fnp)hw_open_out }, { "closeOutputStream", (fnp)hw_close_out },
     { "openInputStream", (fnp)hw_open_in }, { "closeInputStream", (fnp)hw_close_in },
-    { "dumpState", (fnp)hw_dump }, { "dump", (fnp)hw_dump }, { 0, 0 } };
+    { "dumpState", (fnp)hw_dump }, { "dump", (fnp)hw_dump },
+    { "setRouting", (fnp)hw_setrouting }, { "getRouting", (fnp)hw_getrouting }, { "getMode", (fnp)hw_getmode },
+    { "setParameter", (fnp)hw_setparam }, { "doRouting", (fnp)ret0 },
+    { "openOutputStream16", (fnp)hw_open_out16 }, { "openInputStream16", (fnp)hw_open_in16 }, { 0, 0 } };
 static const struct meth M_OUT[] = {
     { "D1", (fnp)out_dtor }, { "D2", (fnp)out_dtor }, { "D0", (fnp)out_dtor0 }, { "sampleRate", (fnp)out_rate },
     { "bufferSize", (fnp)out_bufsize }, { "channels", (fnp)out_channels }, { "format", (fnp)out_format },
     { "latency", (fnp)out_latency }, { "setVolume", (fnp)out_volume }, { "write", (fnp)out_write },
     { "standby", (fnp)out_standby }, { "dump", (fnp)out_dump }, { "setParameters", (fnp)out_setparams },
-    { "getParameters", (fnp)out_getparams }, { "getRenderPosition", (fnp)out_renderpos }, { 0, 0 } };
+    { "getParameters", (fnp)out_getparams }, { "getRenderPosition", (fnp)out_renderpos },
+    { "channelCount", (fnp)out_chcount }, { 0, 0 } };
 static const struct meth M_IN[] = {
     { "D1", (fnp)in_dtor }, { "D2", (fnp)in_dtor }, { "D0", (fnp)in_dtor0 }, { "sampleRate", (fnp)in_rate },
     { "bufferSize", (fnp)in_bufsize }, { "channels", (fnp)in_channels }, { "format", (fnp)in_format },
     { "setGain", (fnp)in_gain }, { "read", (fnp)in_read }, { "dump", (fnp)in_dump }, { "standby", (fnp)in_standby },
     { "setParameters", (fnp)in_setparams }, { "getParameters", (fnp)in_getparams },
-    { "getInputFramesLost", (fnp)in_lost }, { 0, 0 } };
+    { "getInputFramesLost", (fnp)in_lost }, { "channelCount", (fnp)in_chcount }, { 0, 0 } };
 
 static int streq_n(const char *a, const char *b, int n) {
     for (int k = 0; k < n; k++) if (a[k] != b[k]) return 0;
@@ -299,3 +343,69 @@ EXPORT void *_ZN7android22AudioHardwareInterface6createEv(void) { return make_hw
 /* AudioHardwareInterface* createAudioHardware() — called by libaudioflinger's own create() */
 EXPORT void *_ZN7android19createAudioHardwareEv(void) { return make_hw(); }
 EXPORT void *createAudioHardware(void) { return make_hw(); }
+
+/*
+ * Android 1.6: libaudioflinger derives its own interfaces (A2dpAudioInterface, AudioDumpInterface) from
+ * AudioHardwareBase and AudioStreamOut, which live in libaudio.so (Donut hardware_legacy/AudioHardwareInterface.h);
+ * it imports the constructor, the vtable and the non-pure methods. Layout and behaviour follow the firmware's own
+ * (Sony X10 libaudio.so, prelink 0x6b700000): object = vptr, mMode @+4, mRoutes[3] @+8 (C2Ev 0x59d4 zeroes 12 bytes
+ * at +8 and mMode); the vtable at 0x8170, 18 slots after offset-to-top/typeinfo, doRouting at +0x40, dump at +0x44.
+ */
+struct base { fnp *vt; int mode; uint32_t routes[3]; };
+static int base_pure(void) { LOG("pure virtual called"); return INVALID_OPERATION; }
+static int base_doRouting(struct base *b) { return ((int (*)(struct base *))b->vt[16])(b); }
+/* 0x5788: an unchanged route or another mode than the current one → NO_ERROR, else doRouting */
+EXPORT int _ZN7android17AudioHardwareBase10setRoutingEij(struct base *b, int mode, uint32_t routes) {
+    if (mode == -1) mode = b->mode;
+    if (mode < 0 || mode > 2) return BAD_VALUE;
+    uint32_t old = b->routes[mode];
+    b->routes[mode] = routes;
+    if (mode != b->mode || old == routes) return 0;
+    return base_doRouting(b);
+}
+EXPORT int _ZN7android17AudioHardwareBase10getRoutingEiPj(struct base *b, int mode, uint32_t *routes) {
+    if (mode == -1) mode = b->mode;
+    if (mode < 0 || mode > 2) return BAD_VALUE;
+    *routes = b->routes[mode];
+    return 0;
+}
+/* 0x57dc: the same mode → NO_ERROR, else store it and doRouting */
+EXPORT int _ZN7android17AudioHardwareBase7setModeEi(struct base *b, int mode) {
+    if (mode < 0 || mode > 2) return BAD_VALUE;
+    if (b->mode == mode) return 0;
+    b->mode = mode;
+    return base_doRouting(b);
+}
+EXPORT int _ZN7android17AudioHardwareBase7getModeEPi(struct base *b, int *mode) { *mode = b->mode; return 0; }
+EXPORT int _ZN7android17AudioHardwareBase12setParameterEPKcS2_(struct base *b, const char *k, const char *v) { (void)b; (void)k; (void)v; return 0; }
+/* 0x5960: only 8000 Hz mono; format 3 → 1280, 4 → 1150, 5 → 1050 bytes, others (PCM) 2048 */
+EXPORT size_t _ZN7android17AudioHardwareBase18getInputBufferSizeEjii(struct base *b, uint32_t rate, int format, int count) {
+    (void)b;
+    if (rate != 8000 || count != 1) return 0;
+    return format == 3 ? 1280 : format == 5 ? 1050 : format == 4 ? 1150 : 2048;
+}
+EXPORT int _ZN7android17AudioHardwareBase9dumpStateEiRKNS_6VectorINS_8String16EEE(struct base *b, int fd, const void *args) {
+    return ((int (*)(struct base *, int, const void *))b->vt[17])(b, fd, args);
+}
+static void *base_dtor(struct base *b);
+static void *base_dtor0(struct base *b) { base_dtor(b); free(b); return b; }
+EXPORT fnp _ZTVN7android17AudioHardwareBaseE[20] = {
+    0, 0, (fnp)base_dtor, (fnp)base_dtor0, (fnp)base_pure, (fnp)base_pure, (fnp)base_pure,
+    (fnp)_ZN7android17AudioHardwareBase10setRoutingEij, (fnp)_ZN7android17AudioHardwareBase10getRoutingEiPj,
+    (fnp)_ZN7android17AudioHardwareBase7setModeEi, (fnp)_ZN7android17AudioHardwareBase7getModeEPi,
+    (fnp)base_pure, (fnp)base_pure, (fnp)_ZN7android17AudioHardwareBase12setParameterEPKcS2_,
+    (fnp)_ZN7android17AudioHardwareBase18getInputBufferSizeEjii, (fnp)base_pure, (fnp)base_pure,
+    (fnp)_ZN7android17AudioHardwareBase9dumpStateEiRKNS_6VectorINS_8String16EEE, (fnp)base_pure, (fnp)base_pure };
+static void *base_dtor(struct base *b) { b->vt = _ZTVN7android17AudioHardwareBaseE + 2; return b; }
+EXPORT struct base *_ZN7android17AudioHardwareBaseC1Ev(struct base *b) {
+    b->vt = _ZTVN7android17AudioHardwareBaseE + 2;
+    b->routes[0] = b->routes[1] = b->routes[2] = 0;
+    b->mode = 0;
+    return b;
+}
+EXPORT struct base *_ZN7android17AudioHardwareBaseC2Ev(struct base *b) { return _ZN7android17AudioHardwareBaseC1Ev(b); }
+/* AudioStreamOut::~AudioStreamOut (0x586c: resets the vptr to the abstract class's table, 12 slots) */
+static fnp g_out_abstract[14] = { 0, 0, (fnp)ret0, (fnp)ret0, (fnp)ret0, (fnp)ret0, (fnp)ret0, (fnp)ret0, (fnp)ret0,
+    (fnp)ret0, (fnp)ret0, (fnp)ret0, (fnp)ret0, (fnp)ret0 };
+EXPORT void *_ZN7android14AudioStreamOutD1Ev(struct obj *o) { o->vt = g_out_abstract + 2; return o; }
+EXPORT void *_ZN7android14AudioStreamOutD2Ev(struct obj *o) { return _ZN7android14AudioStreamOutD1Ev(o); }

@@ -1070,20 +1070,22 @@ class TreeFixer(
         }.onFailure { log("camera: HAL not replaced: ${it.message}") }
         // 2.x: the emulator's libaudio.so (legacy_audio.c) instead of the firmware's (which drives the vendor's sound
         // chip, or with ro.kernel.qemu gives AudioHardwareGeneric: microphone at 8 kHz only) — when nothing but the
-        // factory is taken from libaudio.so; its virtual tables follow the firmware's own (LegacyAudio.map)
-        if (img.api in 5..10 && !isMtkAudio(root)) runCatching {
+        // factory is taken from libaudio.so; its virtual tables follow the firmware's own (LegacyAudio.map).
+        // 1.6: libaudioflinger also takes AudioHardwareBase / AudioStreamOut from libaudio.so — ours exports them too,
+        // so the test is "everything taken from libaudio.so is exported by ours"
+        if (img.api in 4..10 && !isMtkAudio(root)) runCatching {
             val lib = File(root, "system/lib/libaudio.so")
             val parked = File(root, "system/.aemu-parked/system#lib#libaudio.so")
             val orig = if (parked.isFile) parked else lib
             val flinger = File(root, "system/lib/libaudioflinger.so")
             if (!orig.isFile || !flinger.isFile) return@runCatching
-            val factories = setOf("_ZN7android22AudioHardwareInterface6createEv", "_ZN7android19createAudioHardwareEv", "createAudioHardware")
+            val fresh = EngineAssets.open(ctx, "engines/gb/libaudio.legacy.so").use { it.readBytes() }
+            val ours = LegacyAudio.exports(fresh)
             val imports = LegacyAudio.importsFromLibaudio(File(root, "system/lib"), orig)?.filter { "Audio" in it }
-            if (imports == null || !factories.containsAll(imports)) { log("audio: libaudio.so keeps the firmware's (it also gives $imports)"); return@runCatching }
+            if (imports == null || !ours.containsAll(imports)) { log("audio: libaudio.so keeps the firmware's (it also gives ${imports?.minus(ours)})"); return@runCatching }
             val map = LegacyAudio.map(listOf(orig, flinger)) { log(it) } ?: return@runCatching
             val mapFile = File(root, "system/etc/aemu_legacy_audio.map")
             if (!mapFile.isFile || mapFile.readText() != map) { mapFile.parentFile?.mkdirs(); mapFile.writeText(map); mapFile.setReadable(true, false) }
-            val fresh = EngineAssets.open(ctx, "engines/gb/libaudio.legacy.so").use { it.readBytes() }
             if (!lib.isFile || !fresh.contentEquals(lib.readBytes())) {
                 if (!parked.exists()) { parked.parentFile?.mkdirs(); lib.copyTo(parked) }
                 lib.writeBytes(fresh); lib.setReadable(true, false)

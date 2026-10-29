@@ -25,6 +25,20 @@ object LegacyAudio {
             "standby", "dump", "setParameters", "getParameters", "getRenderPosition"),
         "in" to listOf("D1", "D0", "sampleRate", "bufferSize", "channels", "format", "setGain", "read", "dump", "standby",
             "setParameters", "getParameters", "getInputFramesLost"))
+    /** Android 1.6 (Donut hardware_legacy/AudioHardwareInterface.h; order checked against the Sony X10 libaudio.so
+     *  tables): routing per mode, setParameter, channel counts instead of masks, no close*Stream, and stream openers
+     *  taking values (named "...16" here by their mangled signature, see [sig16]) */
+    private val DONUT = mapOf(
+        "hw" to listOf("D1", "D0", "initCheck", "setVoiceVolume", "setMasterVolume", "setRouting", "getRouting", "setMode",
+            "getMode", "setMicMute", "getMicMute", "setParameter", "getInputBufferSize", "openOutputStream16",
+            "openInputStream16", "dumpState", "doRouting", "dump"),
+        "out" to listOf("D1", "D0", "sampleRate", "bufferSize", "channelCount", "format", "latency", "setVolume", "write",
+            "standby", "dump"),
+        "in" to listOf("D1", "D0", "bufferSize", "channelCount", "format", "setGain", "read", "dump", "standby"))
+    /** 1.6 openOutputStream(int, int, uint32_t, status_t*) / openInputStream(int, int, int, uint32_t, status_t*, acoustics) */
+    private fun sig16(mangled: String, name: String): String =
+        if ((name == "openOutputStream" && mangled.endsWith("openOutputStreamEiijPi")) ||
+            (name == "openInputStream" && mangled.contains("openInputStreamEiiijPi"))) name + "16" else name
     private val VTABLES = mapOf(
         "hw" to "_ZTVN7android20AudioHardwareGenericE",
         "out" to "_ZTVN7android21AudioStreamOutGenericE",
@@ -107,14 +121,14 @@ object LegacyAudio {
                 val w = e.word(at) ?: 0L
                 byAddr[w and 1L.inv()] ?: (if (e.base != 0L) byAddr[(w - e.base) and 1L.inv()] else null) ?: emptyList()
             }
-            out += names.mapNotNull { method(it) }.firstOrNull { it.first in OWN }?.second
+            out += names.firstNotNullOfOrNull { n -> method(n)?.takeIf { it.first in OWN }?.let { sig16(n, it.second) } }
         }
         return out
     }
 
     /** the firmware's slot order put onto AOSP's methods; "-" for slots AOSP does not have */
-    private fun align(cls: String, raw: List<String?>): List<String> {
-        val aosp = AOSP.getValue(cls)
+    private fun align(cls: String, raw: List<String?>, donut: Boolean): List<String> {
+        val aosp = (if (donut) DONUT else AOSP).getValue(cls)
         val res = ArrayList<String>()
         var e = 0
         for ((i, n) in raw.withIndex()) {
@@ -132,22 +146,32 @@ object LegacyAudio {
     /** The map for the HAL, or null when the firmware's tables are not found. */
     fun map(libs: List<File>, log: (String) -> Unit): String? {
         val found = HashMap<String, List<String>>()
+        var donut = false
         for (f in libs) {
             if (!f.isFile) continue
             val e = runCatching { Elf(f.readBytes()) }.getOrNull() ?: continue
+            // the 1.6 interface: AudioHardwareGeneric::openOutputStream(int, int, uint32_t, status_t*) is defined here
+            val d16 = e.syms.any { it.value != 0L && it.name.endsWith("AudioHardwareGeneric16openOutputStreamEiijPi") }
             for ((cls, vt) in VTABLES) {
                 if (cls in found) continue
                 val s = e.syms.firstOrNull { it.name == vt && it.size > 8 } ?: continue
-                found[cls] = align(cls, slots(e, s))
+                found[cls] = align(cls, slots(e, s), d16)
+                donut = donut || d16
             }
         }
         if (found.size != 3) { log("audio: the firmware's AudioHardwareGeneric tables not found (${found.keys})"); return null }
         // every table needs what the HAL is called through
-        for ((cls, need) in mapOf("hw" to listOf("openOutputStream", "openInputStream", "getInputBufferSize"),
-                "out" to listOf("write", "sampleRate"), "in" to listOf("read", "sampleRate")))
+        val needs = if (donut) mapOf("hw" to listOf("openOutputStream16", "openInputStream16", "getInputBufferSize"),
+                "out" to listOf("write", "sampleRate"), "in" to listOf("read", "channelCount"))
+            else mapOf("hw" to listOf("openOutputStream", "openInputStream", "getInputBufferSize"),
+                "out" to listOf("write", "sampleRate"), "in" to listOf("read", "sampleRate"))
+        for ((cls, need) in needs)
             if (!found.getValue(cls).containsAll(need)) { log("audio: $cls table incomplete: ${found[cls]}"); return null }
         return listOf("hw", "out", "in").joinToString("\n", postfix = "\n") { c -> "$c ${found.getValue(c).size} " + found.getValue(c).joinToString(" ") }
     }
+
+    /** the symbols a library defines */
+    fun exports(lib: ByteArray): Set<String> = Elf(lib).syms.filter { it.value != 0L }.map { it.name }.toSet()
 
     /** what the libraries in [libDir] take from the firmware's libaudio.so [orig] (ours provides only the factories) */
     fun importsFromLibaudio(libDir: File, orig: File): Set<String>? = runCatching {
