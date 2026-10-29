@@ -801,6 +801,8 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             svc.argv.take(1) + "-Xint:fast" + svc.argv.drop(1) else svc.argv
         // отладка: файл run/strace.<служба> включает трассировку системных вызовов qemu
         if (File(paths.bin, "strace.${svc.name}").exists()) extra["QEMU_STRACE"] = "1"
+        // отладка: run/gdb.<служба> (внутри — порт) — qemu ждёт отладчик (gdbstub) на этом порту телефона
+        File(paths.bin, "gdb.${svc.name}").takeIf { it.exists() }?.let { f -> extra["QEMU_GDB"] = f.readText().trim().ifEmpty { "1234" } }
         if (engine == Engine.N64 && props != null) extra["AEMU64_PROPS_FILE"] = props.absolutePath
         // the engine's own 64-bit HAL service over a vendor's firmware: its libraries are the engine's copy of its VNDK
         if (engine == Engine.N64) kernel.ownVndkDir?.let { dir ->

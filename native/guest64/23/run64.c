@@ -1083,6 +1083,9 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
     }
     case NR_mount: case NR_umount2: case NR_chroot: case NR_capset: case NR_setgroups: case NR_unshare: return 0;
     case NR_prctl: return 0;                    // only PR_CAPBSET_DROP gets here
+    // accept(2) (202): a statically linked glibc program (our qemu's gdbstub) calls it, but Android's app seccomp
+    // policy (bionic SYSCALLS.TXT: accept is accept4 there) does not allow it; the same call with no flags
+    case 202: return S4(242 /*accept4*/, a[0], a[1], a[2], 0);
     case NR_timerfd_create: {                   // the *_ALARM clocks need CAP_WAKE_ALARM, vendor clocks (power-off alarm)
         long r = S2(nr, a[0], a[1]);            // do not exist here: the plain clocks tick the same
         if (r < 0) r = S2(nr, a[0] == 9 ? 7 : 0, a[1]);
