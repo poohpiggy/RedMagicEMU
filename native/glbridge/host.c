@@ -30,6 +30,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "common.h"
+#include "gl1_common.h"
 
 #define LOG(...) __android_log_print(ANDROID_LOG_INFO, "aemu-gl", __VA_ARGS__)
 
@@ -1274,6 +1275,8 @@ static int need(size_t n) {
     }
     return 1;
 }
+static void g1_pid_gone(int pid);     /* host1.c */
+static void serve1(void);
 static void pid_count(int pid, int d) {
     int left = -1;
     pthread_mutex_lock(&g_lock);
@@ -1281,6 +1284,7 @@ static void pid_count(int pid, int d) {
     if (left < 0 && d > 0) for (int i = 0; i < 64; i++) if (!g_pids[i].n) { g_pids[i].pid = pid; g_pids[i].n = 1; break; }
     pthread_mutex_unlock(&g_lock);
     if (left) return;
+    g1_pid_gone(pid);
     /* the program's last drawing thread is gone: its contexts with it */
     for (;;) {
         struct hctx *x;
@@ -1303,6 +1307,17 @@ static void *serve(void *arg) {
     setsockopt(c.fd, SOL_SOCKET, SO_RCVBUF, &big, sizeof(big));
     c.in_cap = 512 * 1024; c.in = malloc(c.in_cap);
     pid_count(c.pid, 1);
+    /* a GLES 1 driver of Android 1.x (guest1.c) says so in its hello: its connection has a loop of its own */
+    if (c.in && need(12)) {
+        uint32_t m[3];
+        memcpy(m, c.in + c.in_a, 12);
+        if (m[0] == OP_HELLO && m[1] == 4 && m[2] == AEMU_GL1_PROTOCOL) {
+            c.in_a += 12;
+            reply32(AEMU_GL1_PROTOCOL); reply_flush();
+            serve1();
+            c.dead = 1;
+        }
+    }
     while (c.in && !c.dead && need(8)) {
         uint32_t op, len;
         memcpy(&op, c.in + c.in_a, 4); memcpy(&len, c.in + c.in_a + 4, 4);
@@ -1418,3 +1433,5 @@ JNIEXPORT void JNICALL Java_app_aemu_core_GlHost_nativeStop(JNIEnv *env, jclass 
     (void)env; (void)cls;
     if (g_listen >= 0) { shutdown(g_listen, SHUT_RDWR); close(g_listen); g_listen = -1; }
 }
+
+#include "host1.c"

@@ -1085,6 +1085,26 @@ class TreeFixer(
                 }
             }
         }.onFailure { log("copybit: not installed: ${it.message}") }
+        // Android 1.x: libEGL takes a "hardware" EGL/GLES 1 driver by fixed names (Qualcomm's variant: libhEGL.so +
+        // libhGLESv1_CM.so) next to libagl; the vendor's drives its GPU (/dev/kgsl...) and fails here, so everything
+        // drew in software. The emulator's driver of those names draws on the phone's GPU (native/glbridge guest1.c,
+        // host1.c); the vendor's files are parked. Done when libEGL.so names libhEGL.so (the loader, not a vendor).
+        if (img.api <= 4) runCatching {
+            val egl = File(root, "system/lib/libEGL.so")
+            if (egl.isFile && String(egl.readBytes(), Charsets.ISO_8859_1).contains("libhEGL.so")) {
+                for ((asset, name) in listOf("libhEGL.aemu.so" to "libhEGL.so", "libhGLESv1_CM.aemu.so" to "libhGLESv1_CM.so")) {
+                    val f = File(root, "system/lib/$name")
+                    val parked = File(root, "system/.aemu-parked/system#lib#$name")
+                    val fresh = EngineAssets.open(ctx, "engines/common/$asset").use { it.readBytes() }
+                    if (!f.isFile || !fresh.contentEquals(f.readBytes())) {
+                        if (f.isFile && !parked.exists()) { parked.parentFile?.mkdirs(); f.copyTo(parked) }
+                        f.writeBytes(fresh); f.setReadable(true, false)
+                        log("GPU: the emulator's 1.x GLES 1 driver installed as $name")
+                        copied++
+                    }
+                }
+            }
+        }.onFailure { log("GPU: 1.x driver not installed: ${it.message}") }
         // Qualcomm's OMX video encoder drives the Q6 DSP (/dev/q6venc, which returns run-length data the library packs
         // itself): the emulator's component of the same name and factory (native/omxvenc, encoding on the phone)
         // takes its place wherever libOmxCore.so loads libOmxVidEnc.so and that library opens /dev/q6venc
