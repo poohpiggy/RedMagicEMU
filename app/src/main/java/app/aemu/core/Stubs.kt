@@ -37,6 +37,33 @@ class RilStub(
             .getOrDefault(false)
     }
 
+    /** The firmware's phone is CDMA: PhoneFactory.getPhoneType(preferred network mode, default from
+     *  ro.telephony.default_network) gives CDMA for NT_MODE_CDMA (4), CDMA_NO_EVDO (5), EVDO_NO_CDMA (6) (AOSP 2.3.7 /
+     *  4.0.1 PhoneFactory, RILConstants). A GSM-looking modem then makes PhoneProxy swap the phone ("Radio technology
+     *  switched"), and the old CDMAPhone's users crash com.android.phone (Verizon Xoom 3.2, Droid 2.2). */
+    private val cdma: Boolean by lazy {
+        val v = runCatching { Regex("""(?m)^ro\.telephony\.default_network=(\d+)""").find(File(paths.root, "system/build.prop").readText())?.groupValues?.get(1)?.toInt() }.getOrNull()
+        v != null && v in 4..6
+    }
+
+    /** Layout of data calls the firmware's RIL.java reads: 0 the 2.3 string array; 5 the versioned one
+     *  (4.0.1 responseSetupDataCall: version, count, RIL_Data_Call_response_v5: status, cid, active, type, ifname,
+     *  addresses, dnses, gateways) - Honeycomb 3.2 already (Xoom HTJ85B: "responseSetupDataCall ver=5 num=1" for a
+     *  string array); 6 with suggestedRetryTime after the status (ril.h v6, 4.0+). Told by the parser's texts in
+     *  framework.odex / framework.jar's dex. */
+    private val dataVer: Int by lazy {
+        if (api >= 14) return@lazy RIL_VERSION
+        runCatching {
+            fun has(b: ByteArray, k: String): Boolean { val key = k.toByteArray(); outer@ for (i in 0..b.size - key.size) { for (j in key.indices) if (b[i + j] != key[j]) continue@outer; return true }; return false }
+            val odex = File(paths.root, "system/framework/framework.odex")
+            val dex = if (odex.isFile) odex.readBytes()
+            else java.util.zip.ZipFile(File(paths.root, "system/framework/framework.jar")).use { z ->
+                z.entries().asSequence().filter { it.name.matches(Regex("""classes\d*\.dex""")) }.map { e -> z.getInputStream(e).use { it.readBytes() } }.fold(ByteArray(0)) { x, y -> x + y }
+            }
+            if (!has(dex, "RIL_Data_Call_response_v5")) 0 else if (has(dex, "suggestedRetryTime")) 6 else 5
+        }.getOrDefault(0)
+    }
+
     /** pre-1.0 RIL.java (M5) connects to the abstract socket "radio-interface"; qemu passes it to the host as is */
     @Volatile private var oldServer: android.net.LocalServerSocket? = null
 
@@ -198,8 +225,15 @@ class RilStub(
             RIL_REQUEST_LAST_CALL_FAIL_CAUSE -> 0 to ints(16)   // normal clearing
             RIL_REQUEST_GET_IMSI -> 0 to str(mcc + mnc + "0123456789".take(15 - mcc.length - mnc.length))
             RIL_REQUEST_SIGNAL_STRENGTH -> 0 to ints(20, 99, -1, -1, -1, -1, -1, 99, -1, -1, -1, -1, -1)
-            RIL_REQUEST_VOICE_REGISTRATION_STATE -> 0 to strs("1", "0001", "00000001", "3")
-            RIL_REQUEST_DATA_REGISTRATION_STATE -> 0 to strs("1", "0001", "00000001", "3", "0", "1")
+            // CDMA: CdmaServiceStateTracker wants exactly 14 strings (2.3.7: else RuntimeException): registered, -, -,
+            // 1xRTT (6), base station, lat, long, concurrent, SID, NID, roaming indicator 1 (off = home), in PRL, default
+            // roaming indicator, no denial
+            RIL_REQUEST_VOICE_REGISTRATION_STATE -> 0 to if (cdma) strs("1", null, null, "6", "1", "0", "0", "0", "1", "1", "1", "1", "1", "0")
+                else strs("1", "0001", "00000001", "3")
+            RIL_REQUEST_DATA_REGISTRATION_STATE -> 0 to strs("1", "0001", "00000001", if (cdma) "8" else "3", "0", "1")   // (8: EvDo rev. A)
+            // MDN, SID, NID, MIN, PRL version (CdmaServiceStateTracker EVENT_POLL_STATE_CDMA_SUBSCRIPTION: 5 strings)
+            RIL_REQUEST_CDMA_SUBSCRIPTION -> 0 to strs(imei.filter { it.isDigit() }.takeLast(10), "1", "1", imei.filter { it.isDigit() }.takeLast(10), "1")
+            RIL_REQUEST_CDMA_GET_SUBSCRIPTION_SOURCE -> 0 to ints(1)   // NV: no RUIM card needed
             RIL_REQUEST_OPERATOR -> 0 to strs(OPERATOR_NAME, OPERATOR_NAME, mcc + mnc)
             RIL_REQUEST_SETUP_DATA_CALL -> 0 to dataCall(single = true)
             RIL_REQUEST_DATA_CALL_LIST -> 0 to dataCall(single = false)
@@ -210,7 +244,7 @@ class RilStub(
             RIL_REQUEST_QUERY_NETWORK_SELECTION_MODE -> 0 to ints(0)
             RIL_REQUEST_GET_PREFERRED_NETWORK_TYPE -> 0 to ints(0)
             RIL_REQUEST_GET_NEIGHBORING_CELL_IDS -> 0 to le(0)
-            RIL_REQUEST_VOICE_RADIO_TECH -> 0 to ints(3)
+            RIL_REQUEST_VOICE_RADIO_TECH -> 0 to ints(if (cdma) 6 else 3)   // 1xRTT / UMTS
             RIL_REQUEST_GET_SMSC_ADDRESS -> 0 to str("+10000000000")
             RIL_REQUEST_QUERY_FACILITY_LOCK -> 0 to ints(0)
             RIL_REQUEST_SEND_SMS, RIL_REQUEST_SEND_SMS_EXPECT_MORE -> 0 to (le(1) + str(null) + le(-1))
@@ -248,8 +282,9 @@ class RilStub(
 
     private fun afterPower(o: OutputStream, args: ByteBuffer) {
         val on = runCatching { args.position(12); args.getInt() != 0 }.getOrDefault(true)
-        // 4.0+ knows only OFF/UNAVAILABLE/ON(10); 2.3 has "SIM ready" (4) instead of ON
-        unsol(o, UNSOL_RADIO_STATE_CHANGED, le(if (!on) 0 else if (api >= 14) 10 else 4))
+        // 4.0+ knows only OFF/UNAVAILABLE/ON(10); 2.3-3.x name the technology in the state: "SIM ready" (4) for GSM,
+        // "NV ready" (9) for a CDMA phone without RUIM (CommandsInterface.RadioState.isCdma)
+        unsol(o, UNSOL_RADIO_STATE_CHANGED, le(if (!on) 0 else if (api >= 14) 10 else if (cdma) 9 else 4))
         if (on) {
             unsol(o, UNSOL_RESPONSE_SIM_STATUS_CHANGED, ByteArray(0))
             unsol(o, UNSOL_RESPONSE_VOICE_NETWORK_STATE_CHANGED, ByteArray(0))
@@ -288,13 +323,13 @@ class RilStub(
     private fun dataCall(single: Boolean): ByteArray {
         // 2.3: cid, interface, address (it reads three). 3.x reads dns and gateway from fields 4-5 when there are five;
         // with fewer it asks NetworkInterface.getByName(rmnet0), which the guest does not have, and phone dies (NPE)
-        if (api < 14) {
+        if (dataVer < 5) {
             return if (single) strs("1", IFACE, "10.0.2.15", "8.8.8.8 1.1.1.1", "10.0.2.2")
             else (le(1) + le(1) + le(2) + str("IP") + str("10.0.2.15"))
         }
         val b = ByteArrayOutputStream()
-        b.write(le(RIL_VERSION)); b.write(le(1))
-        b.write(le(0)); b.write(le(-1))                   // status OK, no retry
+        b.write(le(dataVer)); b.write(le(1))
+        b.write(le(0)); if (dataVer >= 6) b.write(le(-1)) // status OK, no retry (v6)
         b.write(le(1)); b.write(le(2))                    // cid, active + link up
         b.write(str("IP")); b.write(str(IFACE)); b.write(str("10.0.2.15/24"))
         b.write(str("8.8.8.8 1.1.1.1")); b.write(str("10.0.2.2"))
@@ -334,7 +369,7 @@ class RilStub(
 
     private fun le(v: Int) = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(v).array()
     private fun ints(vararg v: Int) = le(v.size) + v.fold(ByteArray(0)) { acc, x -> acc + le(x) }
-    private fun strs(vararg v: String) = le(v.size) + v.fold(ByteArray(0)) { acc, x -> acc + str(x) }
+    private fun strs(vararg v: String?) = le(v.size) + v.fold(ByteArray(0)) { acc, x -> acc + str(x) }
 
     /** Parcel.writeString: length (-1 for null), UTF-16 with a terminator, padded to 4 bytes */
     private fun str(s: String?): ByteArray {
@@ -392,6 +427,8 @@ class RilStub(
         private const val RIL_REQUEST_DEVICE_IDENTITY = 98
         private const val RIL_REQUEST_GET_SMSC_ADDRESS = 100
         private const val RIL_REQUEST_VOICE_RADIO_TECH = 108
+        private const val RIL_REQUEST_CDMA_SUBSCRIPTION = 95
+        private const val RIL_REQUEST_CDMA_GET_SUBSCRIPTION_SOURCE = 104
         private const val IMEISV = "01"
         private const val BASEBAND = "AEmulator"
     }

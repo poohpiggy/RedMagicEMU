@@ -28,6 +28,14 @@ private val N64_SKIP = setOf("audiod", "ATFWD-daemon", "imsqmidaemon", "loc_laun
  * звук, заглушки радио и накопителя), binderd, GL-мост и службы гостя в порядке загрузки Android.
  */
 class GuestVm(val ctx: Context, val img: GuestImage) {
+    companion object {
+        /** A 32-bit firmware (open32) draws through our open GPU bridge (libGLES_aemu) rather than the 4.4 engine's
+         *  closed one: 2.x-5.x by default; 6.0+ behind the test file "glopen" until checked by screenshot (PLAN 3.1.1);
+         *  "glclosed" puts the closed one back for a comparison. Shared by TreeFixer (libraries) and the boot (GlHost). */
+        fun open32Bridge(engine: Engine, img: GuestImage, dir: File): Boolean =
+            engine == Engine.N64 && img.abi != "arm64-v8a" && !File(dir, "glclosed").isFile &&
+                (img.api < 23 || File(dir, "glopen").isFile)
+    }
     enum class State { STOPPED, PREPARING, BOOTING, RUNNING, FAILED, STOPPING }
 
     val paths = VmPaths(ctx, img.id)
@@ -150,7 +158,9 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     /** recovery framebuffer format for the screen view: 0 RGB565, 1 RGBA/RGBX_8888, 2 BGRA_8888 */
     @Volatile var recoveryFormat = 0
     /** a 32-bit firmware on the arm64 kernel (open32) with the 4.4 engine's GL server: fb0 holds RGB565 frames, as on that engine */
-    val fb565: Boolean get() = engine == Engine.N64 && img.abi != "arm64-v8a" && settings.gpu
+    // 6.0+ under the open bridge: the compositor's framebuffer target (GRALLOC_USAGE_HW_FB) is read back by the guest
+    // bridge into fb0 as RGBA_8888, the format the kernel reports (run64.c fb_ioctl) - not the GL server's RGB565
+    val fb565: Boolean get() = engine == Engine.N64 && img.abi != "arm64-v8a" && settings.gpu && !(img.api >= 23 && open32Bridge(engine, img, paths.dir))
     /** 0.9-1.x: SurfaceFlinger draws RGB565 itself (whatever bpp fbdev reports) and flips between two such pages */
     val fbLegacy565: Boolean get() = engine == Engine.N64 && img.api < 3
 
@@ -305,7 +315,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         // contexts go to the same host renderer as on the 64-bit engine; the file's text is the mode (default 2: here the
         // "software" driver under the bridge is the engine's own, which has no texture EGLImages, and WebView's
         // threads share their tiles through those - in mode 1 they stay on it and a page draws only its background)
-        val open32Gl = engine == Engine.N64 && img.abi != "arm64-v8a" && img.api < 23 && !File(paths.dir, "glclosed").isFile   // (TreeFixer.openGl32)
+        val open32Gl = open32Bridge(engine, img, paths.dir)   // (TreeFixer.openGl32)
         if ((open32Gl || (engine == Engine.KK && File(paths.dir, "glopen").isFile)) && s.gpu && File(paths.root, "system/lib/egl/libGLES_split.so").isFile) {
             paths.socket("aemu_gl").parentFile?.mkdirs()
             val r = GlHost.start(paths.socket("aemu_gl").absolutePath)

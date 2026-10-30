@@ -1341,7 +1341,7 @@ class TreeFixer(
     // closed one back for a comparison. The closed engine (KK) keeps it behind the "glopen" test switch.
     // (6.0-7.1 not yet: their SurfaceFlinger gets the open bridge itself and fb0 is read as the closed GL server's RGB565
     // - RGBA frames came out striped, 4st4ed/ay7vdh 30.10; PLAN §3)
-    private fun openGl32(): Boolean = (if (kk32) img.api < 23 && !File(paths.dir, "glclosed").isFile else engine == Engine.KK && File(paths.dir, "glopen").isFile) &&
+    private fun openGl32(): Boolean = (if (kk32) GuestVm.open32Bridge(engine, img, paths.dir) else engine == Engine.KK && File(paths.dir, "glopen").isFile) &&
         assetSize(OPEN_GL) > 0
 
     private fun splitSize(): Long = runCatching { EngineAssets.size(ctx, "engines/kk/libGLES_split.so") }.getOrDefault(-1L)

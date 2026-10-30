@@ -548,7 +548,15 @@ static void do_bcs(struct thread *th, u32 *c, int words) {
             break;
         }
         case BC_DEAD_BINDER_DONE: break;
-        case BC_AEMU_FREE: { struct dbuf *d = (struct dbuf *)(uintptr_t)a; if (d && d->proc == p) buf_free(p, d); break; }
+        case BC_AEMU_FREE: {
+            /* only a buffer this process holds: the kernel looks the pointer up (binder.c binder_thread_write,
+             * BC_FREE_BUFFER: binder_buffer_lookup) and on no match logs "no match" and goes on; a stale or foreign
+             * id from the guest (Xoom 3.2, 7pgugp) must not be dereferenced here */
+            struct dbuf *d = 0;
+            for (struct dbuf *b = p->bufs; b; b = b->next) if ((u64)(uintptr_t)b == a) { d = b; break; }
+            if (d) buf_free(p, d); else logf_("pid %d: BC_FREE_BUFFER %llx no match", p->pid, (unsigned long long)a);
+            break;
+        }
         case BC_AEMU_MAX_THREADS: p->max_threads = (int)a; break;
         case BC_AEMU_CTX_MGR: if (!ctx_mgr) { ctx_mgr = node_get(p, 0, 0, 1); ctx_mgr->local_strong++; ctx_mgr->has_strong = ctx_mgr->has_weak = 1; } break;
         default: V("pid %d: unknown command %x", p->pid, cmd); return;

@@ -271,7 +271,7 @@ class Importer(
                     withEntrySource(zip, e) { runCatching { importImage(if (SparseSource.probe(it)) SparseSource(listOf(it)) else it, "vendor") } }
                 // a zip around a whole firmware: image-*.zip of Google, a large zip, or a Sony .ftf (a zip itself)
                 (base.lowercase().endsWith(".zip") && (base.startsWith("image-") || depth == 0 && e.size > 50_000_000) ||
-                    base.lowercase().endsWith(".ftf")) -> {
+                    base.lowercase().endsWith(".ftf") || base.lowercase().endsWith(".sbf")) -> {   // (Motorola's zips hold one .sbf)
                     handleNestedZip(spillEntry(zip, e), base, depth)
                 }
                 base.matches(Regex("(?i).*\\.(tar|tar\\.md5|md5|tgz|tar\\.gz)")) 
@@ -647,7 +647,9 @@ class Importer(
      * The data follow as records 03 02 02 00 00 00 00 03 02 00 00 00 00 00 03 02 01, size (BE32), load address
      * (BE32), the bytes, a 4-byte checksum. (Checked on the Droid FRG83G file: CG39 0xd0ef4000..0xd8f577bf is the
      * 0x080637c0-byte record of YAFFS2 pages 2048+64, CG35 0xc0680000 an Android boot image.) Groups by Motorola's
-     * numbering: 35 boot, 39 system.
+     * numbering: 35 boot, 39 system. Tegra SBFs number them otherwise (Xoom MZ604 HTJ85B: CG57 boot, CG58 recovery,
+     * CG59 a 256 MB ext4 system), so a record is told by its content: Android boot images ("ANDROID!") are boot, then
+     * recovery, in file order; the system is CG39 or else the largest other record.
      */
     private fun importSbf(src: RandomSource, ch: FileChannel) {
         val tab = ByteBuffer.allocate(0x500).order(ByteOrder.LITTLE_ENDIAN)
@@ -665,7 +667,8 @@ class Importer(
         var pos = 0L
         var boot: ByteArray? = null
         var sys: Pair<Long, Long>? = null
-        while (pos < src.size && (boot == null || sys == null)) {
+        var big: Pair<Long, Long>? = null
+        while (pos < src.size) {
             if (cancelled) throw IOException("cancelled")
             win.clear(); src.read(pos, win); win.flip()
             val b = win.array(); val n = minOf(win.limit().toLong(), src.size - pos).toInt()
@@ -682,17 +685,39 @@ class Importer(
             val size = hb.int.toLong() and 0xffffffffL; val addr = hb.int.toLong() and 0xffffffffL
             val data = pos + hit + pre.size + 8
             if (data + size > src.size) { pos += hit + 1; continue }
-            when (start[addr]) {
-                35 -> if (size < 64_000_000) boot = ByteArray(size.toInt()).also { src.read(data, ByteBuffer.wrap(it)) }
-                39 -> sys = data to size
+            val magic = ByteBuffer.allocate(8).also { src.read(data, it); it.flip() }
+            val isBootImg = size in 8..63_999_999 && String(magic.array(), Charsets.ISO_8859_1) == "ANDROID!"
+            when {
+                isBootImg -> {
+                    val img = ByteArray(size.toInt()).also { src.read(data, ByteBuffer.wrap(it)) }
+                    // Xoom puts recovery first: the one whose init starts app_process (zygote) is boot
+                    when (startsZygote(img)) {
+                        true -> boot = img
+                        false -> if (recovery == null) recovery = img
+                        null -> if (boot == null) boot = img else if (recovery == null) recovery = img
+                    }
+                }
+                start[addr] == 39 -> sys = data to size
+                big == null || size > big!!.second -> big = data to size
             }
             onProgress("Reading SBF", 0.3f * (data + size) / src.size)
             pos = data + size
         }
         boot?.let { takeBoot(it) }
-        val (off, size) = sys ?: throw IOException("sbf: no system code group (CG39)")
+        val (off, size) = sys ?: big?.takeIf { it.second > 32_000_000 } ?: throw IOException("sbf: no system code group")
         importImage(ChannelSource(ch, off, size), "system")
     }
+
+    /** An Android boot image (bootimg.h v0: page size at 36, kernel/ramdisk sizes at 8/16) whose gzip ramdisk names
+     *  /system/bin/app_process (init.rc's zygote) - a boot, not a recovery; null when the ramdisk cannot be read. */
+    private fun startsZygote(img: ByteArray): Boolean? = runCatching {
+        val b = ByteBuffer.wrap(img).order(ByteOrder.LITTLE_ENDIAN)
+        val ks = b.getInt(8).toLong() and 0xffffffffL; val rs = b.getInt(16); val ps = b.getInt(36).takeIf { it in 2048..16384 } ?: 2048
+        val ro = (ps + (ks + ps - 1) / ps * ps).toInt()
+        if (rs <= 0 || ro + rs > img.size || img[ro] != 0x1f.toByte() || img[ro + 1] != 0x8b.toByte()) return@runCatching null
+        val rd = GZIPInputStream(java.io.ByteArrayInputStream(img, ro, rs)).use { it.readBytes() }
+        String(rd, Charsets.ISO_8859_1).contains("/system/bin/app_process")
+    }.getOrNull()
 
     private fun importPac(src: RandomSource, ch: FileChannel) {
         val list = PacFile.entries(src)
