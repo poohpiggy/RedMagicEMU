@@ -50,7 +50,9 @@ object InitPlan {
         val exports = LinkedHashMap<String, String>()
         val condExports = LinkedHashMap<String, String>()
         // режимы, в которые эмулятор не грузится: заводской, зарядка, восстановление
-        val skip = Regex("""(?i)^(factory_init|meta_init|init[.]charging|init[.]recovery|lpm|FWUpgradeInit).*[.]rc$""")
+        // (+ Samsung's FOTA update mode: init reads fota.rc only for bootmode=fota; its BOOTCLASSPATH lacks apache-xml,
+        // so the odex files were "stale" - GT-P7510 3.1)
+        val skip = Regex("""(?i)^(factory_init|meta_init|init[.]charging|init[.]recovery|lpm|fota|FWUpgradeInit).*[.]rc$""")
         val dirs = ArrayList<String>()
         val setprops = LinkedHashMap<String, String>()
         for (f in files) {
