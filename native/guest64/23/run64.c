@@ -432,7 +432,7 @@ static void fb_geom(void) {
     if (w && h) { g_fbw = w; g_fbh = h; }
 }
 
-static long fb_ioctl(u32 cmd, u64 arg) {
+static long fb_ioctl(int fd, u32 cmd, u64 arg) {
     if (!g_fbw) fb_geom();
     switch (cmd) {
     case 0x4600: {                              // FBIOGET_VSCREENINFO
@@ -455,7 +455,16 @@ static long fb_ioctl(u32 cmd, u64 arg) {
     }
     // PUT_VSCREENINFO: fb0 has one page. 0.9-1.x EGLDisplaySurface asks for two and trusts a 0 without reading back,
     // then flips into a page that does not exist; refused, it renders into its own back buffer
-    case 0x4601: return ((u32 *)arg)[3] > g_fbh ? -22 /* EINVAL */ : 0;   // two pages asked: refused, as said above
+    // ...that was for fb0 files of one page. A driver takes a virtual height its memory holds (fb_set_var ->
+    // fb_check_var), so the file's size decides: two pages when the guest draws fb0 itself (the app shows the page
+    // that changed last), one page + a counter under the 4.4 engine's GL server (3.x). Refused, 1.0/1.1 keep frames
+    // in a back buffer that only the msm copybit (libui CopybitMSM7K) copies to the screen: black without it.
+    case 0x4601: {
+        struct kstat st;
+        u32 line = g_fbw * (g_fb16 ? 2 : 4);
+        if (((u32 *)arg)[3] <= g_fbh) return 0;
+        return S2(NR_fstat, fd, &st) == 0 && (u64)((u32 *)arg)[3] * line <= (u64)st.st_size ? 0 : -22 /* EINVAL */;
+    }
     case 0x4606: case 0x4611: return 0;                 // PAN_DISPLAY, BLANK
     }
     return -25; /* ENOTTY */
@@ -1094,7 +1103,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
         // the pointer is the guest's: add qemu's guest_base back (2.3's zygote, linked at 0x8000, runs with one;
         // without it EventHub read empty capability bits and dropped the touchscreen)
         if (((a[1] >> 8) & 0xff) == 'E' && is_input_fd((int)a[0])) return input_ioctl(input_dev((int)a[0]), (u32)a[1], (u64)G(a[2]));
-        if (((u32)a[1] & 0xffffff00u) == 0x4600) return fb_ioctl((u32)a[1], (u64)a[2]);   /* qemu converts FBIO* itself */
+        if (((u32)a[1] & 0xffffff00u) == 0x4600) return fb_ioctl((int)a[0], (u32)a[1], (u64)a[2]);   /* qemu converts FBIO* itself */
         if (((a[1] >> 8) & 0xff) == 'b' && is_binder_fd((int)a[0])) return binder_ioctl((int)a[0], (u32)a[1], (u64)a[2]);
         if (((a[1] >> 8) & 0xff) == 'a' && is_alarm_fd((int)a[0])) return alarm_ioctl((u32)a[1], (u64)a[2]);
         if (g_is32 && ((a[1] >> 8) & 0xff) == 'p' && ((u32)a[1] & 0xff) - 1u < 7u && is_pmem_fd((int)a[0]))
