@@ -480,7 +480,10 @@ class TreeFixer(
     /** Native arm64 engine: its HALs and libraries are arm64 files from assets/engines/n64-<kernel> (each kernel has its own copy), named "a#b#c" for a/b/c. */
     /** the firmware's libgui checks queued buffers for the handle of Samsung's Exynos gralloc */
     /** some 64-bit HAL of this class is in place (the board's own ones are set aside after import) */
-    private fun hasHal(cls: String) = listOf("system/lib64/hw", "vendor/lib64/hw", "system/vendor/lib64/hw")
+    // (a 32-bit firmware (open32) keeps its HALs in lib/hw: the HTC One 4.4 IR HAL is there, and system_server
+    // stops on "IR HAL present, but FEATURE_CONSUMER_IR is not set" when the declaration went aside)
+    private fun hasHal(cls: String) = (if (kk32) listOf("system/lib/hw", "vendor/lib/hw", "system/vendor/lib/hw")
+        else listOf("system/lib64/hw", "vendor/lib64/hw", "system/vendor/lib64/hw"))
         .any { d -> File(root, d).list()?.any { it.startsWith("$cls.") && it.endsWith(".so") } == true }
 
     private fun contains(f: File, text: String): Boolean = runCatching {
@@ -887,7 +890,9 @@ class TreeFixer(
                 "libashmemshim.so" to "system/lib/libashmemshim.so",
                 "libGLES.so" to "system/lib/egl/libGLES_bridge.so",
                 "audio.primary.default.so" to "system/lib/hw/audio.primary.default.so",
-                "gralloc.default.so" to "system/lib/hw/gralloc.default.so",
+                // the engine's gralloc behind the allocator layout the firmware's libui calls (native/gralloc32abi)
+                "gralloc.default.so" to "system/lib/libgralloc_kk.so",
+                "gralloc.abi.so" to "system/lib/hw/gralloc.default.so",
                 "aemu-stubs.jar" to "system/framework/aemu-stubs.jar",
             )
             Engine.GB -> listOf(
@@ -949,7 +954,8 @@ class TreeFixer(
             val dst = File(root, to)
             // gralloc движка — только если в прошивке своего нет
             // (open32: the 7.x default gralloc keeps its base as a 64-bit field, a handle the GL server does not read)
-            if (from == "gralloc.default.so" && dst.isFile && !kk32) continue
+            if ((from == "gralloc.default.so" || from == "gralloc.abi.so") && File(root, "system/lib/hw/gralloc.default.so").isFile &&
+                !kk32 && !sameContent("engines/kk/gralloc.abi.so", File(root, "system/lib/hw/gralloc.default.so"))) continue
             // «@» — общий для всех движков файл
             // звуковой HAL стенда разложен под AudioFlinger HTC; остальным 4.2+ — вариант с раскладкой AOSP.
             // У Samsung свой audio_stream_out (лишние слоты) — с ним AOSP-вариант роняет mediaserver,
