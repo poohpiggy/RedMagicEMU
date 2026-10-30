@@ -1095,8 +1095,18 @@ class TreeFixer(
             val names = if (egl.isFile) String(egl.readBytes(), Charsets.ISO_8859_1) else ""
             val drv = when {
                 names.contains("libhEGL.so") -> listOf("libhEGL.aemu.so" to "libhEGL.so", "libhGLESv1_CM.aemu.so" to "libhGLESv1_CM.so")
-                names.contains("libhgl.so") -> listOf("libhgl.aemu.so" to "libhgl.so")
                 else -> emptyList()
+            }
+            // libhgl.so (AOSP Cupcake/Donut) stays off until GL programs pass by screenshot: with a hardware driver their
+            // SurfaceFlinger gives GL windows "gpu surfaces" from a 1.2 MB GPU heap and a full-screen one fails
+            // (createNormalSurfaceLocked: Out of memory, 83wsz4 30.10). An earlier install is taken back here.
+            File(root, "system/lib/libhgl.so").takeIf { it.isFile && names.contains("libhgl.so") }?.let { f ->
+                if (String(f.readBytes(), Charsets.ISO_8859_1).contains("AEmulator GPU bridge")) {
+                    val parked = File(root, "system/.aemu-parked/system#lib#libhgl.so")
+                    if (parked.isFile) parked.copyTo(f, overwrite = true) else f.delete()
+                    log("GPU: the emulator's libhgl.so taken back (off for now)")
+                    copied++
+                }
             }
             if (drv.isNotEmpty()) {
                 for ((asset, name) in drv) {
@@ -1418,7 +1428,15 @@ class TreeFixer(
             runCatching { list.writeText(found.joinToString("\n", postfix = "\n")) }
             found.toList()
         }
-        for (n in names) File(root, "dev/$n").let { if (!it.exists()) it.createNewFile() }
+        // pmem_gpu0/1 are the msm 3D core's SMI/EBI heaps (board-trout.c: android_pmem_gpu0/1 next to the hw3d
+        // device). The emulated phone has no such core (no /dev/hw3d), so it has no GPU heaps either: with them
+        // Cupcake/Donut SurfaceFlinger (GPUHardware.cpp) gives GL windows "gpu surfaces" from a 1200 KB reserve that a
+        // full-screen window at today's sizes does not fit (createNormalSurfaceLocked: Out of memory). Without them
+        // GPUHardware::requestLocked fails and SurfaceHeapManager::createHeap uses the client's normal heap.
+        for (n in names) File(root, "dev/$n").let {
+            val gpu = n.startsWith("pmem_gpu") && !File(root, "dev/hw3d").exists()
+            if (gpu) { if (it.isFile && it.length() == 0L) it.delete() } else if (!it.exists()) it.createNewFile()
+        }
     }
 
     /**

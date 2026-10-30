@@ -823,7 +823,14 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
                 // logger_aio_write). Here it is a plain file, so a writer opened without O_APPEND (1.6 liblog:
                 // open(O_WRONLY), mediaserver) wrote over the start of the file and its records were lost.
                 if (pre(P(1), "/dev/log/") && (a[2] & 3)) a[2] |= 02000 /*O_APPEND*/;
-                if (g_is32 && pre(P(1), "/dev/pmem")) return pmem_open(a[2]);
+                // a pmem region exists only where the board defines it (drivers/misc/pmem.c registers one misc node
+                // per platform device): the node in the image's /dev decides, as on the phone. Old firmwares pick
+                // their path by open() success (Donut GPUHardware: no /dev/pmem_gpu1 -> no GPU surfaces).
+                if (g_is32 && pre(P(1), "/dev/pmem")) {
+                    const char *h = xl(P(1), b1, &err);
+                    if (!h) return err;
+                    return S4(NR_faccessat, AT_FDCWD, h, 0, 0) == 0 ? pmem_open(a[2]) : -ENOENT;
+                }
                 if (g_is32 && pre(P(1), "/dev/snd/")) return snd_open(P(1), a[2]);   // ALSA for 2.x vendor HALs (alsa.c)
                 if (g_is32 && pre(P(1), "/dev/video")) return v4_open(P(1), a[2]);   // V4L2 camera for 2.x vendor HALs (v4l2.c)
                 if (seq(P(1), "/dev/cpuctl/tasks") || seq(P(1), "/dev/cpuctl/bg_non_interactive/tasks")) return cg_open(P(1), a[2]);
