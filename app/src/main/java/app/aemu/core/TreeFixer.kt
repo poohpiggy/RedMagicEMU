@@ -1336,7 +1336,12 @@ class TreeFixer(
         f.setReadable(true, false); f.setExecutable(true, false)
     }
     /** the open GLES bridge for the 32-bit engine is asked for (file "glopen" in the image's directory) */
-    private fun openGl32(): Boolean = engine == Engine.KK && File(paths.dir, "glopen").isFile &&
+    // open32: the open bridge (native/glbridge, armv7) is the default since 30.10 (2.3 tv78pk, 4.4 pvjeed, Sense 4.4:
+    // desktop, gl1/gl2, browser checked by screenshot); a file "glclosed" in the image's directory puts the 4.4 engine's
+    // closed one back for a comparison. The closed engine (KK) keeps it behind the "glopen" test switch.
+    // (6.0-7.1 not yet: their SurfaceFlinger gets the open bridge itself and fb0 is read as the closed GL server's RGB565
+    // - RGBA frames came out striped, 4st4ed/ay7vdh 30.10; PLAN §3)
+    private fun openGl32(): Boolean = (if (kk32) img.api < 23 && !File(paths.dir, "glclosed").isFile else engine == Engine.KK && File(paths.dir, "glopen").isFile) &&
         assetSize(OPEN_GL) > 0
 
     private fun splitSize(): Long = runCatching { EngineAssets.size(ctx, "engines/kk/libGLES_split.so") }.getOrDefault(-1L)

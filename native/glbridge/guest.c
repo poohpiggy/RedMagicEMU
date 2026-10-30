@@ -951,10 +951,13 @@ struct esurf {
 static volatile uint32_t g_keys;
 
 /* (bionic has getprogname from 5.0; before it: the translator shows the guest's own argv in /proc/self/cmdline) */
-extern const char *getprogname(void) __attribute__((weak));
+/* (looked up, not a weak import: the 2.1 linker resolves an undefined weak symbol to the library's own empty
+ * entry, value 0 - the call landed on the library's base address, SIGILL in every program) */
 static const char *prog_name(void) {
     static char name[128];
-    const char *c = getprogname ? getprogname() : 0;
+    void *libc = dlopen("libc.so", 0);
+    const char *(*getprog)(void) = libc ? (const char *(*)(void))dlsym(libc, "getprogname") : 0;
+    const char *c = getprog ? getprog() : 0;
     if (c) return c;
     int fd = open("/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
     if (fd >= 0) { ssize_t n = read(fd, name, sizeof(name) - 1); name[n > 0 ? n : 0] = 0; close(fd); }
@@ -1058,6 +1061,27 @@ EXPORT EGLSurface eglCreatePixmapSurface(EGLDisplay d, EGLConfig c, void *pixmap
     t_err = EGL_BAD_MATCH;
     return 0;
 }
+/* Before 4.2 (API 17) a window has only the first set of buffer calls: no fences, and lockBuffer between dequeue and
+ * drawing (2.3 android_native_window_t, 4.0-4.1 ANativeWindow end at cancelBuffer). The fenced ones lie past the end
+ * of their struct: GLES 2 windows of 2.3 stayed black. (system/core/include/system/window.h of each release) */
+static int win_old(void) {
+    static int v = -1;
+    if (v < 0) { char b[92] = ""; __system_property_get("ro.build.version.sdk", b); v = atoi(b) > 0 && atoi(b) < 17; }
+    return v;
+}
+static int win_deq(struct ANativeWindow *w, struct ANativeWindowBuffer **b, int *fence) {
+    if (!win_old()) return w->dequeueBuffer(w, b, fence);
+    *fence = -1;
+    int r = w->dequeueBuffer_DEPRECATED(w, b);
+    if (r == 0 && w->lockBuffer_DEPRECATED) w->lockBuffer_DEPRECATED(w, *b);
+    return r;
+}
+static int win_queue(struct ANativeWindow *w, struct ANativeWindowBuffer *b) {
+    return win_old() ? w->queueBuffer_DEPRECATED(w, b) : w->queueBuffer(w, b, -1);
+}
+static int win_cancel(struct ANativeWindow *w, struct ANativeWindowBuffer *b) {
+    return win_old() ? (w->cancelBuffer_DEPRECATED ? w->cancelBuffer_DEPRECATED(w, b) : w->queueBuffer_DEPRECATED(w, b)) : w->cancelBuffer(w, b, -1);
+}
 /* SwiftShader's surface for ours: made when a SwiftShader context first draws to it */
 static void *ss_surface(struct esurf *s) {
     if (!s) return 0;
@@ -1065,7 +1089,7 @@ static void *ss_surface(struct esurf *s) {
         s->ss_tried = 1;
         if (s->kind == S_WINDOW) {
             SSF(EGLSurface, CreateWindowSurface, (EGLDisplay, EGLConfig, void *, const EGLint *));
-            if (s->buf) { s->win->cancelBuffer(s->win, s->buf, -1); s->buf = 0; }
+            if (s->buf) { win_cancel(s->win, s->buf); s->buf = 0; }
             s->ss = CreateWindowSurface ? CreateWindowSurface(s->dpy, s->cfg, s->win, s->attribs) : 0;
         } else {
             SSF(EGLSurface, CreatePbufferSurface, (EGLDisplay, EGLConfig, const EGLint *));
@@ -1077,7 +1101,7 @@ static void *ss_surface(struct esurf *s) {
 static void surf_free(struct esurf *s) {
     if (s->ss) { SSF(EGLBoolean, DestroySurface, (EGLDisplay, EGLSurface)); if (DestroySurface) DestroySurface(s->dpy, s->ss); }
     if (s->win) {
-        if (s->buf) s->win->cancelBuffer(s->win, s->buf, -1);
+        if (s->buf) win_cancel(s->win, s->buf);
         s->win->common.decRef(&s->win->common);
     }
     free(s->tmp); free(s);
@@ -1096,7 +1120,7 @@ static void win_dequeue(struct esurf *s) {
     int fence = -1;
     if (s->buf) return;
     if (!s->ready) { s->win->perform(s->win, 0 /* NATIVE_WINDOW_SET_USAGE */, 0x933); s->ready = 1; }
-    if (s->win->dequeueBuffer(s->win, &s->buf, &fence) != 0) { s->buf = 0; return; }
+    if (win_deq(s->win, &s->buf, &fence) != 0) { s->buf = 0; return; }
     if (fence >= 0) { struct pollfd p = { fence, POLLIN, 0 }; poll(&p, 1, 1000); close(fence); }
     s->w = s->buf->width; s->h = s->buf->height;
 }
@@ -1314,7 +1338,7 @@ static EGLBoolean bridge_swap(struct ts *T, struct esurf *s) {
         begin(T, OP_SWAP_BUF, 32, 32); put32(T, w); put32(T, h); put64(T, note->id); put64(T, note->pad[0]); put64(T, frame);
         flush(T);
         s->buf = 0;
-        s->win->queueBuffer(s->win, b, -1);
+        win_queue(s->win, b);
         win_dequeue(s);
         if (s->buf && ((uint32_t)s->w != w || (uint32_t)s->h != h)) { begin(T, OP_SURF_SIZE, 8, 8); put32(T, (uint32_t)s->w); put32(T, (uint32_t)s->h); }
         return 1;
@@ -1336,7 +1360,7 @@ static EGLBoolean bridge_swap(struct ts *T, struct esurf *s) {
         buf_unlock(b);
     }
     s->buf = 0;
-    s->win->queueBuffer(s->win, b, -1);
+    win_queue(s->win, b);
     win_dequeue(s);
     if (s->buf && ((uint32_t)s->w != w || (uint32_t)s->h != h)) { begin(T, OP_SURF_SIZE, 8, 8); put32(T, (uint32_t)s->w); put32(T, (uint32_t)s->h); }
     return 1;

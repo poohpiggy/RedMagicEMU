@@ -305,11 +305,12 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         // contexts go to the same host renderer as on the 64-bit engine; the file's text is the mode (default 2: here the
         // "software" driver under the bridge is the engine's own, which has no texture EGLImages, and WebView's
         // threads share their tiles through those - in mode 1 they stay on it and a page draws only its background)
-        if (engine == Engine.KK && s.gpu && File(paths.dir, "glopen").isFile && File(paths.root, "system/lib/egl/libGLES_split.so").isFile) {
+        val open32Gl = engine == Engine.N64 && img.abi != "arm64-v8a" && img.api < 23 && !File(paths.dir, "glclosed").isFile   // (TreeFixer.openGl32)
+        if ((open32Gl || (engine == Engine.KK && File(paths.dir, "glopen").isFile)) && s.gpu && File(paths.root, "system/lib/egl/libGLES_split.so").isFile) {
             paths.socket("aemu_gl").parentFile?.mkdirs()
             val r = GlHost.start(paths.socket("aemu_gl").absolutePath)
             log("open GPU bridge (32-bit): $r")
-            if (r.startsWith("ok")) overrides["debug.aemu.gl"] = File(paths.dir, "glopen").readText().trim().takeIf { it.isNotEmpty() } ?: "2"
+            if (r.startsWith("ok")) overrides["debug.aemu.gl"] = runCatching { File(paths.dir, "glopen").readText().trim() }.getOrDefault("").takeIf { it.isNotEmpty() } ?: "2"
         }
         // 7.0+ libEGL ignores egl.cfg and takes the first libGLES_*.so it finds; without the bridge: the software one
         if (img.api >= 24 && !s.gpu) {
