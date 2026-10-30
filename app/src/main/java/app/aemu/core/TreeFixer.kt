@@ -1095,18 +1095,10 @@ class TreeFixer(
             val names = if (egl.isFile) String(egl.readBytes(), Charsets.ISO_8859_1) else ""
             val drv = when {
                 names.contains("libhEGL.so") -> listOf("libhEGL.aemu.so" to "libhEGL.so", "libhGLESv1_CM.aemu.so" to "libhGLESv1_CM.so")
+                // GL windows of Cupcake/Donut once died with this driver (gpu surface: Out of memory); that was the
+                // msm GPU heaps pmemNodes made without a 3D core, fixed there - GL windows use the normal heap now
+                names.contains("libhgl.so") -> listOf("libhgl.aemu.so" to "libhgl.so")
                 else -> emptyList()
-            }
-            // libhgl.so (AOSP Cupcake/Donut) stays off until GL programs pass by screenshot: with a hardware driver their
-            // SurfaceFlinger gives GL windows "gpu surfaces" from a 1.2 MB GPU heap and a full-screen one fails
-            // (createNormalSurfaceLocked: Out of memory, 83wsz4 30.10). An earlier install is taken back here.
-            File(root, "system/lib/libhgl.so").takeIf { it.isFile && names.contains("libhgl.so") }?.let { f ->
-                if (String(f.readBytes(), Charsets.ISO_8859_1).contains("AEmulator GPU bridge")) {
-                    val parked = File(root, "system/.aemu-parked/system#lib#libhgl.so")
-                    if (parked.isFile) parked.copyTo(f, overwrite = true) else f.delete()
-                    log("GPU: the emulator's libhgl.so taken back (off for now)")
-                    copied++
-                }
             }
             if (drv.isNotEmpty()) {
                 for ((asset, name) in drv) {
