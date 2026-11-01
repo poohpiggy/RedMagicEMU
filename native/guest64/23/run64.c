@@ -39,7 +39,7 @@ enum {
     NR_setregid = 143, NR_setgid = 144, NR_setreuid = 145, NR_setuid = 146, NR_setresuid = 147, NR_getresuid = 148,
     NR_setresgid = 149, NR_getresgid = 150, NR_setfsuid = 151, NR_setfsgid = 152, NR_getgroups = 158, NR_setgroups = 159,
     NR_prctl = 167, NR_getpid = 172, NR_getuid = 174, NR_geteuid = 175, NR_getgid = 176, NR_getegid = 177, NR_gettid = 178,
-    NR_socket = 198, NR_socketpair = 199, NR_bind = 200, NR_connect = 203, NR_getsockname = 204, NR_sendto = 206, NR_setsockopt = 208, NR_getsockopt = 209,
+    NR_socket = 198, NR_socketpair = 199, NR_bind = 200, NR_connect = 203, NR_getsockname = 204, NR_getpeername = 205, NR_sendto = 206, NR_setsockopt = 208, NR_getsockopt = 209,
     NR_sendmsg = 211, NR_recvmsg = 212, NR_munmap = 215, NR_execve = 221, NR_mmap = 222, NR_mprotect = 226,
     NR_renameat2 = 276, NR_memfd_create = 279, NR_statx = 291,
 };
@@ -475,6 +475,51 @@ static long fb_ioctl(int fd, u32 cmd, u64 arg) {
 // /dev/input/event0: a stream of struct input_event from the app (AEMU64_INPUT socket); the evdev questions of the
 // guest's EventHub are answered here: a direct multi-touch screen with the navigation and volume keys.
 static char g_input[108];
+/* AEMU64_TLS=<port>:<unix datagram path> (the app's TlsBridge, old firmwares only): a TCP connect to port 443 goes to
+ * 127.0.0.1:<port> instead, and the bridge is told the address it was meant for ("M <local port> <a.b.c.d>") before
+ * the connect; DNS queries (UDP to port 53) are copied to it ("Q" + the packet) so it knows the names of addresses:
+ * clients before 2.3 send no SNI. */
+static char g_tls[108]; static u16 g_tlsport;
+static void tls_note(const void *d, u64 n) {
+    long c = S3(NR_socket, 1, 2 /* SOCK_DGRAM */ | 0x80000 /* CLOEXEC */, 0);
+    if (c < 0) return;
+    struct sockaddr_un sa; sa.family = 1; u64 l = slen(g_tls); memcpy(sa.path, g_tls, l + 1);
+    S6(NR_sendto, c, d, n, 0x40 /* MSG_DONTWAIT */, &sa, 2 + l + 1);
+    S1(NR_close, c);
+}
+static int eqb(const u8 *a, const u8 *b, u64 n) { while (n--) if (*a++ != *b++) return 0; return 1; }
+static u16 be16(const u8 *p) { return (u16)(p[0] << 8 | p[1]); }
+/* the IPv4 address of an AF_INET or v4-mapped AF_INET6 sockaddr, or 0 */
+static int sa_v4(const u8 *sa, u64 len, u8 ip[4], u16 *port) {
+    u16 fam = *(const u16 *)sa;
+    if (fam == 2 && len >= 8) { memcpy(ip, sa + 4, 4); *port = be16(sa + 2); return 1; }
+    static const u8 mapped[12] = { 0,0,0,0,0,0,0,0,0,0,0xff,0xff };
+    if (fam == 10 && len >= 24 && eqb(sa + 8, mapped, 12)) { memcpy(ip, sa + 20, 4); *port = be16(sa + 2); return 1; }
+    return 0;
+}
+static void dec(char **o, unsigned v) { char t[12]; int n = 0; do t[n++] = (char)('0' + v % 10); while (v /= 10); while (n) *(*o)++ = t[--n]; }
+static long tls_connect(long fd, const u8 *sa, u64 len) {
+    u8 ip[4]; u16 port;
+    if (!sa_v4(sa, len, ip, &port) || port != 443 || ip[0] == 127) return 1;
+    int ty = 0; u32 tl = 4;
+    if (S5(NR_getsockopt, fd, 1 /* SOL_SOCKET */, 3 /* SO_TYPE */, &ty, &tl) < 0 || ty != 1 /* STREAM */) return 1;
+    u8 lo[28]; memset(lo, 0, sizeof lo);
+    u64 ll = *(const u16 *)sa == 2 ? 16 : 28;
+    memcpy(lo, sa, 2);
+    lo[2] = (u8)(g_tlsport >> 8); lo[3] = (u8)g_tlsport;
+    if (ll == 16) { lo[4] = 127; lo[7] = 1; } else { lo[18] = 0xff; lo[19] = 0xff; lo[20] = 127; lo[23] = 1; }
+    u8 me[28]; u32 ml = sizeof me;
+    if (S3(NR_getsockname, fd, me, &ml) < 0 || be16(me + 2) == 0) {
+        u8 any[28]; memcpy(any, lo, sizeof any); any[2] = any[3] = 0;
+        S3(NR_bind, fd, any, ll);
+        ml = sizeof me;
+        if (S3(NR_getsockname, fd, me, &ml) < 0) return 1;
+    }
+    char m[48], *o = m; *o++ = 'M'; *o++ = ' '; dec(&o, be16(me + 2)); *o++ = ' ';
+    for (int i = 0; i < 4; i++) { dec(&o, ip[i]); if (i < 3) *o++ = '.'; }
+    tls_note(m, (u64)(o - m));
+    return S3(NR_connect, fd, lo, ll);
+}
 static int g_infds[4];                          // descriptors + 1
 static u8 g_indev[4];                           // 0: the touch screen (event0), 1: the keys (event1)
 
@@ -610,6 +655,8 @@ static long do_exec(const char *path, char *const argv[], char *const envp[]) {
     *a++ = e_id; *a++ = e_f;
     if (g_crash) *a++ = "AEMU64_CRASH=1";
     if (g_b32) *a++ = "AEMU64_B32=1";
+    static char e_tls[140];
+    if (g_tlsport) { char *o = e_tls; memcpy(o, "AEMU64_TLS=", 11); o += 11; dec(&o, g_tlsport); *o++ = ':'; memcpy(o, g_tls, slen(g_tls) + 1); *a++ = e_tls; }
     static char e_input[130];
     if (g_input[0]) { memcpy(e_input, "AEMU64_INPUT=", 13); memcpy(e_input + 13, g_input, slen(g_input) + 1); *a++ = e_input; }
     static char e_a32[540];
@@ -1054,6 +1101,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
     }
     case NR_bind: case NR_connect:
         if (is_nl_fd((int)a[0])) return 0;
+        if (nr == NR_connect && g_tlsport && a[1]) { long r = tls_connect(a[0], (const u8 *)a[1], (u64)a[2]); if (r != 1) return r; }
         if (a[1] && *(u16 *)a[1] == 16) {           // a real netlink socket: binding to groups is not for an app
             long r = S3(nr, a[0], a[1], a[2]);
             return r < 0 && nr == NR_bind ? 0 : r;
@@ -1243,6 +1291,13 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
         if (is_nl_fd((int)a[0])) {
             nl_handle_send((int)a[0], (const void *)a[1], (u64)a[2]);
             return a[2];
+        }
+        if (g_tlsport && a[2] > 12 && a[2] < 512) {     // a DNS query: a copy to the TLS bridge
+            u8 pa[28], ip[4]; u16 port = 0; u32 pl = sizeof pa; const u8 *to = (const u8 *)a[4]; u64 tl = (u64)a[5];
+            if (!to && S3(NR_getpeername, a[0], pa, &pl) == 0) { to = pa; tl = pl; }
+            if (to && sa_v4(to, tl, ip, &port) && port == 53) {
+                u8 q[520]; q[0] = 'Q'; memcpy(q + 1, (const void *)a[1], (u64)a[2]); tls_note(q, (u64)a[2] + 1);
+            }
         }
         return S6(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
     }
@@ -1548,6 +1603,10 @@ void aemu_main(u64 *sp) {
     if ((r = env_get(envp, "AEMU64_PROPS")) && slen(r) < sizeof g_props) memcpy(g_props, r, slen(r) + 1);
     g_crash = env_get(envp, "AEMU64_CRASH") != 0;
     if ((r = env_get(envp, "AEMU64_INPUT")) && slen(r) < sizeof g_input) memcpy(g_input, r, slen(r) + 1);
+    if ((r = env_get(envp, "AEMU64_TLS")) && slen(r) < sizeof g_tls) {
+        u32 p = 0; while (*r >= '0' && *r <= '9') p = p * 10 + (u32)(*r++ - '0');
+        if (*r == ':' && p && p < 65536) { g_tlsport = (u16)p; memcpy(g_tls, r + 1, slen(r + 1) + 1); }
+    }
     if ((r = env_get(envp, "AEMU64_SDCARD")) && slen(r) < sizeof g_sd) { g_sdlen = slen(r); memcpy(g_sd, r, g_sdlen + 1); }
     if ((r = env_get(envp, "AEMU64_QEMU")) && slen(r) < sizeof g_qemu) memcpy(g_qemu, r, slen(r) + 1);
     if (env_get(envp, "AEMU64_B32")) g_b32 = 1;

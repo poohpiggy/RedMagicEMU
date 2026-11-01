@@ -110,6 +110,8 @@ class GuestRunner(
             e["AEMU64_VNDBINDER"] = paths.vndbinderSock.absolutePath
         }
         e["AEMU64_INPUT"] = paths.inputSock.absolutePath
+        // TlsBridge: kernel 23 sends connects to port 443 there (run64.c tls_connect)
+        if (net.https443 > 0) e["AEMU64_TLS"] = "${net.https443}:" + java.io.File(paths.bin, "tls.sock").absolutePath
         if (img.abi != "arm64-v8a") e["AEMU64_B32"] = "1"     // a whole 32-bit firmware: binder protocol 7
         paths.nativeBin("libqemu_arm.so").takeIf { it.canExecute() }?.let { e["AEMU64_QEMU"] = it.absolutePath }
         // native 32-bit kernel of this release (native/guest32), where the phone executes AArch32; files/noarm32 turns it off

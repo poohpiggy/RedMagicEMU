@@ -115,6 +115,7 @@ class DnsProxy(private val paths: VmPaths, private val api: Int, private val pro
             }
         }
         if (addrs.isEmpty()) { log("dns: no addresses for $host"); return fail(o) }
+        if (host != null) TlsBridge.resolved(host, addrs)
         if (queries <= 40) log("dns: $host -> " + addrs.joinToString { it.hostAddress ?: "?" })
         val types = if (socktype != 0) listOf(socktype) else listOf(1, 2, 3)
         ok(o)
@@ -162,7 +163,7 @@ class DnsProxy(private val paths: VmPaths, private val api: Int, private val pro
         val name = args.firstOrNull { !it.all { ch -> ch.isDigit() } } ?: args.firstOrNull() ?: return fail(o)
         val af = args.filter { it != name }.mapNotNull { it.toIntOrNull() }.firstOrNull { it == AF_INET || it == AF_INET6 } ?: AF_INET
         if (af != AF_INET) return fail(o)
-        val v4 = InetAddress.getAllByName(name).filterIsInstance<Inet4Address>()
+        val v4 = InetAddress.getAllByName(name).filterIsInstance<Inet4Address>().also { TlsBridge.resolved(name, it) }
         if (v4.isEmpty()) return fail(o)
         ok(o)
         lenData(o, (name + "\u0000").toByteArray())

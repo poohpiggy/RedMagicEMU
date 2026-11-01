@@ -129,7 +129,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     /** hardware overlays of 2.x (overlay HAL → /dev/socket/aemu_ovl), drawn over the screen */
     val overlays = OverlayFeed(paths, ::log)
     @Volatile private var lmk: GuestLmk? = null
-    val net = NetProxy(ctx, paths, ::log)
+    val net = NetProxy(ctx, paths, img.api, img.abi != "arm64-v8a", ::log)
     private val dns = DnsProxy(paths, img.api, img.engine == Engine.N64 && Kernel64.forApi(img.api).dnsLayoutProbe, ::log)
     val runner by lazy { GuestRunner(paths, img) }
 
