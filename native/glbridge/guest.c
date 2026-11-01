@@ -186,8 +186,10 @@ static void sh_write(GLenum target, long offset, const void *p, long size, int w
     pthread_mutex_lock(&g_sh_lock);
     struct shadow *x = sh_find(g->root, name);
     if (whole) {
+        /* a buffer already copied here is one drawn from as indices: keep its copy whatever target refills it */
+        int had = x != 0;
         if (x) { free(x->data); memset(x, 0, sizeof(*x)); }
-        if (target == 0x8893 && size > 0 && size <= SHADOW_MAX) {
+        if ((target == 0x8893 || had) && size > 0 && size <= SHADOW_MAX) {
             for (int i = 0; i < 64 && !x; i++) if (!g_sh[i].data) x = &g_sh[i];
             if (!x) { x = &g_sh[(name * 7u) & 63]; free(x->data); }
             x->data = p ? malloc((size_t)size) : calloc(1, (size_t)size);
@@ -396,6 +398,23 @@ static void map_read(struct ts *T, GLenum target, long offset, long length, void
     rsync(T);
     get(T, to, (uint32_t)length);
 }
+/* a copy of the whole bound element buffer from the host (one read); 0: too big or not readable */
+static int sh_fill(struct ts *T, struct gstate *g) {
+    GLint size = 0;
+    e_glGetBufferParameteriv(0x8893, 0x8764 /* GL_BUFFER_SIZE */, &size);
+    if (size <= 0 || size > SHADOW_MAX) return 0;
+    uint8_t *d = malloc((size_t)size);
+    if (!d) return 0;
+    map_read(T, 0x8893, 0, size, d);
+    pthread_mutex_lock(&g_sh_lock);
+    struct shadow *x = sh_find(g->root, g->elem);
+    for (int i = 0; i < 64 && !x; i++) if (!g_sh[i].data) x = &g_sh[i];
+    if (!x) { x = &g_sh[(g->elem * 7u) & 63]; }
+    free(x->data);
+    x->data = d; x->root = g->root; x->name = g->elem; x->size = size;
+    pthread_mutex_unlock(&g_sh_lock);
+    return 1;
+}
 /* A draw that takes vertices (and maybe indices) from the program's memory: they travel with it.
  * type 0: glDrawArrays. Sent as: mode, count, type, instanced, instances, the number of arrays; the indices (a block,
  * or NIL and their offset in the bound buffer); for each array index, size, type, normalized | integer << 1, stride,
@@ -410,6 +429,9 @@ static void e_draw(GLenum mode, GLint first, GLsizei count, GLenum type, const v
     if (type) {
         const void *ix = indices;
         long known = g->elem ? sh_max(g, (long)(uintptr_t)indices, count, isz) : -1;
+        /* filled through another target (2.3 RenderScript uploads every allocation as GL_ARRAY_BUFFER, rsAllocation.cpp
+         * uploadToBufferObject, and binds it as indices to draw): read the whole buffer once and keep the copy */
+        if (g->elem && known < 0 && sh_fill(T, g)) known = sh_max(g, (long)(uintptr_t)indices, count, isz);
         if (g->elem && known < 0) {      /* indices in a buffer, vertices in memory: the range of vertices is in the buffer */
             ix = fetched = malloc(ibytes);
             if (!fetched) return;
