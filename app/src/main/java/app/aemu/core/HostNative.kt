@@ -12,4 +12,11 @@ object HostNative {
     fun limitStackSafe() { if (ok) try { limitStack() } catch (_: Throwable) {} }
 
     fun relaxFdsanSafe() { if (ok) try { relaxFdsan() } catch (_: Throwable) {} }
+
+    /** AF_UNIX datagram sockets (WifiStub): bind → fd or -errno; recv blocks, from[0] = sender path; close wakes recv. */
+    @JvmStatic external fun dgramBind(path: String): Int
+    @JvmStatic external fun dgramRecv(fd: Int, buf: ByteArray, from: Array<String?>): Int
+    @JvmStatic external fun dgramSend(fd: Int, data: ByteArray, to: String): Int
+    @JvmStatic external fun dgramClose(fd: Int)
+    val available: Boolean get() = ok
 }

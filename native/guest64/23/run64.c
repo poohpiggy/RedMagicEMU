@@ -35,7 +35,7 @@ enum {
     NR_chdir = 49, NR_chroot = 51, NR_fchmodat = 53, NR_fchownat = 54, NR_fchown = 55, NR_openat = 56, NR_close = 57,
     NR_lseek = 62, NR_read = 63, NR_write = 64, NR_pread64 = 67, NR_pwrite64 = 68, NR_pselect6 = 72, NR_readlinkat = 78, NR_newfstatat = 79, NR_fstat = 80,
     NR_timerfd_create = 85, NR_utimensat = 88, NR_capget = 90, NR_capset = 91, NR_exit_group = 94, NR_unshare = 97,
-    NR_sched_yield = 124, NR_rt_sigaction = 134, NR_rt_sigprocmask = 135, NR_reboot = 142,
+    NR_sched_yield = 124, NR_rt_sigaction = 134, NR_rt_sigprocmask = 135, NR_reboot = 142, NR_init_module = 105, NR_delete_module = 106, NR_finit_module = 273,
     NR_setregid = 143, NR_setgid = 144, NR_setreuid = 145, NR_setuid = 146, NR_setresuid = 147, NR_getresuid = 148,
     NR_setresgid = 149, NR_getresgid = 150, NR_setfsuid = 151, NR_setfsgid = 152, NR_getgroups = 158, NR_setgroups = 159,
     NR_prctl = 167, NR_getpid = 172, NR_getuid = 174, NR_geteuid = 175, NR_getgid = 176, NR_getegid = 177, NR_gettid = 178,
@@ -1171,6 +1171,10 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
         return r;
     }
     case NR_reboot: S1(NR_exit_group, 0); return 0;
+    // Loadable modules: the guest's libhardware_legacy wifi.c insmods the Wi-Fi driver (wifi_load_driver) and rmmods it
+    // when Wi-Fi goes off; an app may not load modules (the call is refused, or kills the process under the app
+    // seccomp policy). The emulated "driver" is WifiStub on the host, so the module counts as loaded.
+    case NR_init_module: case NR_finit_module: case NR_delete_module: return 0;
     case NR_capget: {
         struct { u32 e, p, i; } *d = (void *)a[1];
         if (d) { d[0].e = d[0].p = 0xffffffff; d[0].i = 0; d[1].e = d[1].p = 0xffffffff; d[1].i = 0; }
@@ -1446,6 +1450,9 @@ static void install_filter(void) {
     AT(L_NR); f[n++] = LD(0);
     for (u64 i = 0; i < sizeof trapped; i++) f[n++] = JEQ(trapped[i], L_TRAP, 0);
     f[n++] = JEQ(NR_renameat2, L_TRAP, 0);
+    f[n++] = JEQ(NR_init_module, L_TRAP, 0);
+    f[n++] = JEQ(NR_delete_module, L_TRAP, 0);
+    f[n++] = JEQ(NR_finit_module, L_TRAP, 0);
     f[n++] = JEQ(NR_statx, L_TRAP, 0);
     f[n++] = JEQ(NR_rt_sigprocmask, L_SIG, 0);
     f[n++] = JEQ(NR_prctl, L_PRCTL, 0);

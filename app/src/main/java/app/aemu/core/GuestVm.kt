@@ -109,6 +109,8 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     val audio = AudioOut(paths, ::log, if (img.api < 14) 44100 else AudioOut.RATE,
         if (TreeFixer.isMtkAudio(paths.root)) "dev/aemu_pcm" else "dev/eac")
     val ril = RilStub(paths, ::log, img.settings.imei.ifBlank { VmSettings.DEFAULT_IMEI }, img.api)
+    // 2.x-3.x: wifi.c / dhcp_utils.c era; 4.0+ talks to p2p_supplicant and netd differently (not emulated yet)
+    val wifi = if (img.api in 5..13) WifiStub(paths, img.api, props, "8.8.8.8" to "1.1.1.1", ::log) else null
     val vold = VoldStub(paths, img.sdcardPath, ::log, others = img.volumes, api = img.api, setProp = { k, v -> props.put(k, v) })
     var onFrame: (() -> Unit)? = null
     val frames = FrameBell(paths, ::log) { onFrame?.invoke() }
@@ -1030,6 +1032,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             Thread { runCatching { startService(def) } }.start()
             return
         }
+        if (wifi?.onCtl(start, svc) == true) return
         val plan = servicePlan()
         if (svc == "bootanim" || svc == "bootanimation") {
             if (!start) {
@@ -1414,7 +1417,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         log("stopping system")
         runCatching { guestRunner.run(listOf("/system/bin/sync"), 5_000) }
         killAll()
-        adb.stop(); props.stop(); props.stopAbstract();input.stop(); frames.stop(); ril.stop(); vold.stop(); audio.stop(); net.stop(); dns.stop(); events.stop(); logd.stop(); lights.stop(); sensors.stop(); mic.stop(); camera.stop(); venc.stop(); overlays.stop(); GlHost.stop()
+        adb.stop(); props.stop(); props.stopAbstract();input.stop(); frames.stop(); ril.stop(); wifi?.stop(); vold.stop(); audio.stop(); net.stop(); dns.stop(); events.stop(); logd.stop(); lights.stop(); sensors.stop(); mic.stop(); camera.stop(); venc.stop(); overlays.stop(); GlHost.stop()
         extraStubs.forEach { it.stop() }; extraStubs.clear()
         lmk?.stop(); lmk = null
         Keeper.release(ctx)
