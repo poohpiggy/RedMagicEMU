@@ -77,7 +77,12 @@ struct ts {
     uint32_t n, cap;
     struct ectx *ctx;
     struct esurf *draw, *read;
+    struct ectx *cleanctx;   /* the context the flag below was taken in (GL error flags are per context) */
+    int clean;   /* the host had no GL error at the last glGetError and no call that may set one went out since */
 };
+/* GL calls (by encoder index) that can set an error on the host with arguments the guest cannot judge: sizes,
+ * formats, memory, framebuffer completeness, program linking. Filled in ss_load. */
+static unsigned char g_risky[4096];
 
 static void wr_all(struct ts *T, const void *p, size_t n) {
     const char *c = p;
@@ -103,6 +108,7 @@ static inline void putf(struct ts *T, float v) { room(T, 4); memcpy(T->buf + T->
 static inline void put64(struct ts *T, uint64_t v) { room(T, 8); memcpy(T->buf + T->n, &v, 8); T->n += 8; }
 static inline void begin(struct ts *T, uint32_t op, uint32_t fixed, uint32_t total) {
     room(T, 8 + fixed);
+    if (op < sizeof(g_risky) && g_risky[op]) T->clean = 0;
     put32(T, op); put32(T, total);
 }
 static void putraw(struct ts *T, const void *p, uint32_t n) {
@@ -856,6 +862,24 @@ static void *ss_open(const char *name) {
     }
     return 0;
 }
+/* glGetError answered in the guest (API <= 13). 2.x-3.x RenderScript and GL apps call it after nearly every call:
+ * ~500 synchronous trips to the host a frame (tv78pk 2.3 wallpaper: 87 frames, 37-47k glGetError in 4 s), and each
+ * trip is a write+read of the socket under qemu. Like the emulator's own encoder in GLESNoHostError mode
+ * (device/generic/goldfish-opengl GL2Encoder::s_glGetError) the host is not asked when nothing has gone out since
+ * that can fail there; unlike it, the host is still asked after the calls in g_risky, so a texture format probe or a
+ * failed link reports what the phone's driver said. */
+static int local_errors(void) {
+    static int v = -1;
+    if (v < 0) { char b[92] = ""; __system_property_get("ro.build.version.sdk", b); v = atoi(b) > 0 && atoi(b) <= 13; }
+    return v;
+}
+static GLenum local_glGetError(void) {
+    struct ts *T = TS();
+    if (T && T->clean && T->cleanctx == T->ctx) return 0;   /* GL_NO_ERROR */
+    GLenum e = e_glGetError();
+    if (T) { T->clean = e == 0; T->cleanctx = T->ctx; }
+    return e;
+}
 static void ss_load(void) {
     pthread_mutex_lock(&g_lock);
     if (!SS.up) {
@@ -876,6 +900,15 @@ static void ss_load(void) {
             f = SS.v1 ? dlsym(SS.v1, kNames[i]) : 0;
             SS.t1[i] = f ? f : (void *)nothing;
             SS.enc[i] = kEnc[i] ? kEnc[i] : (void *)not_carried;
+        }
+        if (local_errors()) {
+            static const int risky[] = { IDX_glTexImage2D, IDX_glTexSubImage2D, IDX_glCopyTexImage2D, IDX_glCopyTexSubImage2D,
+                IDX_glCompressedTexImage2D, IDX_glCompressedTexSubImage2D, IDX_glBufferData, IDX_glBufferSubData,
+                IDX_glRenderbufferStorage, IDX_glFramebufferTexture2D, IDX_glFramebufferRenderbuffer, IDX_glGenerateMipmap,
+                IDX_glReadPixels, IDX_glLinkProgram, IDX_glCompileShader, IDX_glShaderSource, IDX_glValidateProgram,
+                IDX_glEGLImageTargetTexture2DOES, IDX_glEGLImageTargetRenderbufferStorageOES };
+            for (unsigned k = 0; k < sizeof(risky) / sizeof(risky[0]); k++) if (risky[k] >= 0 && risky[k] < (int)sizeof(g_risky)) g_risky[risky[k]] = 1;
+            SS.enc[IDX_glGetError] = (void *)local_glGetError;
         }
         SS.up = 1;
     }
