@@ -35,6 +35,9 @@ enum {
     OP_IMAGE_DATA,          /* u64 buffer id, u64 write count, u32 w, u32 h, u32 stride, u32 format, block (top row first) */
     OP_PRESENT,             /* u64 buffer id, u32 w, u32 h: the composed frame, to the screen -> u32 1, or 0: not a
                                buffer the host has. Sent by the guest's hwcomposer. */
+    OP_SWAP_FMT,            /* u32 w, u32 h, u32 format (HAL_PIXEL_FORMAT 1/2 RGBA/RGBX 8888, 4 RGB_565, 5 BGRA), u32 stride
+                               (pixels) -> h rows, top row first, stride pixels each, in that format: the window's buffer
+                               as it is laid out, so the guest copies it in one piece */
 };
 
 /* how many values glGet* gives for a name; 0: a list whose length is another name's value (each side asks for it) */

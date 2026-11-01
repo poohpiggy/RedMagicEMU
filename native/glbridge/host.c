@@ -826,6 +826,57 @@ static void swap(int w, int h) {
     C->frames++;
 }
 
+/* OP_SWAP_FMT: the frame in the guest window's own format and row order. Converting and flipping in the guest
+ * ran as emulated code under qemu on 32-bit firmwares (2.x windows are RGB_565: a per-pixel loop over the whole
+ * window on every swap, the live wallpaper and the RenderScript app list of 2.3 at 20-30 frames a second). */
+static __thread uint8_t *t_fmt; static __thread size_t t_fmt_cap;
+static void swap_fmt(int w, int h, uint32_t format, uint32_t stride) {
+    if (w <= 0 || h <= 0 || stride < (uint32_t)w || stride > 16384) { C->dead = 1; return; }
+    uint32_t bpp = format == 4 ? 2 : 4;
+    size_t need = (size_t)stride * (size_t)h * bpp;
+    if (t_fmt_cap < need) { free(t_fmt); t_fmt = malloc(need); t_fmt_cap = t_fmt ? need : 0; }
+    if (!t_fmt) { C->dead = 1; return; }
+    struct hctx *x = C->ctx; struct surf *s = C->surf;
+    int have = x && s && s->w == w && s->h == h;
+    if (have) {
+        size_t raw = (size_t)w * (size_t)h * 4;
+        if (C->px_cap < raw) { free(C->px); C->px = malloc(raw); C->px_cap = C->px ? raw : 0; }
+        if (!C->px) { C->dead = 1; return; }
+        GLint align = 4, row = 0, rows = 0, pix = 0, pbo = 0;
+        glGetIntegerv(GL_PACK_ALIGNMENT, &align); glGetIntegerv(GL_PACK_ROW_LENGTH, &row);
+        glGetIntegerv(GL_PACK_SKIP_ROWS, &rows); glGetIntegerv(GL_PACK_SKIP_PIXELS, &pix);
+        glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pbo);
+        if (pbo) glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        if (row) glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+        if (rows) glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+        if (pix) glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+        if (align != 4) glPixelStorei(GL_PACK_ALIGNMENT, 4);
+        resolve(s);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, s->fbo);
+        glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, C->px);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, real_fb(x->read_fb));
+        if (align != 4) glPixelStorei(GL_PACK_ALIGNMENT, align);
+        if (pix) glPixelStorei(GL_PACK_SKIP_PIXELS, pix);
+        if (rows) glPixelStorei(GL_PACK_SKIP_ROWS, rows);
+        if (row) glPixelStorei(GL_PACK_ROW_LENGTH, row);
+        if (pbo) glBindBuffer(GL_PIXEL_PACK_BUFFER, (GLuint)pbo);
+        for (int y = 0; y < h; y++) {
+            const uint8_t *src = C->px + (size_t)(h - 1 - y) * (size_t)w * 4;
+            uint8_t *dst = t_fmt + (size_t)y * stride * bpp;
+            if (format == 4) {
+                uint16_t *d = (uint16_t *)dst;
+                for (int i = 0; i < w; i++, src += 4) d[i] = (uint16_t)((src[0] >> 3) << 11 | (src[1] >> 2) << 5 | src[2] >> 3);
+            } else if (format == 5) {
+                for (int i = 0; i < w; i++, src += 4, dst += 4) { dst[0] = src[2]; dst[1] = src[1]; dst[2] = src[0]; dst[3] = src[3]; }
+            } else memcpy(dst, src, (size_t)w * 4);
+        }
+    } else memset(t_fmt, 0, need);
+    reply_flush();
+    wr_all(t_fmt, need);
+    C->frames++;
+
+}
+
 /* The finished frame of a window whose buffer has a number: copied, the other way up, into the host's buffer of
  * that number, where the compositor's context finds it; the guest's memory gets it only if something reads it. */
 static void swap_buf(int w, int h, uint64_t id, uint64_t gen, uint64_t frame) {
@@ -1189,6 +1240,7 @@ static void hd_other(unsigned op, const uint8_t *p, uint32_t len) {
     }
     case OP_PING: glFinish(); reply32(1); break;
     case OP_PRESENT: { uint64_t id = rd64(&p); int w = (int)rd32(&p), h = (int)rd32(&p); reply32(present(id, w, h)); break; }
+    case OP_SWAP_FMT: { int w = (int)rd32(&p), h = (int)rd32(&p); uint32_t f = rd32(&p), st = rd32(&p); swap_fmt(w, h, f, st); break; }
     case OP_SWAP_BUF: {
         int w = (int)rd32(&p), h = (int)rd32(&p); uint64_t id = rd64(&p), gen = rd64(&p), frame = rd64(&p);
         swap_buf(w, h, id, gen, frame);

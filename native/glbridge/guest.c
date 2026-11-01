@@ -1343,22 +1343,21 @@ static EGLBoolean bridge_swap(struct ts *T, struct esurf *s) {
         if (s->buf && ((uint32_t)s->w != w || (uint32_t)s->h != h)) { begin(T, OP_SURF_SIZE, 8, 8); put32(T, (uint32_t)s->w); put32(T, (uint32_t)s->h); }
         return 1;
     }
-    if (s->tmp_n < need) { free(s->tmp); s->tmp = malloc(need); s->tmp_n = s->tmp ? need : 0; }
-    begin(T, OP_SWAP, 8, 8); put32(T, w); put32(T, h);
+    /* the host lays the frame out as the buffer is (format, top row first, stride): one copy here (OP_SWAP_FMT) */
+    uint32_t f = (uint32_t)b->format, stride = (uint32_t)b->stride, bpp = f == 4 ? 2 : 4;
+    if (f != 4) f = 1;   /* 8888 windows keep the byte order the old path gave them (a plain row copy) */
+    if (stride < w) stride = w;
+    size_t got = (size_t)stride * h * bpp;
+    begin(T, OP_SWAP_FMT, 16, 16); put32(T, w); put32(T, h); put32(T, f); put32(T, stride);
     rsync(T);
-    get(T, s->tmp, need);
-    uint8_t *va = s->tmp ? buf_lock(b, 1) : 0;
-    if (va) {
-        if (b->format == 4) {       /* RGB_565 */
-            for (uint32_t y = 0; y < h; y++) {
-                const uint8_t *src = s->tmp + (size_t)(h - 1 - y) * w * 4;
-                uint16_t *dst = (uint16_t *)(va + (size_t)y * (uint32_t)b->stride * 2);
-                for (uint32_t x = 0; x < w; x++, src += 4) dst[x] = (uint16_t)((src[0] >> 3) << 11 | (src[1] >> 2) << 5 | src[2] >> 3);
-            }
-        } else for (uint32_t y = 0; y < h; y++)
-            memcpy(va + (size_t)y * (uint32_t)b->stride * 4, s->tmp + (size_t)(h - 1 - y) * w * 4, (size_t)w * 4);
-        buf_unlock(b);
+    uint8_t *va = buf_lock(b, 1);
+    if (va) { get(T, va, got); buf_unlock(b); }
+    else {
+        if (s->tmp_n < got) { free(s->tmp); s->tmp = malloc(got); s->tmp_n = s->tmp ? (uint32_t)got : 0; }
+        if (s->tmp) get(T, s->tmp, got);
+        else { uint8_t junk[4096]; for (size_t o = 0; o < got; o += sizeof junk) get(T, junk, got - o < sizeof junk ? got - o : sizeof junk); }
     }
+    (void)need;
     s->buf = 0;
     win_queue(s->win, b);
     win_dequeue(s);
