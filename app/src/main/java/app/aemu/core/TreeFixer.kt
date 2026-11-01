@@ -1223,6 +1223,8 @@ class TreeFixer(
         }
     }
 
+    private val SW_SPLIT = listOf("libEGL_android.so", "libGLESv1_CM_android.so", "libGLESv2_android.so")
+
     /** Направляет загрузчик EGL прошивки на GL-мост (или на программный растеризатор). */
     private fun eglConfig(gpu: Boolean) {
         val dir = File(root, "system/lib/egl").apply { mkdirs() }
@@ -1252,7 +1254,12 @@ class TreeFixer(
                     // armv7) on those names; it stands in front of the shim, which keeps the compositor and hwui
                     val open = openGl32()
                     val asset = if (open) OPEN_GL else "engines/kk/libGLES_split.so"
+                    // with ro.kernel.qemu=1 and the GLES flag 0 (32-bit programs read it so) 4.x libEGL takes the "android"
+                    // tag; Loader.cpp tries libGLES_<tag>.so and then libEGL_/libGLESv1_CM_/libGLESv2_<tag>.so, and
+                    // Samsung 4.3's loader (GT-I9300) only the split form (strace: access libEGL_android.so, nothing else)
+                    // -> no driver, eglGetDisplay EGL_BAD_PARAMETER, SurfaceFlinger aborts
                     val all = names.filter { !(own && it == "libGLES_android.so") } +
+                        (if (own) emptyList() else SW_SPLIT) +
                         (if (img.api >= 24) listOf("libGLES_emulation.so") else emptyList())
                     runCatching {
                         for (n in all) installAsset(asset, File(dir, n))
@@ -1264,7 +1271,7 @@ class TreeFixer(
                     cfg.writeText("0 0 android\n0 1 aemu\n")
                 } else {
                     // программная отрисовка: убираем все наши имена, иначе загрузчик 4.4 всё равно найдёт libGLES.so
-                    for (n in names) if (n != "libGLES_android.so") File(dir, n).delete()
+                    for (n in names + SW_SPLIT) if (n != "libGLES_android.so") File(dir, n).delete()
                     if (swOff.isFile) { sw.delete(); swOff.renameTo(sw) }
                     cfg.writeText("0 0 android\n")
                 }
