@@ -492,7 +492,9 @@ class Importer(
             val e: TarArchiveEntry = tar.nextEntry ?: break
             var n = e.name.removePrefix("./").trimStart('/')
             if (n.isEmpty()) continue
-            val base = n.substringAfterLast('/')
+            // Odin packages of 2011-2012 (GT-P7310 UELPB) hold each partition as "<name>.img.md5": the image with an
+            // md5 line appended (Odin checks it); the file systems and the boot header give their own sizes, the tail is ignored
+            val base = n.substringAfterLast('/').let { if (it.count { c -> c == '.' } >= 2) it.replace(Regex("(?i)\\.md5$"), "") else it }
             // дерево rootfs целиком (system/, data/, dev/, …)
             // Odin tars of 2009-2010 Samsungs (GT-I7500) carry raw partition dumps named without an extension
             // ("system", "kernel", "recovery" as regular files); in a rootfs tree "system" is a directory

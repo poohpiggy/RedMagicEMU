@@ -337,6 +337,10 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         }
         overrides["ro.sf.lcd_density"] = s.density.toString()
         overrides["qemu.sf.lcd_density"] = s.density.toString()
+        // ro.sf.hwrotation describes how the board's panel is mounted (SurfaceFlinger/DisplayHardware 4.x turns every
+        // frame by it: Samsung tablets ship a portrait 800x1280 panel with 90). The emulated panel is mounted as the
+        // screen is set up, so it is 0, just as the density above is the emulated panel's own.
+        overrides["ro.sf.hwrotation"] = "0"
         // MIUI 10 forces the density of the phone's own panel from this one (440 on a 540-pixel screen)
         if (listOf("system/build.prop", "vendor/build.prop").any { runCatching { File(paths.root, it).readText() }.getOrDefault("").contains("persist.miui.density_v2") }) overrides["persist.miui.density_v2"] = s.density.toString()
         overrides["ro.aemu.host"] = if (engine == Engine.N64) "native" else "qemu-user"

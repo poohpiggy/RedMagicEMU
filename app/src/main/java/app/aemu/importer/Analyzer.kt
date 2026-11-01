@@ -102,6 +102,11 @@ class Analyzer(private val ctx: Context, private val paths: VmPaths, private val
             // 1.5-3.2: 32-bit firmwares run on the open engine (open32) only
             api < 14 && !abi.startsWith("arm64") -> VmSettings(width = 480, height = 800, density = 240, fbHz = 60, touchHz = 60, open32 = true)
             engine == Engine.GB || api < 14 -> VmSettings(width = 480, height = 800, density = 240, fbHz = 60, touchHz = 60)
+            // a tablet-only build (ro.build.characteristics=tablet: the device's PRODUCT_CHARACTERISTICS, aapt keeps
+            // only the tablet resources) may lack phone layouts: Samsung GT-P7310 4.0.4 SystemUI dies on "invalid status
+            // bar icon slot" and Launcher2 on a missing resource at sw360dp; it gets the WXGA tablet screen as 3.x does
+            all["ro.build.characteristics"]?.split(',')?.contains("tablet") == true && all["ro.sf.lcd_density"] == null ->
+                VmSettings(width = 1280, height = 800, density = 160)
             // 540×960 — лучший баланс скорости и чёткости под эмуляцией; поменять можно в настройках
             density <= 160 -> VmSettings(width = 480, height = 800, density = 240)
             // a firmware made for a QHD panel (560 dpi and up) may have no layout that fits an hdpi screen: the Galaxy
@@ -112,6 +117,10 @@ class Analyzer(private val ctx: Context, private val paths: VmPaths, private val
             // draw nothing at 240; its phones are xxhdpi, so it gets the phone's own screen
             skin.startsWith("MIUI") && api >= 21 -> VmSettings(width = 1080, height = 1920, density = 480)
             else -> VmSettings(width = 540, height = 960, density = 240)
+        }.let {
+            // every 32-bit firmware (0.9-7.1) runs on the open engine since 30.10 (ed24708: 4.3-4.4 moved off KK);
+            // the branches above set it for API < 14 only, so a new 4.x-7.x import landed on the closed KK engine
+            if (abi.startsWith("arm64") || abi.startsWith("x86") || abi.startsWith("mips")) it else it.copy(open32 = true)
         }
 
         writePropsTemplate(deflt, build, api, engine, rc.setprops)
