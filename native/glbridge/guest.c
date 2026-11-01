@@ -135,6 +135,7 @@ static inline uint64_t get64v(struct ts *T) { uint64_t v = 0; rd_all(T, &v, 8); 
 struct ectx {
     int bridged, version, current;
     void *ss;               /* SwiftShader's context */
+    void *g1;               /* a GLES 1 context of the 1.x driver behind (g1_up) */
     uint32_t host;          /* the host's context */
     void *dpy, *cfg;
     struct gstate g;
@@ -959,7 +960,18 @@ static __thread EGLint t_err;
 
 FWD(EGLDisplay, eglGetDisplay, (void *native), (native))
 FWD(EGLBoolean, eglInitialize, (EGLDisplay d, EGLint *major, EGLint *minor), (d, major, minor))
-FWD(EGLBoolean, eglTerminate, (EGLDisplay d), (d))
+/* The 32-bit engine's own bridge behind (glsplit -> libGLES_bridge -> glserverd) does not come back from a terminate:
+ * its eglTerminate jumps through a freed table (2.2 GLSurfaceView: every GL activity that closes terminates the display,
+ * SIGSEGV at pc 0xfffffffe in its GLThread), and a display it gave up is not served again. Its display is one per
+ * process and stays initialized for the process: a terminate here ends nothing the program still sees - its contexts
+ * and surfaces are destroyed before it, as GLSurfaceView and every EGL client do. */
+EXPORT EGLBoolean eglTerminate(EGLDisplay d) {
+    static EGLBoolean (*f)(EGLDisplay);
+    if (!SS.up) ss_load();
+    if (SS.egl && SS.egl == SS.v1) { LOG("eglTerminate: the display stays"); return 1; }     /* the one-library bridge of the 32-bit engine */
+    if (!f) f = sse("eglTerminate");
+    return f ? f(d) : 0;
+}
 FWD(EGLBoolean, eglGetConfigs, (EGLDisplay d, EGLConfig *c, EGLint size, EGLint *n), (d, c, size, n))
 FWD(EGLBoolean, eglChooseConfig, (EGLDisplay d, const EGLint *a, EGLConfig *c, EGLint size, EGLint *n), (d, a, c, size, n))
 FWD(EGLBoolean, eglGetConfigAttrib, (EGLDisplay d, EGLConfig c, EGLint a, EGLint *v), (d, c, a, v))
@@ -999,11 +1011,13 @@ struct esurf {
     struct ANativeWindow *win;
     struct ANativeWindowBuffer *buf;    /* dequeued for the frame being drawn */
     void *ss; int ss_tried;
+    void *g1s; struct g1win *g1w;       /* the 1.x driver's surface for it, and the window it draws into */
     uint32_t key;
     EGLint attribs[32];
     uint8_t *tmp; uint32_t tmp_n;
 };
 static volatile uint32_t g_keys;
+static void g1_surf_free(struct esurf *s);
 
 /* (bionic has getprogname from 5.0; before it: the translator shows the guest's own argv in /proc/self/cmdline) */
 /* (looked up, not a weak import: the 2.1 linker resolves an undefined weak symbol to the library's own empty
@@ -1035,7 +1049,14 @@ static int policy(int version) {
         process = strstr(c, "bootanim") || (strstr(c, "surfaceflinger") && mode < 3) ? 2 : 1;
         LOG("program %s: %s", c, process == 2 ? "SwiftShader only" : "GPU contexts allowed");
     }
-    if (!mode || version < 2 || process == 2) return 0;
+    (void)version;
+    if (!mode || process == 2) return 0;
+    /* (up to 2.3 the compositor is a thread of system_server: it stays where it is, as the surfaceflinger program) */
+    if (mode < 3) {
+        char t[17] = "";
+        prctl(PR_GET_NAME, t);
+        if (!strcmp(t, "SurfaceFlinger")) return 0;
+    }
     if (mode >= 2) return 1;
     /* the window toolkit and Chromium hand textures to each other, and their drawing is light: left where it was */
     static const char *const soft[] = { "RenderThread", "hwuiTask", "GrallocUpload", "Chrome_", "CrGpu", "Compositor", "GpuThread", "Viz" };
@@ -1119,11 +1140,12 @@ EXPORT EGLSurface eglCreatePixmapSurface(EGLDisplay d, EGLConfig c, void *pixmap
 /* Before 4.2 (API 17) a window has only the first set of buffer calls: no fences, and lockBuffer between dequeue and
  * drawing (2.3 android_native_window_t, 4.0-4.1 ANativeWindow end at cancelBuffer). The fenced ones lie past the end
  * of their struct: GLES 2 windows of 2.3 stayed black. (system/core/include/system/window.h of each release) */
-static int win_old(void) {
+static int sdk(void) {
     static int v = -1;
-    if (v < 0) { char b[92] = ""; __system_property_get("ro.build.version.sdk", b); v = atoi(b) > 0 && atoi(b) < 17; }
+    if (v < 0) { char b[92] = ""; __system_property_get("ro.build.version.sdk", b); v = atoi(b); }
     return v;
 }
+static int win_old(void) { return sdk() > 0 && sdk() < 17; }
 static int win_deq(struct ANativeWindow *w, struct ANativeWindowBuffer **b, int *fence) {
     if (!win_old()) return w->dequeueBuffer(w, b, fence);
     *fence = -1;
@@ -1135,6 +1157,8 @@ static int win_queue(struct ANativeWindow *w, struct ANativeWindowBuffer *b) {
     return win_old() ? w->queueBuffer_DEPRECATED(w, b) : w->queueBuffer(w, b, -1);
 }
 static int win_cancel(struct ANativeWindow *w, struct ANativeWindowBuffer *b) {
+    /* (2.2 and before have no cancelBuffer: the struct ends at perform and reserved_proc[3], not zeroed) */
+    if (sdk() > 0 && sdk() < 9) return w->queueBuffer_DEPRECATED(w, b);
     return win_old() ? (w->cancelBuffer_DEPRECATED ? w->cancelBuffer_DEPRECATED(w, b) : w->queueBuffer_DEPRECATED(w, b)) : w->cancelBuffer(w, b, -1);
 }
 /* SwiftShader's surface for ours: made when a SwiftShader context first draws to it */
@@ -1154,6 +1178,7 @@ static void *ss_surface(struct esurf *s) {
     return s->ss;
 }
 static void surf_free(struct esurf *s) {
+    g1_surf_free(s);
     if (s->ss) { SSF(EGLBoolean, DestroySurface, (EGLDisplay, EGLSurface)); if (DestroySurface) DestroySurface(s->dpy, s->ss); }
     if (s->win) {
         if (s->buf) win_cancel(s->win, s->buf);
@@ -1204,6 +1229,113 @@ EXPORT EGLBoolean eglBindTexImage(EGLDisplay d, EGLSurface s, EGLint b) { (void)
 EXPORT EGLBoolean eglReleaseTexImage(EGLDisplay d, EGLSurface s, EGLint b) { (void)d; (void)s; (void)b; t_err = EGL_BAD_SURFACE; return 0; }
 EXPORT EGLBoolean eglCopyBuffers(EGLDisplay d, EGLSurface s, void *target) { (void)d; (void)s; (void)target; t_err = EGL_BAD_SURFACE; return 0; }
 
+/* ---- GLES 1 contexts on the GPU ----
+ * The 1.x driver (guest1.c, installed as libGLES1_aemu.so next to this one) already carries GLES 1.1 to the host's
+ * GLES 1 contexts (host1.c); a GLES 1 context of a later program becomes one of its contexts. Its windows are 1.x
+ * egl_native_window_t (opengl/include/EGL/eglnatives.h: memory at base + offset, swapBuffers() flips): one stands
+ * here for the ANativeWindow, its memory a dequeued buffer, locked, and its swapBuffers() queues that buffer and
+ * dequeues the next. */
+struct egl_native_window_t {
+    uint32_t magic, version, ident;
+    int width, height, stride, format;
+    intptr_t offset;
+    uint32_t flags;
+    float xdpi, ydpi, fps;
+    intptr_t base;
+    int fd;
+    uint8_t memory_type, reserved_pad[3];
+    int reserved[8];
+    int vstride;
+    void (*incRef)(struct egl_native_window_t *);
+    void (*decRef)(struct egl_native_window_t *);
+    uint32_t (*swapBuffers)(struct egl_native_window_t *);
+    void (*reserved_proc_0)(void), (*reserved_proc_1)(void), (*reserved_proc_2)(void);
+};
+struct g1win { struct egl_native_window_t nw; struct esurf *s; uint8_t *va; };
+static struct {
+    int up; void *dpy, *cfg; void *t[N_FUNCS];
+    EGLContext (*CreateContext)(EGLDisplay, EGLConfig, EGLContext, const EGLint *);
+    EGLBoolean (*DestroyContext)(EGLDisplay, EGLContext);
+    EGLSurface (*CreateWindowSurface)(EGLDisplay, EGLConfig, void *, const EGLint *);
+    EGLSurface (*CreatePbufferSurface)(EGLDisplay, EGLConfig, const EGLint *);
+    EGLBoolean (*DestroySurface)(EGLDisplay, EGLSurface);
+    EGLBoolean (*MakeCurrent)(EGLDisplay, EGLSurface, EGLSurface, EGLContext);
+    EGLBoolean (*SwapBuffers)(EGLDisplay, EGLSurface);
+} G1;
+static int g1_up(void) {
+    pthread_mutex_lock(&g_lock);
+    if (!G1.up) {
+        G1.up = -1;
+        void *h = ss_open("libGLES1_aemu.so");
+        EGLDisplay (*GetDisplay)(void *) = h ? (EGLDisplay (*)(void *))dlsym(h, "eglGetDisplay") : 0;
+        EGLBoolean (*Initialize)(EGLDisplay, EGLint *, EGLint *) = h ? (EGLBoolean (*)(EGLDisplay, EGLint *, EGLint *))dlsym(h, "eglInitialize") : 0;
+        EGLBoolean (*Choose)(EGLDisplay, const EGLint *, EGLConfig *, EGLint, EGLint *) =
+            h ? (EGLBoolean (*)(EGLDisplay, const EGLint *, EGLConfig *, EGLint, EGLint *))dlsym(h, "eglChooseConfig") : 0;
+#define G1F(n) G1.n = h ? (__typeof__(G1.n))dlsym(h, "egl" #n) : 0
+        G1F(CreateContext); G1F(DestroyContext); G1F(CreateWindowSurface); G1F(CreatePbufferSurface);
+        G1F(DestroySurface); G1F(MakeCurrent); G1F(SwapBuffers);
+#undef G1F
+        EGLint n = 0;
+        if (GetDisplay && Initialize && Choose && G1.CreateContext && G1.DestroyContext && G1.CreateWindowSurface &&
+            G1.CreatePbufferSurface && G1.DestroySurface && G1.MakeCurrent && G1.SwapBuffers &&
+            (G1.dpy = GetDisplay(0)) && Initialize(G1.dpy, 0, 0) && Choose(G1.dpy, 0, &G1.cfg, 1, &n) && n > 0) {
+            for (int i = 0; i < N_FUNCS; i++) { void *f = dlsym(h, kNames[i]); G1.t[i] = f ? f : (void *)nothing; }
+            G1.up = 1;
+        } else LOG("no GLES 1 driver for the GPU (libGLES1_aemu.so): %s", h ? "incomplete" : dlerror());
+    }
+    pthread_mutex_unlock(&g_lock);
+    return G1.up > 0;
+}
+static void g1_noref(struct egl_native_window_t *n) { (void)n; }
+/* the window's next buffer as the 1.x window's memory (none: a window of no size, nothing is copied) */
+static void g1_attach(struct g1win *gw) {
+    struct esurf *s = gw->s;
+    win_dequeue(s);
+    struct ANativeWindowBuffer *b = s->buf;
+    gw->va = b ? buf_lock(b, 1) : 0;
+    struct egl_native_window_t *n = &gw->nw;
+    n->width = gw->va ? b->width : 0; n->height = gw->va ? b->height : 0;
+    n->stride = b ? b->stride : 0; n->format = b ? b->format : 1;
+    n->base = (intptr_t)gw->va; n->offset = 0;
+}
+static uint32_t g1_flip(struct egl_native_window_t *n) {
+    struct g1win *gw = (struct g1win *)n;
+    struct esurf *s = gw->s;
+    if (s->buf) {
+        struct ANativeWindowBuffer *b = s->buf;
+        if (gw->va) buf_unlock(b);
+        gw->va = 0; s->buf = 0;
+        win_queue(s->win, b);
+    }
+    g1_attach(gw);
+    return 0;
+}
+static void *g1_surface(struct esurf *s) {
+    if (!s || s->g1s) return s ? s->g1s : 0;
+    if (s->kind == S_WINDOW) {
+        if (s->ss) return 0;
+        struct g1win *gw = calloc(1, sizeof(*gw));
+        if (!gw) return 0;
+        gw->s = s;
+        gw->nw.magic = 0x600913; gw->nw.version = sizeof(gw->nw);
+        gw->nw.xdpi = gw->nw.ydpi = 160; gw->nw.fps = 60;
+        gw->nw.incRef = gw->nw.decRef = g1_noref; gw->nw.swapBuffers = g1_flip;
+        g1_attach(gw);
+        s->g1s = G1.CreateWindowSurface(G1.dpy, G1.cfg, &gw->nw, 0);
+        if (s->g1s) s->g1w = gw;
+        else { if (gw->va) buf_unlock(s->buf); free(gw); }
+    } else {
+        EGLint a[] = { EGL_WIDTH, s->w, EGL_HEIGHT, s->h, EGL_NONE };
+        s->g1s = G1.CreatePbufferSurface(G1.dpy, G1.cfg, a);
+    }
+    return s->g1s;
+}
+static void g1_surf_free(struct esurf *s) {
+    if (s->g1s) G1.DestroySurface(G1.dpy, s->g1s);
+    if (s->g1w) { if (s->g1w->va && s->buf) buf_unlock(s->buf); free(s->g1w); }
+    s->g1s = 0; s->g1w = 0;
+}
+
 /* ---- contexts ---- */
 EXPORT EGLContext eglCreateContext(EGLDisplay d, EGLConfig cfg, EGLContext share, const EGLint *attribs) {
     struct ectx *sh = share, *c = calloc(1, sizeof(*c));
@@ -1211,7 +1343,17 @@ EXPORT EGLContext eglCreateContext(EGLDisplay d, EGLConfig cfg, EGLContext share
     c->version = attr_of(attribs, 0x3098 /* EGL_CONTEXT_CLIENT_VERSION */, 1);
     c->dpy = d; c->cfg = cfg;
     c->g.p_align = c->g.u_align = 4;
-    if (sh ? sh->bridged : policy(c->version)) {
+    int gpu = sh ? sh->bridged || sh->g1 : policy(c->version);
+    if (gpu && c->version < 2) {
+        if (g1_up() && (c->g1 = G1.CreateContext(G1.dpy, G1.cfg, sh ? sh->g1 : 0, 0))) {
+            char name[17] = "";
+            prctl(PR_GET_NAME, name);
+            LOG("a GLES 1 context on the phone's GPU, thread %s", name);
+            return c;
+        }
+        if (sh) { free(c); t_err = EGL_BAD_ALLOC; return 0; }
+        LOG("no GLES 1 context from the 1.x driver: SwiftShader");
+    } else if (gpu) {
         struct ts *T = ts_get();
         if (T) {
             begin(T, OP_CTX_CREATE, 8, 8); put32(T, sh ? sh->host : 0); put32(T, (uint32_t)c->version);
@@ -1240,7 +1382,8 @@ EXPORT EGLContext eglCreateContext(EGLDisplay d, EGLConfig cfg, EGLContext share
     return c;
 }
 static void ctx_free(struct ectx *c) {
-    if (c->bridged) {
+    if (c->g1) G1.DestroyContext(G1.dpy, c->g1);
+    else if (c->bridged) {
         struct ts *T = ts_get();
         if (T) { begin(T, OP_CTX_DESTROY, 4, 4); put32(T, c->host); flush(T); }
         if (c->g.root == c->host) sh_drop_all(c->host);
@@ -1262,7 +1405,7 @@ EXPORT EGLBoolean eglDestroyContext(EGLDisplay d, EGLContext context) {
 EXPORT EGLBoolean eglQueryContext(EGLDisplay d, EGLContext context, EGLint attr, EGLint *value) {
     struct ectx *c = context;
     if (!c || !value) { t_err = EGL_BAD_CONTEXT; return 0; }
-    if (!c->bridged) { SSF(EGLBoolean, QueryContext, (EGLDisplay, EGLContext, EGLint, EGLint *)); return QueryContext(d, c->ss, attr, value); }
+    if (!c->bridged && !c->g1) { SSF(EGLBoolean, QueryContext, (EGLDisplay, EGLContext, EGLint, EGLint *)); return QueryContext(d, c->ss, attr, value); }
     switch (attr) {
     case 0x3098: *value = c->version; return 1;
     case 0x3097: *value = 0x30A0; return 1;     /* EGL_CONTEXT_CLIENT_TYPE: EGL_OPENGL_ES_API */
@@ -1296,14 +1439,43 @@ static void bridge_release(void) {
     T->draw = T->read = 0;
     if (--c->current == 0x10000) ctx_free(c);
 }
+static __thread struct ectx *t_g1_ctx;     /* the GLES 1 context of the 1.x driver current on this thread */
+static __thread struct esurf *t_g1_draw, *t_g1_read;
+static void g1_drop(struct ectx *c, struct esurf *d, struct esurf *r) {
+    surf_unref(d); if (r != d) surf_unref(r);
+    if (c && --c->current == 0x10000) ctx_free(c);
+}
+static void g1_release(void) {
+    if (!t_g1_ctx) return;
+    G1.MakeCurrent(G1.dpy, 0, 0, 0);
+    struct ectx *c = t_g1_ctx; struct esurf *d = t_g1_draw, *r = t_g1_read;
+    t_g1_ctx = 0; t_g1_draw = t_g1_read = 0;
+    g1_drop(c, d, r);
+}
+static EGLBoolean g1_make_current(EGLDisplay d, struct esurf *sd, struct esurf *sr, struct ectx *c) {
+    bridge_release(); ss_release(d);
+    if (t_g1_ctx == c && t_g1_draw == sd && t_g1_read == sr) return 1;
+    void *a = g1_surface(sd), *b = sr == sd ? a : g1_surface(sr);
+    if ((sd && !a) || (sr && !b)) { t_err = EGL_BAD_SURFACE; LOG("no 1.x surface for a GLES 1 context"); return 0; }
+    if (!G1.MakeCurrent(G1.dpy, a, b, c->g1)) { t_err = EGL_BAD_CONTEXT; return 0; }
+    c->current++; if (sd) sd->current++; if (sr && sr != sd) sr->current++;
+    struct ectx *old = t_g1_ctx; struct esurf *od = t_g1_draw, *orr = t_g1_read;
+    t_g1_ctx = c; t_g1_draw = sd; t_g1_read = sr;
+    if (old) g1_drop(old, od, orr);
+    t_tbl = G1.t;
+    return 1;
+}
+
 EXPORT EGLBoolean eglMakeCurrent(EGLDisplay d, EGLSurface draw, EGLSurface read, EGLContext context) {
     struct ectx *c = context;
     struct esurf *sd = draw, *sr = read;
     if (!c) {
-        bridge_release(); ss_release(d);
+        bridge_release(); ss_release(d); g1_release();
         t_tbl = 0;
         return 1;
     }
+    if (c->g1) return g1_make_current(d, sd, sr, c);
+    g1_release();
     if (c->bridged) {
         struct ts *T = ts_get();
         if (!T) { t_err = EGL_BAD_CONTEXT; return 0; }
@@ -1347,8 +1519,9 @@ EXPORT EGLBoolean eglMakeCurrent(EGLDisplay d, EGLSurface draw, EGLSurface read,
     t_tbl = c->version == 1 && SS.v1 ? SS.t1 : SS.t2;
     return 1;
 }
-EXPORT EGLContext eglGetCurrentContext(void) { return t_ts && t_ts->ctx ? (void *)t_ts->ctx : (void *)t_ss_ctx; }
+EXPORT EGLContext eglGetCurrentContext(void) { return t_g1_ctx ? (void *)t_g1_ctx : t_ts && t_ts->ctx ? (void *)t_ts->ctx : (void *)t_ss_ctx; }
 EXPORT EGLSurface eglGetCurrentSurface(EGLint which) {
+    if (t_g1_ctx) return which == 0x305A ? t_g1_read : t_g1_draw;
     if (t_ts && t_ts->ctx) return which == 0x305A ? t_ts->read : t_ts->draw;
     return which == 0x305A ? t_ss_read : t_ss_draw;
 }
@@ -1362,7 +1535,7 @@ EXPORT EGLint eglGetError(void) {
     return GetError ? GetError() : EGL_SUCCESS;
 }
 EXPORT EGLBoolean eglReleaseThread(void) {
-    bridge_release();
+    bridge_release(); g1_release();
     if (t_ss_ctx) ss_release(t_ss_ctx->dpy);
     t_tbl = 0;
     SSF(EGLBoolean, ReleaseThread, (void));
@@ -1370,6 +1543,7 @@ EXPORT EGLBoolean eglReleaseThread(void) {
 }
 EXPORT EGLBoolean eglWaitGL(void) {
     if (t_ts && t_ts->ctx) { e_glFinish(); return 1; }
+    if (t_g1_ctx) { ((void (*)(void))G1.t[IDX_glFinish])(); return 1; }
     SSF(EGLBoolean, WaitGL, (void));
     return WaitGL ? WaitGL() : 1;
 }
@@ -1423,6 +1597,11 @@ static EGLBoolean bridge_swap(struct ts *T, struct esurf *s) {
  * not wait for the display) */
 EXPORT EGLBoolean eglSwapInterval(EGLDisplay d, EGLint interval) {
     struct ts *T = t_ts;
+    if (t_g1_ctx) {
+        struct esurf *s = t_g1_draw;
+        if (s && s->kind == S_WINDOW && s->win->setSwapInterval) s->win->setSwapInterval(s->win, interval < 0 ? 0 : interval);
+        return 1;
+    }
     if (T && T->ctx) {
         struct esurf *s = T->draw;
         if (s && s->kind == S_WINDOW && s->win->setSwapInterval) s->win->setSwapInterval(s->win, interval < 0 ? 0 : interval);
@@ -1435,6 +1614,7 @@ EXPORT EGLBoolean eglSwapBuffers(EGLDisplay d, EGLSurface surface) {
     struct esurf *s = surface;
     if (!s) { t_err = EGL_BAD_SURFACE; return 0; }
     if (t_ts && t_ts->ctx && t_ts->draw == s) return bridge_swap(t_ts, s);
+    if (s->g1s) return t_g1_ctx && t_g1_draw == s ? G1.SwapBuffers(G1.dpy, s->g1s) : 1;
     if (!s->ss) return 1;
     SSF(EGLBoolean, SwapBuffers, (EGLDisplay, EGLSurface));
     return SwapBuffers(d, s->ss);

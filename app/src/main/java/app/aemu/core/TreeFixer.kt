@@ -1265,13 +1265,16 @@ class TreeFixer(
                         for (n in all) installAsset(asset, File(dir, n))
                         val shim = File(dir, "libGLES_split.so")
                         if (open) installAsset("engines/kk/libGLES_split.so", shim) else shim.delete()
+                        // GLES 1 contexts of the open bridge go to the GPU through the 1.x driver (guest1.c)
+                        val gl1 = File(dir, "libGLES1_aemu.so")
+                        if (open) installAsset("engines/common/libhgl.aemu.so", gl1) else gl1.delete()
                     }.onFailure { log("GL: shim failed to install: ${it.message}") }
                     if (open) log("GL: open bridge in front of the 4.4 engine's one (glopen)")
                     // часть загрузчиков (Samsung 4.3) берут последнюю строку, остальные — строку с impl=1
                     cfg.writeText("0 0 android\n0 1 aemu\n")
                 } else {
                     // программная отрисовка: убираем все наши имена, иначе загрузчик 4.4 всё равно найдёт libGLES.so
-                    for (n in names + SW_SPLIT) if (n != "libGLES_android.so") File(dir, n).delete()
+                    for (n in names + SW_SPLIT + "libGLES1_aemu.so") if (n != "libGLES_android.so") File(dir, n).delete()
                     if (swOff.isFile) { sw.delete(); swOff.renameTo(sw) }
                     cfg.writeText("0 0 android\n")
                 }
