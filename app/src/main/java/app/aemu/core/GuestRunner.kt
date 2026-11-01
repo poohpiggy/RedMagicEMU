@@ -110,8 +110,13 @@ class GuestRunner(
             e["AEMU64_VNDBINDER"] = paths.vndbinderSock.absolutePath
         }
         e["AEMU64_INPUT"] = paths.inputSock.absolutePath
-        // the framebuffer's refresh: fb0 PAN_DISPLAY waits for it (run64.c)
-        e["AEMU64_FBHZ"] = img.settings.fbHz.toString()
+        // the framebuffer's refresh: a page flip of fb0 waits for it (run64.c fb_vsync). The default (60) is the
+        // phone's own display rate, so a 90/120 Hz screen is not held to 60
+        val hz = if (img.settings.fbHz != 60) img.settings.fbHz else runCatching {
+            (paths.ctx.getSystemService(android.content.Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager)
+                .getDisplay(android.view.Display.DEFAULT_DISPLAY).supportedModes.maxOf { it.refreshRate }.toInt()
+        }.getOrDefault(60).coerceIn(30, 240)
+        e["AEMU64_FBHZ"] = hz.toString()
         // TlsBridge: kernel 23 sends connects to port 443 there (run64.c tls_connect)
         if (net.https443 > 0) e["AEMU64_TLS"] = "${net.https443}:" + java.io.File(paths.bin, "tls.sock").absolutePath
         if (img.abi != "arm64-v8a") e["AEMU64_B32"] = "1"     // a whole 32-bit firmware: binder protocol 7
