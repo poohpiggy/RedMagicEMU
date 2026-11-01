@@ -1435,6 +1435,7 @@ class VmActivity : ComponentActivity() {
         const val EXTRA_ID = "id"
         const val EXTRA_RECOVERY = "recovery"
         fun start(ctx: Context, id: String, recovery: Boolean = false) {
+            app.aemu.AppPrefs.setLastRun(ctx, id, System.currentTimeMillis())
             ctx.startActivity(Intent(ctx, VmActivity::class.java).putExtra(EXTRA_ID, id).putExtra(EXTRA_RECOVERY, recovery)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         }

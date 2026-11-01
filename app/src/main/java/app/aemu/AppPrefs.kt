@@ -40,6 +40,18 @@ object AppPrefs {
 
     fun prefs(ctx: Context) = sp(ctx)
 
+    /** order of the machines on the home screen: one of SORT_* (remembered) */
+    const val SORT_VERSION = 0
+    const val SORT_NAME = 1
+    const val SORT_SKIN = 2
+    const val SORT_LAST_RUN = 3
+    const val SORT_SIZE = 4
+    fun sortMode(ctx: Context): Int = sp(ctx).getInt("sort_mode", SORT_VERSION)
+    fun setSortMode(ctx: Context, v: Int) = sp(ctx).edit().putInt("sort_mode", v).apply()
+    /** when a machine was last started (0 = never since this was kept) */
+    fun lastRun(ctx: Context, id: String): Long = sp(ctx).getLong("last_run_$id", 0L)
+    fun setLastRun(ctx: Context, id: String, v: Long) = sp(ctx).edit().putLong("last_run_$id", v).apply()
+
     fun language(ctx: Context): String = sp(ctx).getString("lang", "") ?: ""
     fun setLanguage(ctx: Context, tag: String) = sp(ctx).edit().putString("lang", tag).apply()
 

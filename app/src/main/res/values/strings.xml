@@ -231,4 +231,10 @@
     <string name="vs_disk">Internal storage</string>
     <string name="m_apps_search">Search apps</string>
     <string name="powered_off">Guest powered off</string>
+    <string name="sort_by">Sort: %1$s</string>
+    <string name="sort_version">Android version</string>
+    <string name="sort_name">Name</string>
+    <string name="sort_skin">Skin</string>
+    <string name="sort_last_run">Last started</string>
+    <string name="sort_size">Size</string>
 </resources>

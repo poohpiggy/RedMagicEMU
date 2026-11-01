@@ -47,6 +47,8 @@ import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.SwapVert
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
@@ -67,6 +69,8 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -155,9 +159,52 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/** "4.0.4" < "4.1" < "10": numeric parts compared one by one */
+private fun releaseKey(r: String): List<Int> = r.split('.', '-', ' ').map { p -> p.takeWhile { it.isDigit() }.toIntOrNull() ?: 0 }
+private val releaseOrder = Comparator<GuestImage> { a, b ->
+    if (a.api != b.api) return@Comparator a.api.compareTo(b.api)
+    val x = releaseKey(a.release); val y = releaseKey(b.release)
+    for (i in 0 until maxOf(x.size, y.size)) { val c = x.getOrElse(i) { 0 }.compareTo(y.getOrElse(i) { 0 }); if (c != 0) return@Comparator c }
+    0
+}
+
+fun sortImages(ctx: Context, list: List<GuestImage>, mode: Int): List<GuestImage> {
+    val byName = compareBy<GuestImage, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
+    return when (mode) {
+        app.aemu.AppPrefs.SORT_NAME -> list.sortedWith(byName)
+        app.aemu.AppPrefs.SORT_SKIN -> list.sortedWith(compareBy<GuestImage, String>(String.CASE_INSENSITIVE_ORDER) { it.skin }.then(releaseOrder).then(byName))
+        app.aemu.AppPrefs.SORT_LAST_RUN -> list.sortedWith(compareByDescending<GuestImage> { app.aemu.AppPrefs.lastRun(ctx, it.id).takeIf { t -> t > 0 } ?: it.createdAt }.then(byName))
+        app.aemu.AppPrefs.SORT_SIZE -> list.sortedWith(compareByDescending<GuestImage> { it.sizeBytes }.then(byName))
+        else -> list.sortedWith(releaseOrder.then(byName))
+    }
+}
+
+@Composable
+fun SortRow(mode: Int, onMode: (Int) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val labels = listOf(R.string.sort_version, R.string.sort_name, R.string.sort_skin, R.string.sort_last_run, R.string.sort_size)
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+        Box {
+            TextButton(onClick = { open = true }) {
+                Icon(Icons.Rounded.SwapVert, null)
+                Spacer(Modifier.width(6.dp))
+                Text(stringResource(R.string.sort_by, stringResource(labels[mode.coerceIn(0, labels.lastIndex)])))
+            }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                labels.forEachIndexed { i, l ->
+                    DropdownMenuItem(text = { Text(stringResource(l)) }, onClick = { open = false; onMode(i) },
+                        trailingIcon = { if (i == mode) Icon(Icons.Rounded.Check, null) })
+                }
+            }
+        }
+    }
+}
+
 @Composable
 fun Library(model: LibraryModel) {
-    val images by model.images.collectAsState()
+    val all by model.images.collectAsState()
+    var sortMode by remember { mutableStateOf(app.aemu.AppPrefs.sortMode(model.getApplication())) }
+    val images = remember(all, sortMode) { sortImages(model.getApplication(), all, sortMode) }
     val imp by model.import.collectAsState()
     val ctx = LocalContext.current
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { model.import(it) } }
@@ -239,6 +286,7 @@ fun Library(model: LibraryModel) {
                 }
             }
             if (images.isEmpty() && !imp.active) item(span = full) { EmptyState(onHelp = { help = true }) }
+            if (images.size > 1) item(span = full) { SortRow(sortMode) { m -> sortMode = m; app.aemu.AppPrefs.setSortMode(ctx, m) } }
             items(images.size, key = { images[it].id }) { i ->
                 val img = images[i]
                 MachineCard(

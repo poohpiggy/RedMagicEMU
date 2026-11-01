@@ -230,4 +230,10 @@
     <string name="vs_disk">Внутренняя память</string>
     <string name="m_apps_search">Поиск приложений</string>
     <string name="powered_off">Гость выключен</string>
+    <string name="sort_by">Сортировка: %1$s</string>
+    <string name="sort_version">Версия Android</string>
+    <string name="sort_name">Имя</string>
+    <string name="sort_skin">Оболочка</string>
+    <string name="sort_last_run">Последний запуск</string>
+    <string name="sort_size">Размер</string>
 </resources>
