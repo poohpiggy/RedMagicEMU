@@ -193,9 +193,9 @@ data class GuestImage(
     /** Движок с учётом выбора пользователя. */
     fun effective(): GuestImage = copy(engine = when {
         abi == "arm64-v8a" -> Engine.N64
-        settings.open32 && (api in 1..19 || api == 23 || api == 25) -> Engine.N64
-        settings.legacyEngine && api < 14 -> Engine.GB
-        else -> Engine.KK
+        // every 32-bit firmware runs on the open engine (open32: qemu + kernel 23), whatever an older import wrote in
+        // its settings: the closed engines (KK, GB) are not chosen any more
+        else -> Engine.N64
     })
 
     fun toJson(): JSONObject = JSONObject()

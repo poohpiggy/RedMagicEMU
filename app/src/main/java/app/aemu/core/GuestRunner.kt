@@ -110,6 +110,8 @@ class GuestRunner(
             e["AEMU64_VNDBINDER"] = paths.vndbinderSock.absolutePath
         }
         e["AEMU64_INPUT"] = paths.inputSock.absolutePath
+        // the framebuffer's refresh: fb0 PAN_DISPLAY waits for it (run64.c)
+        e["AEMU64_FBHZ"] = img.settings.fbHz.toString()
         // TlsBridge: kernel 23 sends connects to port 443 there (run64.c tls_connect)
         if (net.https443 > 0) e["AEMU64_TLS"] = "${net.https443}:" + java.io.File(paths.bin, "tls.sock").absolutePath
         if (img.abi != "arm64-v8a") e["AEMU64_B32"] = "1"     // a whole 32-bit firmware: binder protocol 7

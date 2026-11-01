@@ -432,6 +432,21 @@ static void fb_geom(void) {
     if (w && h) { g_fbw = w; g_fbh = h; }
 }
 
+static u32 g_fbhz;     /* AEMU64_FBHZ: the framebuffer's refresh (a page flip waits for it) */
+/* A framebuffer driver shows a new page at the next refresh and the flip returns then (fbmem.c fb_pan_display ->
+ * the driver's pan, which waits for vsync: msm_fb; goldfish's waits for its interrupt). Returning at once let a
+ * guest that counts frames run its animation as fast as qemu draws (M3/1.x boot animation). */
+static void fb_vsync(void) {
+    static long long next;
+    struct { long long s, ns; } now;
+    S2(113 /*clock_gettime*/, 1 /*MONOTONIC*/, &now);
+    long long t = now.s * 1000000000LL + now.ns, period = 1000000000LL / (g_fbhz ? g_fbhz : 60);
+    if (next < t - period) next = t;            // late (or the first frame): counted from now
+    next += period;
+    if (next <= t) return;
+    struct { long long s, ns; } at = { next / 1000000000LL, next % 1000000000LL };
+    while (S4(115 /*clock_nanosleep*/, 1, 1 /*TIMER_ABSTIME*/, &at, 0) == -4 /*EINTR*/) {}
+}
 static long fb_ioctl(int fd, u32 cmd, u64 arg) {
     if (!g_fbw) fb_geom();
     switch (cmd) {
@@ -462,10 +477,14 @@ static long fb_ioctl(int fd, u32 cmd, u64 arg) {
     case 0x4601: {
         struct kstat st;
         u32 line = g_fbw * (g_fb16 ? 2 : 4);
+        // (0.9-1.x and M3 flip pages by a new yoffset here, not by PAN_DISPLAY)
+        static u32 yoff = ~0u;
+        if (((u32 *)arg)[5] != yoff) { if (yoff != ~0u) fb_vsync(); yoff = ((u32 *)arg)[5]; }
         if (((u32 *)arg)[3] <= g_fbh) return 0;
         return S2(NR_fstat, fd, &st) == 0 && (u64)((u32 *)arg)[3] * line <= (u64)st.st_size ? 0 : -22 /* EINVAL */;
     }
-    case 0x4606: case 0x4611: return 0;                 // PAN_DISPLAY, BLANK
+    case 0x4606: fb_vsync(); return 0;                  // PAN_DISPLAY
+    case 0x4611: return 0;                              // BLANK
     }
     return -25; /* ENOTTY */
 }
@@ -657,6 +676,8 @@ static long do_exec(const char *path, char *const argv[], char *const envp[]) {
     if (g_b32) *a++ = "AEMU64_B32=1";
     static char e_tls[140];
     if (g_tlsport) { char *o = e_tls; memcpy(o, "AEMU64_TLS=", 11); o += 11; dec(&o, g_tlsport); *o++ = ':'; memcpy(o, g_tls, slen(g_tls) + 1); *a++ = e_tls; }
+    static char e_fbhz[24];
+    if (g_fbhz) { char *o = e_fbhz; memcpy(o, "AEMU64_FBHZ=", 12); o += 12; dec(&o, g_fbhz); *o = 0; *a++ = e_fbhz; }
     static char e_input[130];
     if (g_input[0]) { memcpy(e_input, "AEMU64_INPUT=", 13); memcpy(e_input + 13, g_input, slen(g_input) + 1); *a++ = e_input; }
     static char e_a32[540];
@@ -1607,6 +1628,7 @@ void aemu_main(u64 *sp) {
         u32 p = 0; while (*r >= '0' && *r <= '9') p = p * 10 + (u32)(*r++ - '0');
         if (*r == ':' && p && p < 65536) { g_tlsport = (u16)p; memcpy(g_tls, r + 1, slen(r + 1) + 1); }
     }
+    if ((r = env_get(envp, "AEMU64_FBHZ"))) { u32 v = 0; while (*r >= '0' && *r <= '9') v = v * 10 + (u32)(*r++ - '0'); if (v >= 10 && v <= 240) g_fbhz = v; }
     if ((r = env_get(envp, "AEMU64_SDCARD")) && slen(r) < sizeof g_sd) { g_sdlen = slen(r); memcpy(g_sd, r, g_sdlen + 1); }
     if ((r = env_get(envp, "AEMU64_QEMU")) && slen(r) < sizeof g_qemu) memcpy(g_qemu, r, slen(r) + 1);
     if (env_get(envp, "AEMU64_B32")) g_b32 = 1;
