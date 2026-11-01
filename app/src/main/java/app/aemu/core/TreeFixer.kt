@@ -64,7 +64,7 @@ class TreeFixer(
                     cls == "gralloc" || (cls == "audio" && variant == "primary.default") -> park(f)
                     cls == "audio" && (variant.startsWith("a2dp") || variant.startsWith("usb") || variant.startsWith("r_submix")) -> {}
                     cls in keepClasses && isDefault -> {}
-                    cls == "audio_policy" -> if (!isDefault) park(f)
+                    cls == "audio_policy" -> if (!isDefault && variant !in boardVariants()) park(f)
                     cls in parkClasses -> park(f)
                     !isDefault && cls !in keepClasses -> park(f)
                     !isDefault -> park(f)
@@ -165,6 +165,7 @@ class TreeFixer(
         frpPartition()
         parkQcomServices()
         swapMtkAudioHal()
+        restoreBoardAudioPolicy()
         eglConfig(img.settings.gpu)
         makeDataDirs()
         miuiSdkFiles()
@@ -2067,6 +2068,33 @@ class TreeFixer(
      * (FileNotFoundException), and what keeps its state there breaks: MIUI FindDevice answers its provider with null
      * and Mi Cloud (com.miui.cloudservice) crashes on the null cursor. A blank file of a real partition's size stands in.
      */
+    /**
+     * Up to 4.4 the audio policy is a HAL module (hardware/libhardware_legacy audio_policy_hal) and hw_get_module picks
+     * audio_policy.<variant>.so by ro.hardware, ro.product.board, ro.board.platform, ro.arch (hardware/libhardware/
+     * hardware.c variant_keys), default last. A vendor's policy is software only (routing and volume tables, no device
+     * access) and is the one its framework is built against: Samsung 4.0.4 Tegra (GT-P7310) sends stream types past
+     * AOSP's 11 (its audio_policy.tegra.so has getSituationVolume, its default.so stops at stream 10 and reads
+     * mStreams[11] past the array in volIndexToAmpl -> mediaserver SIGSEGV). So the board's own policy stays.
+     */
+    private fun boardVariants(): Set<String> {
+        if (img.api !in 1..19) return emptySet()
+        val keys = listOf("ro.hardware", "ro.product.board", "ro.board.platform", "ro.arch")
+        return listOf("default.prop", "system/build.prop").flatMap { n -> runCatching { File(root, n).readLines() }.getOrDefault(emptyList()) }
+            .mapNotNull { l -> val k = l.substringBefore('=').trim(); if (k in keys) l.substringAfter('=').trim().takeIf { it.isNotEmpty() } else null }
+            .toSet()
+    }
+    /** images imported before [boardVariants]: the board's audio_policy back from .aemu-parked */
+    private fun restoreBoardAudioPolicy() {
+        val vs = boardVariants().ifEmpty { return }
+        // GuestVm.swapAudioPolicy already put the AOSP policy in place of a crashing one: hw_get_module must keep finding it
+        if (File(root, "system/.aemu-parked/system#lib#hw#audio_policy.default.so").isFile) return
+        for (v in vs) {
+            val f = File(root, "system/lib/hw/audio_policy.$v.so")
+            val parked = File(root, "system/.aemu-parked/system#lib#hw#audio_policy.$v.so")
+            if (!f.exists() && parked.isFile && parked.renameTo(f)) log("audio: board audio_policy.$v.so restored")
+        }
+    }
+
     private fun frpPartition() {
         val path = listOf("default.prop", "system/build.prop", "vendor/build.prop", "system/vendor/build.prop").firstNotNullOfOrNull { n ->
             runCatching { File(root, n).readLines() }.getOrNull()?.firstOrNull { it.startsWith("ro.frp.pst=") }?.substringAfter('=')?.trim()
