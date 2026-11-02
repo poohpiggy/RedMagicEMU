@@ -288,7 +288,24 @@ class RilStub(
         if (on) {
             unsol(o, UNSOL_RESPONSE_SIM_STATUS_CHANGED, ByteArray(0))
             unsol(o, UNSOL_RESPONSE_VOICE_NETWORK_STATE_CHANGED, ByteArray(0))
+            // a network gives the time on registration (NITZ); without it Samsung's 4.x asks the user to set the
+            // clock by hand ("Network doesn't provide date and time"). ril.h RIL_UNSOL_NITZ_TIME_RECEIVED:
+            // "yy/mm/dd,hh:mm:ss(+/-)tz,dt" in UTC, tz in quarter hours, dt the daylight saving adjustment in hours
+            unsol(o, UNSOL_NITZ_TIME_RECEIVED, str(nitz()))
         }
+    }
+
+    private fun nitz(): String {
+        val now = System.currentTimeMillis()
+        val tz = java.util.TimeZone.getDefault()
+        val off = tz.getOffset(now)
+        val dst = if (tz.inDaylightTime(java.util.Date(now))) tz.dstSavings / 3_600_000 else 0
+        val c = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC")).apply { timeInMillis = now }
+        val q = off / 900_000
+        return String.format(java.util.Locale.US, "%02d/%02d/%02d,%02d:%02d:%02d%s%d,%d",
+            c.get(java.util.Calendar.YEAR) % 100, c.get(java.util.Calendar.MONTH) + 1, c.get(java.util.Calendar.DAY_OF_MONTH),
+            c.get(java.util.Calendar.HOUR_OF_DAY), c.get(java.util.Calendar.MINUTE), c.get(java.util.Calendar.SECOND),
+            if (q < 0) "-" else "+", kotlin.math.abs(q), dst)
     }
 
     private fun callList(): ByteArray {
@@ -400,6 +417,7 @@ class RilStub(
         private const val UNSOL_RESPONSE_VOICE_NETWORK_STATE_CHANGED = 1002
         private const val UNSOL_RESPONSE_SIM_STATUS_CHANGED = 1019
         private const val UNSOL_RIL_CONNECTED = 1034
+        private const val UNSOL_NITZ_TIME_RECEIVED = 1008
         private const val E_GENERIC_FAILURE = 2
         private const val E_RADIO_NOT_AVAILABLE = 1
         private const val RIL_REQUEST_GET_SIM_STATUS = 1
