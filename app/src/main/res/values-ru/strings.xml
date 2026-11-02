@@ -55,6 +55,8 @@
     <string name="vs_nav_sub">Назад, Домой, Недавние, Меню под экраном.</string>
     <string name="vs_awake">Не гасить экран</string>
     <string name="vs_awake_sub">Пока система открыта.</string>
+    <string name="vs_vsync">Вертикальная синхронизация (VSync)</string>
+    <string name="vs_vsync_sub">Кадры ждут обновления экрана: плавно, без разрывов. Выкл.: чуть быстрее отклик, возможны разрывы.</string>
     <string name="vs_single">Одиночное касание</string>
     <string name="vs_single_sub">Для прошивок, которые не понимают мультитач.</string>
     <string name="vm_booting_short">Загрузка · %1$d с</string>

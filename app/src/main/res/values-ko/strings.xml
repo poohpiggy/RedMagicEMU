@@ -52,6 +52,8 @@
     <string name="vs_nav_sub">화면 아래 뒤로, 홈, 최근, 메뉴.</string>
     <string name="vs_awake">화면 켜짐 유지</string>
     <string name="vs_awake_sub">시스템이 열려 있는 동안.</string>
+    <string name="vs_vsync">VSync</string>
+    <string name="vs_vsync_sub">Frames wait for the screen refresh: smooth, no tearing. Off: a bit faster response, may tear.</string>
     <string name="vs_single">단일 터치</string>
     <string name="vs_single_sub">멀티터치를 이해하지 못하는 펌웨어용.</string>
     <string name="vm_booting_short">부팅 중 · %1$d초</string>

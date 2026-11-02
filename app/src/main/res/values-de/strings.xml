@@ -52,6 +52,8 @@
     <string name="vs_nav_sub">Zurück, Start, Letzte Apps und Menü unter dem Bildschirm.</string>
     <string name="vs_awake">Bildschirm anlassen</string>
     <string name="vs_awake_sub">Solange das System geöffnet ist.</string>
+    <string name="vs_vsync">VSync</string>
+    <string name="vs_vsync_sub">Frames wait for the screen refresh: smooth, no tearing. Off: a bit faster response, may tear.</string>
     <string name="vs_single">Einzelberührung</string>
     <string name="vs_single_sub">Für Firmware, die kein Multitouch versteht.</string>
     <string name="vm_booting_short">Startet · %1$d s</string>

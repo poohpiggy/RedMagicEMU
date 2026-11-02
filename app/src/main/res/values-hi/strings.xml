@@ -52,6 +52,8 @@
     <string name="vs_nav_sub">स्क्रीन के नीचे वापस, होम, हाल के ऐप और मेनू।</string>
     <string name="vs_awake">स्क्रीन चालू रखें</string>
     <string name="vs_awake_sub">जब तक सिस्टम खुला है।</string>
+    <string name="vs_vsync">VSync</string>
+    <string name="vs_vsync_sub">Frames wait for the screen refresh: smooth, no tearing. Off: a bit faster response, may tear.</string>
     <string name="vs_single">सिंगल टच</string>
     <string name="vs_single_sub">उन फ़र्मवेयर के लिए जो मल्टीटच नहीं समझते।</string>
     <string name="vm_booting_short">बूट हो रहा है · %1$d से</string>

@@ -52,6 +52,8 @@
     <string name="vs_nav_sub">Indietro, Home, Recenti e Menu sotto lo schermo.</string>
     <string name="vs_awake">Schermo sempre acceso</string>
     <string name="vs_awake_sub">Finché il sistema è aperto.</string>
+    <string name="vs_vsync">VSync</string>
+    <string name="vs_vsync_sub">Frames wait for the screen refresh: smooth, no tearing. Off: a bit faster response, may tear.</string>
     <string name="vs_single">Tocco singolo</string>
     <string name="vs_single_sub">Per firmware che non gestiscono il multitouch.</string>
     <string name="vm_booting_short">Avvio · %1$d s</string>

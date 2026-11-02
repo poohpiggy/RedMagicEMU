@@ -172,6 +172,31 @@ class VmActivity : ComponentActivity() {
     @SuppressLint("ClickableViewAccessibility")
     override fun attachBaseContext(base: Context) = super.attachBaseContext(app.aemu.AppPrefs.wrap(base))
 
+    /** The panel's fastest mode at the current resolution. Left alone, Android 15+ runs a window at its "normal"
+     *  frame-rate category (60 Hz on many phones) as soon as the finger is off the glass, so a guest drawing at 120
+     *  is shown with every other frame gone. */
+    private fun topRefresh(): Float = runCatching {
+        val d = window.decorView.display ?: @Suppress("DEPRECATION") windowManager.defaultDisplay
+        val m = d.mode
+        d.supportedModes.filter { it.physicalWidth == m.physicalWidth && it.physicalHeight == m.physicalHeight }.maxOf { it.refreshRate }
+    }.getOrDefault(60f)
+
+    private fun askTopRefresh() = runCatching {
+        val d = @Suppress("DEPRECATION") windowManager.defaultDisplay
+        val m = d.mode
+        val best = d.supportedModes.filter { it.physicalWidth == m.physicalWidth && it.physicalHeight == m.physicalHeight }.maxByOrNull { it.refreshRate } ?: return@runCatching
+        window.attributes = window.attributes.also { it.preferredDisplayModeId = best.modeId; it.preferredRefreshRate = best.refreshRate }
+    }
+
+    private fun surfaceRate(sf: android.view.Surface) {
+        if (android.os.Build.VERSION.SDK_INT >= 30) runCatching { sf.setFrameRate(topRefresh(), android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE) }
+    }
+
+    /** Views that redraw on every guest frame ask for the panel's top rate (Android 15+ frame-rate categories). */
+    private fun viewRate(v: android.view.View) {
+        if (android.os.Build.VERSION.SDK_INT >= 35) runCatching { v.setRequestedFrameRate(topRefresh()) }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // the overlay pads itself (status bar, navigation bar, keyboard): the terminal stays above the keyboard
@@ -196,14 +221,15 @@ class VmActivity : ComponentActivity() {
         val s = vm.settings
         showLed = s.showLed
         if (s.keepScreenOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        askTopRefresh()
 
         val (gw, gh) = if (vm.engine == Engine.GB) 480 to 800 else s.width to s.height
         val root = FrameLayout(this).apply { setBackgroundColor(0xff000000.toInt()) }
         box = FrameLayout(this)
         surfaceView = SurfaceView(this)
         surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(h: SurfaceHolder) { vm.surface = h.surface }
-            override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) { vm.surface = h.surface }
+            override fun surfaceCreated(h: SurfaceHolder) { surfaceRate(h.surface); vm.surface = h.surface }
+            override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) { surfaceRate(h.surface); vm.surface = h.surface }
             override fun surfaceDestroyed(h: SurfaceHolder) { vm.surface = null }
         })
         guestW = gw; guestH = gh
@@ -222,6 +248,7 @@ class VmActivity : ComponentActivity() {
         guest.passthrough = useBridge
         box.addView(surfaceView, FrameLayout.LayoutParams(-1, -1))
         box.addView(guest, FrameLayout.LayoutParams(-1, -1))
+        viewRate(surfaceView); viewRate(guest)
         root.addView(box, FrameLayout.LayoutParams(0, 0))
         val overlay = ComposeView(this).apply { setContent { AemuTheme(forceDark = true) { Overlay() } } }
         root.addView(overlay, FrameLayout.LayoutParams(-1, -1))

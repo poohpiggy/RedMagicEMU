@@ -79,7 +79,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     @Volatile var failure: String? = null
         private set
     @Volatile var surface: Surface? = null
-        set(v) { field = v; if (engine == Engine.KK) GlBridge.surface(v) else if (engine == Engine.N64 && kernel.gpuBridge64) GlHost.surface(v) }
+        set(v) { field = v; if (engine == Engine.KK) GlBridge.surface(v) else if (engine == Engine.N64 && kernel.gpuBridge64) { GlHost.vsync(settings.vsync); GlHost.surface(v) } }
 
     private val lines = CopyOnWriteArrayList<String>()
     private val listeners = CopyOnWriteArrayList<(String) -> Unit>()

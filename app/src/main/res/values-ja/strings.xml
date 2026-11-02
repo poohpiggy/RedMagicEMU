@@ -52,6 +52,8 @@
     <string name="vs_nav_sub">画面下に戻る・ホーム・履歴・メニュー。</string>
     <string name="vs_awake">画面をオンのままにする</string>
     <string name="vs_awake_sub">システムを開いている間。</string>
+    <string name="vs_vsync">VSync</string>
+    <string name="vs_vsync_sub">Frames wait for the screen refresh: smooth, no tearing. Off: a bit faster response, may tear.</string>
     <string name="vs_single">シングルタッチ</string>
     <string name="vs_single_sub">マルチタッチを理解しないファームウェア向け。</string>
     <string name="vm_booting_short">起動中 · %1$d 秒</string>

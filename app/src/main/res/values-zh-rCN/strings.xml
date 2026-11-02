@@ -52,6 +52,8 @@
     <string name="vs_nav_sub">屏幕下方的返回、主页、最近和菜单键。</string>
     <string name="vs_awake">保持屏幕常亮</string>
     <string name="vs_awake_sub">系统打开期间。</string>
+    <string name="vs_vsync">VSync</string>
+    <string name="vs_vsync_sub">Frames wait for the screen refresh: smooth, no tearing. Off: a bit faster response, may tear.</string>
     <string name="vs_single">单点触控</string>
     <string name="vs_single_sub">适用于不支持多点触控的固件。</string>
     <string name="vm_booting_short">启动中 · %1$d 秒</string>

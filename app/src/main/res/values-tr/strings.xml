@@ -52,6 +52,8 @@
     <string name="vs_nav_sub">Ekranın altında Geri, Ana ekran, Son uygulamalar ve Menü.</string>
     <string name="vs_awake">Ekranı açık tut</string>
     <string name="vs_awake_sub">Sistem açık olduğu sürece.</string>
+    <string name="vs_vsync">VSync</string>
+    <string name="vs_vsync_sub">Frames wait for the screen refresh: smooth, no tearing. Off: a bit faster response, may tear.</string>
     <string name="vs_single">Tek dokunuş</string>
     <string name="vs_single_sub">Çoklu dokunmayı anlamayan yazılımlar için.</string>
     <string name="vm_booting_short">Açılıyor · %1$d sn</string>

@@ -52,6 +52,8 @@
     <string name="vs_nav_sub">Quay lại, Trang chủ, Gần đây và Menu dưới màn hình.</string>
     <string name="vs_awake">Giữ màn hình sáng</string>
     <string name="vs_awake_sub">Khi hệ thống đang mở.</string>
+    <string name="vs_vsync">VSync</string>
+    <string name="vs_vsync_sub">Frames wait for the screen refresh: smooth, no tearing. Off: a bit faster response, may tear.</string>
     <string name="vs_single">Chạm đơn</string>
     <string name="vs_single_sub">Cho firmware không hiểu cảm ứng đa điểm.</string>
     <string name="vm_booting_short">Đang khởi động · %1$d giây</string>

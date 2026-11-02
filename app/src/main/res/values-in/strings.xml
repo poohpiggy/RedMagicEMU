@@ -52,6 +52,8 @@
     <string name="vs_nav_sub">Kembali, Beranda, Terbaru, dan Menu di bawah layar.</string>
     <string name="vs_awake">Layar tetap menyala</string>
     <string name="vs_awake_sub">Selama sistem terbuka.</string>
+    <string name="vs_vsync">VSync</string>
+    <string name="vs_vsync_sub">Frames wait for the screen refresh: smooth, no tearing. Off: a bit faster response, may tear.</string>
     <string name="vs_single">Sentuhan tunggal</string>
     <string name="vs_single_sub">Untuk firmware yang tidak memahami multisentuh.</string>
     <string name="vm_booting_short">Booting · %1$d dtk</string>

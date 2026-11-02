@@ -79,6 +79,7 @@ struct conn {
     EGLContext pctx;
     EGLSurface psurf;
     unsigned pgen;
+    int pint;                   /* swap interval set on psurf (-1: not yet) */
     GLuint pprog;
     struct { uint64_t id; unsigned long serial, use; GLuint tex; } ptex[4];
 };
@@ -93,6 +94,8 @@ static pthread_mutex_t g_win_lock = PTHREAD_MUTEX_INITIALIZER;
 static ANativeWindow *g_win;
 static unsigned g_win_gen;
 static volatile uint64_t g_presented;
+/* the user's VSync setting: 1 each frame waits for the panel's refresh, 0 shown at once */
+static volatile int g_vsync = 1;
 static int g_listen = -1;
 /* the GLES 3 minor version the guest is told: 1 when the phone's contexts are 3.1 or newer (every 3.1 entry point
  * is carried; 3.2's are not), else 0 */
@@ -1004,12 +1007,15 @@ static uint32_t present(uint64_t id, int w, int h) {
         if (g_win && fresh && C->psurf == EGL_NO_SURFACE) LOG("no window surface for the screen: 0x%x", eglGetError());
         C->pgen = g_win_gen;
         if (C->psurf != EGL_NO_SURFACE) {
-            if (eglMakeCurrent(g_dpy, C->psurf, C->psurf, C->pctx)) eglSwapInterval(g_dpy, 0);     /* the guest keeps its own pace */
+            if (eglMakeCurrent(g_dpy, C->psurf, C->psurf, C->pctx)) C->pint = -1;
             else { eglDestroySurface(g_dpy, C->psurf); C->psurf = EGL_NO_SURFACE; }
         }
     }
     /* (with no view to show it in, the frame is still taken: the guest is in the background) */
     int live = C->pctx != EGL_NO_CONTEXT && C->psurf != EGL_NO_SURFACE;
+    /* VSync on: every guest frame reaches the panel. Off (0) lets the phone's compositor keep only the newest buffer
+       of each refresh: lower latency, but a guest near the panel's rate then shows as uneven 8/16 ms steps */
+    if (live && C->pint != g_vsync && eglGetCurrentContext() == C->pctx) { eglSwapInterval(g_dpy, g_vsync); C->pint = g_vsync; }
     if (C->pctx != EGL_NO_CONTEXT && !live && eglGetCurrentContext() != C->pctx) eglMakeCurrent(g_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, C->pctx);
     if (C->pctx != EGL_NO_CONTEXT && eglGetCurrentContext() == C->pctx) {
         static unsigned long use;
@@ -1476,6 +1482,10 @@ JNIEXPORT void JNICALL Java_app_aemu_core_GlHost_nativeSurface(JNIEnv *env, jcla
     if (g_win) ANativeWindow_release(g_win);
     g_win = w; g_win_gen++;
     pthread_mutex_unlock(&g_win_lock);
+}
+JNIEXPORT void JNICALL Java_app_aemu_core_GlHost_nativeVsync(JNIEnv *env, jclass cls, jboolean on) {
+    (void)env; (void)cls;
+    g_vsync = on ? 1 : 0;
 }
 JNIEXPORT jlong JNICALL Java_app_aemu_core_GlHost_nativePresented(JNIEnv *env, jclass cls) {
     (void)env; (void)cls;

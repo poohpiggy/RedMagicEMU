@@ -52,6 +52,8 @@
     <string name="vs_nav_sub">Wstecz, Ekran główny, Ostatnie i Menu pod ekranem.</string>
     <string name="vs_awake">Nie wygaszaj ekranu</string>
     <string name="vs_awake_sub">Dopóki system jest otwarty.</string>
+    <string name="vs_vsync">VSync</string>
+    <string name="vs_vsync_sub">Frames wait for the screen refresh: smooth, no tearing. Off: a bit faster response, may tear.</string>
     <string name="vs_single">Pojedynczy dotyk</string>
     <string name="vs_single_sub">Dla firmware, które nie rozumie multitouch.</string>
     <string name="vm_booting_short">Uruchamianie · %1$d s</string>

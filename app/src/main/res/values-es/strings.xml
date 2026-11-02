@@ -52,6 +52,8 @@
     <string name="vs_nav_sub">Atrás, Inicio, Recientes y Menú bajo la pantalla.</string>
     <string name="vs_awake">Mantener la pantalla encendida</string>
     <string name="vs_awake_sub">Mientras el sistema esté abierto.</string>
+    <string name="vs_vsync">VSync</string>
+    <string name="vs_vsync_sub">Frames wait for the screen refresh: smooth, no tearing. Off: a bit faster response, may tear.</string>
     <string name="vs_single">Toque único</string>
     <string name="vs_single_sub">Para firmware que no entiende multitáctil.</string>
     <string name="vm_booting_short">Arrancando · %1$d s</string>

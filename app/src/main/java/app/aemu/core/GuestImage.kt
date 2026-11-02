@@ -30,6 +30,8 @@ data class VmSettings(
     /** size of the button bar: 0 compact, 1 large */
     val navSize: Int = 0,
     val keepScreenOn: Boolean = true,
+    /** frames go to the panel on its vsync (no tearing, no dropped frames); off: shown at once, lower latency, may tear */
+    val vsync: Boolean = true,
     /** the guest phone's notification LED drawn above its screen */
     val showLed: Boolean = true,
     val mtMode: Int = 0,
@@ -55,7 +57,7 @@ data class VmSettings(
         .put("gpu", gpu).put("hwui", hwui).put("jit", jit).put("fullDexopt", fullDexopt).put("fbHz", fbHz)
         .put("touchHz", touchHz).put("netProxy", netProxy).put("lowRam", lowRam)
         .put("showFrame", showFrame).put("showNavBar", showNavBar).put("navKeys", navKeys).put("navSize", navSize)
-        .put("keepScreenOn", keepScreenOn).put("showLed", showLed).put("mtMode", mtMode).put("legacyEngine", legacyEngine).put("open32", open32)
+        .put("keepScreenOn", keepScreenOn).put("vsync", vsync).put("showLed", showLed).put("mtMode", mtMode).put("legacyEngine", legacyEngine).put("open32", open32)
         .put("ramMb", ramMb).put("diskMb", diskMb).put("radio", radio).put("native32", native32).put("imei", imei).put("qemuArgs", qemuArgs)
 
     companion object {
@@ -93,6 +95,7 @@ data class VmSettings(
                 navKeys = o.optString("navKeys", d.navKeys),
                 navSize = o.optInt("navSize", d.navSize),
                 keepScreenOn = o.optBoolean("keepScreenOn", d.keepScreenOn),
+                vsync = o.optBoolean("vsync", d.vsync),
                 showLed = o.optBoolean("showLed", d.showLed),
                 mtMode = o.optInt("mtMode", d.mtMode),
                 legacyEngine = o.optBoolean("legacyEngine", false),

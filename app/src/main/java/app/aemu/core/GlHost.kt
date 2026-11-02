@@ -19,5 +19,9 @@ object GlHost {
     @JvmStatic private external fun nativeStart(socket: String): String
     @JvmStatic private external fun nativeStop()
     @JvmStatic private external fun nativeSurface(s: android.view.Surface?)
+    /** true: each frame waits for the panel's vsync; false: shown at once (may tear) */
+    fun vsync(on: Boolean) { if (ok) runCatching { nativeVsync(on) } }
+
     @JvmStatic private external fun nativePresented(): Long
+    @JvmStatic private external fun nativeVsync(on: Boolean)
 }
