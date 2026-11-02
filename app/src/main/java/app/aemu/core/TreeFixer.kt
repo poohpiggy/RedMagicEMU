@@ -192,6 +192,7 @@ class TreeFixer(
         keyLayout()
         pixelFlingerNoCodegen()
         kuserTls()
+        preloadHints()
         for (n in LOGS) File(root, "dev/log/$n").let { if (!it.isFile) { it.parentFile?.mkdirs(); it.createNewFile() } }
         makeFb()
     }
@@ -396,6 +397,24 @@ class TreeFixer(
         for (dir in listOf("system/lib", "system/bin", "system/xbin", "system/vendor/lib", "vendor/lib")) File(root, dir).let { if (it.isDirectory) walk(it, 0) }
         runCatching { mark.writeText("$files $sites\n") }
         log("ARMv5 TLS reads: $sites in $files files read TPIDRURO")
+    }
+
+    /** 32-bit firmwares under qemu: preload hints with should-be-one bits cleared in string routines (ElfPatch.fixPreloadHints);
+     *  once per image (mark system/.aemu-pld). */
+    private fun preloadHints() {
+        if (!kk32 || img.api < 3) return
+        val mark = File(root, "system/.aemu-pld")
+        if (mark.isFile) return
+        var words = 0; var files = 0
+        val list = (File(root, "system/lib").listFiles().orEmpty().toList() + File(root, "system/vendor/lib").listFiles().orEmpty().toList() +
+            File(root, "system/bin/linker"))
+            .filter { it.isFile && !java.nio.file.Files.isSymbolicLink(it.toPath()) && it.length() in 52..64_000_000 }
+        for (f in list) {
+            val n = ElfPatch.fixPreloadHints(f, listOf("mem", "__mem", "bcopy", "str", "__str"))
+            if (n > 0) { words += n; files++ }
+        }
+        runCatching { mark.writeText("$files $words\n") }
+        if (words > 0) log("preload hints with bits 15:12 clear: $words in $files files")
     }
 
     /** Reverses kuserTls(): ARM "mrc p15,0,rY,c13,c0,3" after "mvn rX,#0xf000" -> "ldr rY,[rX,#-15]"; Thumb
