@@ -53,7 +53,7 @@
     <string name="vs_awake">화면 켜짐 유지</string>
     <string name="vs_awake_sub">시스템이 열려 있는 동안.</string>
     <string name="vs_vsync">VSync</string>
-    <string name="vs_vsync_sub">Frames wait for the screen refresh: smooth, no tearing. Off: a bit faster response, may tear.</string>
+    <string name="vs_vsync_sub">On: frames wait for the screen refresh, smooth, no tearing. Off: the system runs as fast as it can (up to 240 fps), the counter shows the speed reserve; may tear. Applies on the next start.</string>
     <string name="vs_single">단일 터치</string>
     <string name="vs_single_sub">멀티터치를 이해하지 못하는 펌웨어용.</string>
     <string name="vm_booting_short">부팅 중 · %1$d초</string>

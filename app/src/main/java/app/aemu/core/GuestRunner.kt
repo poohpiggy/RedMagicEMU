@@ -114,7 +114,9 @@ class GuestRunner(
         if (img.abi != "arm64-v8a") e["AEMU64_FRAME"] = paths.frameSock.absolutePath
         // the framebuffer's refresh: a page flip of fb0 waits for it (run64.c fb_vsync). The default (60) is the
         // phone's own display rate, so a 90/120 Hz screen is not held to 60
-        val hz = if (img.settings.fbHz != 60) img.settings.fbHz else runCatching {
+        // VSync off: the guest is not held to the phone's panel, it flips at up to 240 Hz, so its frame count shows the
+        // emulator's headroom (what a slower phone would still have) rather than the panel's rate
+        val hz = if (!img.settings.vsync) 240 else if (img.settings.fbHz != 60) img.settings.fbHz else runCatching {
             (paths.ctx.getSystemService(android.content.Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager)
                 .getDisplay(android.view.Display.DEFAULT_DISPLAY).supportedModes.maxOf { it.refreshRate }.toInt()
         }.getOrDefault(60).coerceIn(30, 240)
