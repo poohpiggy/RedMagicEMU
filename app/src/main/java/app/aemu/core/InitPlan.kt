@@ -49,6 +49,7 @@ object InitPlan {
         val services = LinkedHashMap<String, RcService>()
         val exports = LinkedHashMap<String, String>()
         val condExports = LinkedHashMap<String, String>()
+        val appends = ArrayList<Pair<String, String>>()
         // режимы, в которые эмулятор не грузится: заводской, зарядка, восстановление
         // (+ Samsung's FOTA update mode: init reads fota.rc only for bootmode=fota; its BOOTCLASSPATH lacks apache-xml,
         // so the odex files were "stale" - GT-P7510 3.1)
@@ -81,7 +82,7 @@ object InitPlan {
                     "import" -> cur = null
                     "setprop" -> if (cur == null && !propTrigger && t.size >= 3 && !t[2].startsWith("$")) setprops.putIfAbsent(t[1], t.drop(2).joinToString(" ").removeSurrounding("\""))   // init takes "" as an empty value (11: sys.shutdown.requested)
                     "export" -> if (t.size >= 3) when (condOk) {
-                        null -> exports[t[1]] = t.drop(2).joinToString(" ")
+                        null -> t.drop(2).joinToString(" ").let { v -> if ("\${" in v) appends += t[1] to v else exports[t[1]] = v }
                         true -> condExports[t[1]] = t.drop(2).joinToString(" ")
                         false -> {}
                     }
@@ -96,6 +97,10 @@ object InitPlan {
                 }
             }
         }
+        // Qualcomm's CAF init (4.x) expands ${NAME} in an export from the environment: vendor files append to a
+        // variable init.rc set ("export BOOTCLASSPATH ${BOOTCLASSPATH}:/system/framework/qcom.fmradio.jar", Xperia Z1c
+        // 4.3 init.qcom.rc / init.target.rc). Applied after every plain export, in file order; unknown names are empty.
+        for ((k, v) in appends) exports[k] = Regex("""\$\{([A-Za-z0-9_]+)\}""").replace(v) { m -> exports[m.groupValues[1]] ?: "" }
         exports.putAll(condExports)
         return Rc(services, exports, dirs, setprops)
     }

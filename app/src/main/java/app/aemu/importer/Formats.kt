@@ -83,6 +83,15 @@ object SinImage {
                     var lo = 0; var hi = recs.size - 1; var i = -1
                     while (lo <= hi) { val m = (lo + hi) ushr 1; if (recs[m].fileOff <= p) { i = m; lo = m + 1 } else hi = m - 1 }
                     val r = if (i >= 0) recs[i] else null
+                    if (r != null && p < r.fileOff + r.outLen && !r.lz4) {
+                        // a plain record is its bytes in the SIN as they are (Xperia Z1c 4.3: ADDR records of
+                        // ~126 MB, too big to hold): read in place
+                        val n = minOf(dst.remaining().toLong(), r.fileOff + r.outLen - p).toInt()
+                        val part = dst.slice().also { it.limit(n) }
+                        var at = dataStart + r.dataOff + (p - r.fileOff)
+                        while (part.hasRemaining()) { val k = ch.read(part, at); if (k <= 0) throw IOException("SIN: unexpected end"); at += k }
+                        dst.position(dst.position() + n); p += n; continue
+                    }
                     if (r != null && p < r.fileOff + r.outLen) {
                         val d = data(i)
                         val o = (p - r.fileOff).toInt()
@@ -114,6 +123,20 @@ object SinImage {
             for (r in recs) {
                 if (r.dataOff < pos) throw IOException("SIN: overlapping records")
                 skipFully(s, r.dataOff - pos)
+                if (!r.lz4) {   // a plain record: copied through, however big
+                    raf.seek(r.fileOff)
+                    val buf = ByteArray(1 shl 20)
+                    var left = r.dataLen; var keep = r.outLen
+                    while (left > 0) {
+                        val n = minOf(left, buf.size.toLong()).toInt(); s.readFully(buf, 0, n)
+                        val w = minOf(n.toLong(), keep).toInt(); if (w > 0) raf.write(buf, 0, w)
+                        left -= n; keep -= w
+                    }
+                    pos = r.dataOff + r.dataLen
+                    size = maxOf(size, r.fileOff + r.outLen)
+                    progress(pos)
+                    continue
+                }
                 val chunk = ByteArray(r.dataLen.toInt()); s.readFully(chunk)
                 pos = r.dataOff + r.dataLen
                 val data = if (r.lz4) BlockLZ4CompressorInputStream(ByteArrayInputStream(chunk)).use { it.readBytes() } else chunk
