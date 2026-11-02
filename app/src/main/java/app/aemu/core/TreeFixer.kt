@@ -1161,6 +1161,22 @@ class TreeFixer(
                 copied++
             }
         }.onFailure { log("camera: HAL not replaced: ${it.message}") }
+        // 3.x vendor firmwares: CameraService links the board's HAL (libcamera.so: HAL_openCameraHardware, Samsung
+        // SEC_openCameraHardware), which drives the sensor (Tegra NvOmxCamera, TI OMAP4 CameraHal) and fails here; the
+        // emulator's HAL of the 3.x interface (camera_hc.cpp) instead, stock kept in .aemu-parked
+        val hcIface = !extIface && !semc16 && img.api in 11..13 && cam.isFile && runCatching {
+            val cs = String(File(root, "system/lib/libcameraservice.so").readBytes(), Charsets.ISO_8859_1)
+            cs.contains("HAL_openCameraHardware") || cs.contains("SEC_openCameraHardware")
+        }.getOrDefault(false)
+        if (hcIface) runCatching {
+            val fresh = EngineAssets.open(ctx, "engines/common/libcamera.hc.so").use { it.readBytes() }
+            if (!fresh.contentEquals(cam.readBytes())) {
+                if (!parkedCam.exists()) { parkedCam.parentFile?.mkdirs(); cam.copyTo(parkedCam) }
+                cam.writeBytes(fresh); cam.setReadable(true, false)
+                log("camera: the emulator's 3.x camera HAL installed")
+                copied++
+            }
+        }.onFailure { log("camera: HAL not replaced: ${it.message}") }
         // 1.5/1.6: SurfaceFlinger shows YUV buffers (video) only through copybit, its OpenGL fallback draws just the Y
         // plane (Donut LayerBase::loadTexture); with no copybit.*.so of the firmware's own, the emulator's
         // (native/copybithal, Donut copybit_image_t: offset/base/fd — Eclair's differs) is installed as the default one
