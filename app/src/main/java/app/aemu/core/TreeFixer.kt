@@ -324,6 +324,9 @@ class TreeFixer(
     private fun kuserTls() {
         if (!kk32 || img.api > 13) return
         val mark = File(root, "system/.aemu-tls")
+        // pre-1.0 runs on an ARMv5 CPU model (GuestRunner: QEMU_CPU=arm926), which has no TPIDRURO: the mrc is an
+        // undefined instruction there (every service died with SIGILL). Images patched before are put back.
+        if (img.api < 3) { if (mark.isFile) kuserTlsUndo(mark); return }
         if (mark.isFile) return
         var files = 0; var sites = 0
         fun patch(f: File) {
@@ -393,6 +396,60 @@ class TreeFixer(
         for (dir in listOf("system/lib", "system/bin", "system/xbin", "system/vendor/lib", "vendor/lib")) File(root, dir).let { if (it.isDirectory) walk(it, 0) }
         runCatching { mark.writeText("$files $sites\n") }
         log("ARMv5 TLS reads: $sites in $files files read TPIDRURO")
+    }
+
+    /** Reverses kuserTls(): ARM "mrc p15,0,rY,c13,c0,3" after "mvn rX,#0xf000" -> "ldr rY,[rX,#-15]"; Thumb
+     *  "mrc" (ee1d 0fx0) -> "ldr rY,=0xffff0ff0; ldr rY,[rY]" through the literal the original load used, which stays
+     *  in the pool (the same value; rY instead of the dead rX). */
+    private fun kuserTlsUndo(mark: File) {
+        var sites = 0
+        fun undo(f: File) {
+            val d = runCatching { f.readBytes() }.getOrNull() ?: return
+            if (d.size < 52 || d[0] != 0x7f.toByte() || d[1] != 'E'.code.toByte() || d[4].toInt() != 1 || d[18].toInt() != 40) return
+            val bb = java.nio.ByteBuffer.wrap(d).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            var n = 0
+            var i = 4
+            while (i + 4 <= d.size) {                                   // ARM
+                val v = bb.getInt(i)
+                if ((v and 0x0fff0fff) == 0x0e1d0f70 && (v ushr 28) != 15) {
+                    for (j in 1..4) {
+                        if (i - 4 * j < 0) break
+                        val w = bb.getInt(i - 4 * j)
+                        if ((w and 0x0fff0fff) == 0x03e00a0f && (w ushr 28) != 15) {
+                            val x = (w ushr 12) and 15
+                            bb.putInt(i, (v and 0xf0000000.toInt()) or 0x0510000f or (x shl 16) or (v and 0xf000)); n++; break
+                        }
+                    }
+                }
+                i += 4
+            }
+            i = 0
+            while (i + 4 <= d.size) {                                   // Thumb
+                val t1 = bb.getShort(i + 2).toInt() and 0xffff
+                if ((bb.getShort(i).toInt() and 0xffff) == 0xee1d && (t1 and 0x8fff) == 0x0f70) {
+                    val y = (t1 ushr 12) and 7
+                    val base = (i + 4) and 3.inv()
+                    var k = 0
+                    while (k < 256 && base + 4 * k + 4 <= d.size && bb.getInt(base + 4 * k) != 0xffff0ff0.toInt()) k++
+                    if (k < 256 && base + 4 * k + 4 <= d.size) {
+                        bb.putShort(i, (0x4800 or (y shl 8) or k).toShort())
+                        bb.putShort(i + 2, (0x6800 or (y shl 3) or y).toShort()); n++
+                    }
+                }
+                i += 2
+            }
+            if (n > 0) runCatching { f.writeBytes(d) }.onSuccess { sites += n }
+        }
+        fun walk(d: File, depth: Int) {
+            if (java.nio.file.Files.isSymbolicLink(d.toPath())) return
+            for (f in d.listFiles().orEmpty()) {
+                if (java.nio.file.Files.isSymbolicLink(f.toPath())) continue
+                if (f.isDirectory) { if (depth < 3) walk(f, depth + 1) } else if (f.isFile && f.length() in 52..64_000_000) undo(f)
+            }
+        }
+        for (dir in listOf("system/lib", "system/bin", "system/xbin", "system/vendor/lib", "vendor/lib")) File(root, dir).let { if (it.isDirectory) walk(it, 0) }
+        mark.delete()
+        log("ARMv5 TLS reads put back (ARMv5 CPU): $sites")
     }
 
     private fun pixelFlingerNoCodegen() {
