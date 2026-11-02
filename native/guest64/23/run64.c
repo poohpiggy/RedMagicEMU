@@ -447,6 +447,24 @@ static void fb_vsync(void) {
     struct { long long s, ns; } at = { next / 1000000000LL, next % 1000000000LL };
     while (S4(115 /*clock_nanosleep*/, 1, 1 /*TIMER_ABSTIME*/, &at, 0) == -4 /*EINTR*/) {}
 }
+/* AEMU64_FRAME: the app's frame bell (FrameBell, a unix stream socket). A page shown by the guest rings it, so the
+ * screen copies fb0 when the frame is there instead of polling the file on its own clock (frames polled every 5 ms
+ * against an 8.3 ms display came out unevenly: single hitches while scrolling). One byte per flip, never waiting. */
+static char g_frame[108];
+static void fb_ring(void) {
+    static long bell = -1;
+    if (!g_frame[0]) return;
+    if (bell < 0) {
+        long c = S3(NR_socket, 1, 1 /* SOCK_STREAM */ | 0x80000 /* CLOEXEC */ | 0x800 /* NONBLOCK */, 0);
+        if (c < 0) return;
+        struct sockaddr_un sa; sa.family = 1; u64 l = slen(g_frame); memcpy(sa.path, g_frame, l + 1);
+        if (S3(NR_connect, c, &sa, 2 + l + 1) < 0) { S1(NR_close, c); return; }
+        bell = c;
+    }
+    char one = 1;
+    long r = S6(NR_sendto, bell, &one, 1, 0x40 /* MSG_DONTWAIT */ | 0x4000 /* MSG_NOSIGNAL */, 0, 0);
+    if (r < 0 && r != -11 /* EAGAIN: the app is behind, it polls anyway */) { S1(NR_close, bell); bell = -1; }
+}
 static long fb_ioctl(int fd, u32 cmd, u64 arg) {
     if (!g_fbw) fb_geom();
     switch (cmd) {
@@ -483,11 +501,11 @@ static long fb_ioctl(int fd, u32 cmd, u64 arg) {
         u32 line = g_fbw * (g_fb16 ? 2 : 4);
         // (0.9-1.x and M3 flip pages by a new yoffset here, not by PAN_DISPLAY)
         static u32 yoff = ~0u;
-        if (((u32 *)arg)[5] != yoff) { if (yoff != ~0u) fb_vsync(); yoff = ((u32 *)arg)[5]; }
+        if (((u32 *)arg)[5] != yoff) { if (yoff != ~0u) { fb_vsync(); fb_ring(); } yoff = ((u32 *)arg)[5]; }
         if (((u32 *)arg)[3] <= g_fbh) return 0;
         return S2(NR_fstat, fd, &st) == 0 && (u64)((u32 *)arg)[3] * line <= (u64)st.st_size ? 0 : -22 /* EINVAL */;
     }
-    case 0x4606: fb_vsync(); return 0;                  // PAN_DISPLAY
+    case 0x4606: fb_vsync(); fb_ring(); return 0;       // PAN_DISPLAY
     case 0x4611: return 0;                              // BLANK
     }
     return -25; /* ENOTTY */
@@ -688,6 +706,8 @@ static long do_exec(const char *path, char *const argv[], char *const envp[]) {
     if (g_arm32[0]) { memcpy(e_a32, "AEMU64_ARM32=", 13); memcpy(e_a32 + 13, g_arm32, slen(g_arm32) + 1); *a++ = e_a32; }
     static char e_qemu[540];
     if (g_qemu[0]) { memcpy(e_qemu, "AEMU64_QEMU=", 12); memcpy(e_qemu + 12, g_qemu, slen(g_qemu) + 1); *a++ = e_qemu; }
+    static char e_frame[130];
+    if (g_frame[0]) { memcpy(e_frame, "AEMU64_FRAME=", 13); memcpy(e_frame + 13, g_frame, slen(g_frame) + 1); *a++ = e_frame; }
     static char e_sd[540];
     if (g_sdlen) { memcpy(e_sd, "AEMU64_SDCARD=", 14); memcpy(e_sd + 14, g_sd, g_sdlen + 1); *a++ = e_sd; }
     *a++ = 0;
@@ -1665,6 +1685,7 @@ void aemu_main(u64 *sp) {
         if (*r == ':' && p && p < 65536) { g_tlsport = (u16)p; memcpy(g_tls, r + 1, slen(r + 1) + 1); }
     }
     if ((r = env_get(envp, "AEMU64_FBHZ"))) { u32 v = 0; while (*r >= '0' && *r <= '9') v = v * 10 + (u32)(*r++ - '0'); if (v >= 10 && v <= 240) g_fbhz = v; }
+    if ((r = env_get(envp, "AEMU64_FRAME")) && slen(r) < sizeof g_frame) memcpy(g_frame, r, slen(r) + 1);
     if ((r = env_get(envp, "AEMU64_SDCARD")) && slen(r) < sizeof g_sd) { g_sdlen = slen(r); memcpy(g_sd, r, g_sdlen + 1); }
     if ((r = env_get(envp, "AEMU64_QEMU")) && slen(r) < sizeof g_qemu) memcpy(g_qemu, r, slen(r) + 1);
     if (env_get(envp, "AEMU64_B32")) g_b32 = 1;

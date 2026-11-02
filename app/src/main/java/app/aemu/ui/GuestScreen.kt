@@ -35,6 +35,20 @@ class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(c
     @Volatile var shown = 0L
         private set
     @Volatile var rings = 0L
+    /** intervals between shown frames while the picture moves (gaps under 100 ms): count, how many over 12.5 ms
+     *  (1.5 periods of a 120 Hz display), the longest; read and cleared by [paceReport] */
+    private var paceN = 0; private var paceSlow = 0; private var paceMax = 0L; private var paceLast = 0L; private var paceSum = 0L
+    private fun paced() {
+        val t = System.nanoTime()
+        val d = (t - paceLast) / 100_000L      // 0.1 ms
+        paceLast = t
+        if (d in 1 until 1000) { paceN++; paceSum += d; if (d > 125) paceSlow++; if (d > paceMax) paceMax = d }
+    }
+    @Synchronized fun paceReport(): String {
+        val r = "moving=$paceN fps=${if (paceSum > 0) paceN * 10000L / paceSum else 0} slow=$paceSlow worst=${paceMax / 10}.${paceMax % 10}ms"
+        paceN = 0; paceSlow = 0; paceMax = 0; paceSum = 0
+        return r
+    }
     /** the count of frames the GLES bridge put on the screen itself (GlHost.presented); while it moves, this view is clear */
     var direct: (() -> Long)? = null
     private var directSeen = 0L
@@ -76,7 +90,9 @@ class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(c
         Thread({
             while (live) {
                 runCatching { tick() }
-                synchronized(gate) { runCatching { gate.wait(if (quiet > 30 || (passthrough && direct != null)) 16L else 5L) } }
+                // a guest that rings on every page flip (FrameBell) is copied on the ring: polling on our own 5 ms
+                // clock showed frames at uneven intervals and could catch a page half written
+                synchronized(gate) { runCatching { gate.wait(if (rings > 0 && !passthrough) 50L else if (quiet > 30 || (passthrough && direct != null)) 16L else 5L) } }
             }
         }, "guest-fb").apply { isDaemon = true; start() }
     }
@@ -98,6 +114,7 @@ class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(c
                 directFrames += n - directSeen
                 answered()
                 shown += n - directSeen
+                paced()
                 directSeen = n
                 if (!passthrough) { passthrough = true; countSeen = fbCount(); directFrames = 0; directAt = now }
                 if (now - directAt > 250) { fps = directFrames * 1000f / (now - directAt); directFrames = 0; directAt = now; android.util.Log.d("aemu-screen", "gpu %.1f fps".format(fps)) }
@@ -169,6 +186,7 @@ class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(c
                 lastHash = hash
                 changed++
                 shown++
+                paced()
                 answered()
                 val now = System.currentTimeMillis()
                 if (changedAt == 0L) changedAt = now

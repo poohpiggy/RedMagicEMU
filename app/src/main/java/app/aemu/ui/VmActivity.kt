@@ -309,7 +309,7 @@ class VmActivity : ComponentActivity() {
                 // --ez frames true --es out <name>: the count of frames shown and the clock, for the testers
                 if (i.getBooleanExtra("frames", false)) {
                     val name = i.getStringExtra("out")?.takeIf { it.matches(Regex("[A-Za-z0-9_.-]+")) } ?: "frames.out"
-                    java.io.File(vm.paths.bin, name).writeText("shown=${guest.shown} direct=${guest.passthrough} ms=${android.os.SystemClock.uptimeMillis()}\n")
+                    java.io.File(vm.paths.bin, name).writeText("shown=${guest.shown} direct=${guest.passthrough} ms=${android.os.SystemClock.uptimeMillis()} rings=${guest.rings} ${guest.paceReport()}\n")
                     return
                 }
                 if (i.hasExtra("adb")) { if (i.getBooleanExtra("adb", false)) vm.adb.start() else vm.adb.stop(); return }

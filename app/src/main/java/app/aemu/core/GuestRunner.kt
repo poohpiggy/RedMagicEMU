@@ -110,6 +110,8 @@ class GuestRunner(
             e["AEMU64_VNDBINDER"] = paths.vndbinderSock.absolutePath
         }
         e["AEMU64_INPUT"] = paths.inputSock.absolutePath
+        // a page flip of fb0 rings the screen (run64.c fb_ring): it copies the frame then, not on its own polling clock
+        if (img.abi != "arm64-v8a") e["AEMU64_FRAME"] = paths.frameSock.absolutePath
         // the framebuffer's refresh: a page flip of fb0 waits for it (run64.c fb_vsync). The default (60) is the
         // phone's own display rate, so a 90/120 Hz screen is not held to 60
         val hz = if (img.settings.fbHz != 60) img.settings.fbHz else runCatching {

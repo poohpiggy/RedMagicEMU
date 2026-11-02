@@ -87,7 +87,10 @@ static unsigned char g_risky[4096];
 static void wr_all(struct ts *T, const void *p, size_t n) {
     const char *c = p;
     while (n && !T->dead) {
-        ssize_t k = send(T->fd, c, n, MSG_NOSIGNAL);
+        /* write(), not send(): the engine's kernel traps sendto (addresses, netlink, DNS: a signal and ~5 us a call)
+         * and a GL thread sends several times a frame; write passes straight through. MSG_NOSIGNAL is not needed:
+         * the host end is the emulator's own process, and without it the guest is stopped anyway. */
+        ssize_t k = write(T->fd, c, n);
         if (k <= 0) { if (k < 0 && errno == EINTR) continue; T->dead = 1; LOG("the host is gone (write, errno %d)", errno); return; }
         c += k; n -= (size_t)k;
     }
