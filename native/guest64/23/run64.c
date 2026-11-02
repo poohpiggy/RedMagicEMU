@@ -456,6 +456,10 @@ static long fb_ioctl(int fd, u32 cmd, u64 arg) {
         v[0] = g_fbw; v[1] = g_fbh; v[2] = g_fbw; v[3] = g_fbh; v[6] = 32;   // one page: gralloc copies each frame in on post
         v[8] = 0; v[9] = 8; v[11] = 8; v[12] = 8; v[14] = 16; v[15] = 8; v[17] = 24; v[18] = 8;   // R, G, B, A
         if (g_fb16) { v[6] = 16; v[8] = 11; v[9] = 5; v[11] = 5; v[12] = 6; v[14] = 0; v[15] = 5; v[17] = 0; v[18] = 0; }
+        // pixclock (ps) for the refresh the flips wait for: gralloc framebuffer.cpp (2.3-4.4) takes
+        // 1e15 / ((upper+lower+yres) * (left+right+xres) * pixclock) mHz, 60 Hz when it is 0, and SurfaceFlinger
+        // ticks its vsync at that rate (4.1+ VSyncThread / DispSync without hwc): 0 capped every 4.x at 60 frames
+        if (g_fbhz) v[25] = (u32)(1000000000000ULL / ((u64)g_fbw * g_fbh * g_fbhz));
         return 0;
     }
     case 0x4602: {                              // FBIOGET_FSCREENINFO
