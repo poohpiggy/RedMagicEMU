@@ -762,6 +762,37 @@ static int in_system(long dirfd, const char *h, char *t) {
     return pre(h, g_root) && pre(h + g_rootlen, "/system/");
 }
 
+// ---------------------------------------------------------------------------------------------------- logger
+// /dev/log/* are plain files (events a FIFO) under the image root, so the logger driver's ioctls (__LOGGERIO 0xAE,
+// drivers/staging/android/logger.c / include/linux/logger.h) reach the host fs, where SELinux refuses them with
+// EACCES. Motorola's EventLoggerService (libdevicestats.so: ioctl(fd, 0xAE01) on /dev/log/events, throws on -1)
+// kills its process on that. Answered here as the driver does.
+static int is_log_fd(int fd) {
+    char p[40], t[PATH_MAX], d[24];
+    memcpy(p, "/proc/self/fd/", 14);
+    char *n = utoa((u64)(u32)fd, d + sizeof d); memcpy(p + 14, n, slen(n) + 1);
+    long r = S4(NR_readlinkat, AT_FDCWD, p, t, sizeof t - 1);
+    if (r <= g_rootlen) return 0;
+    t[r] = 0;
+    return pre(t, g_root) && pre(t + g_rootlen, "/dev/log/");
+}
+static long log_ioctl(int fd, u32 cmd) {
+    struct kstat st;
+    switch (cmd) {
+    case 0xAE01: return 256 * 1024;      // LOGGER_GET_LOG_BUF_SIZE (DEFINE_LOGGER_DEVICE(..., 256*1024))
+    case 0xAE02: {                       // LOGGER_GET_LOG_LEN: unread bytes for this reader
+        if (S2(NR_fstat, fd, &st) < 0 || (st.st_mode & 0170000) != 0100000) return 0;
+        long pos = S3(NR_lseek, fd, 0, 1 /*SEEK_CUR*/);
+        return pos < 0 || pos > st.st_size ? 0 : st.st_size - pos;
+    }
+    case 0xAE03: return 0;               // LOGGER_GET_NEXT_ENTRY_LEN: no entry pending
+    case 0xAE04:                         // LOGGER_FLUSH_LOG (logcat -c): the buffer is emptied
+        if (S2(NR_fstat, fd, &st) == 0 && (st.st_mode & 0170000) == 0100000) S2(NR_ftruncate, fd, 0);
+        return 0;
+    }
+    return -25; // ENOTTY, as logger_ioctl's default
+}
+
 static long trap2(long nr, long *a, void *uc, char **pbp);
 
 static long trap(long nr, long *a, void *uc) {
@@ -1175,6 +1206,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
         if (((u32)a[1] & 0xffffff00u) == 0x4600) return fb_ioctl((int)a[0], (u32)a[1], (u64)a[2]);   /* qemu converts FBIO* itself */
         if (((a[1] >> 8) & 0xff) == 'b' && is_binder_fd((int)a[0])) return binder_ioctl((int)a[0], (u32)a[1], (u64)a[2]);
         if (((a[1] >> 8) & 0xff) == 'a' && is_alarm_fd((int)a[0])) return alarm_ioctl((u32)a[1], (u64)a[2]);
+        if (((u32)a[1] & 0xffffff00u) == 0xAE00 && is_log_fd((int)a[0])) return log_ioctl((int)a[0], (u32)a[1]);
         if (g_is32 && ((a[1] >> 8) & 0xff) == 'p' && ((u32)a[1] & 0xff) - 1u < 7u && is_pmem_fd((int)a[0]))
             return pmem_ioctl((int)a[0], (u32)a[1], ((u32)a[1] & 0xff) == 6 ? (u64)a[2] /* CONNECT: a descriptor */ : (u64)G(a[2]));
         if (g_is32 && (((a[1] >> 8) & 0xff) == 'A' || ((a[1] >> 8) & 0xff) == 'U') && snd_of((int)a[0])) return snd_ioctl((int)a[0], (u32)a[1], (u64)a[2]);
