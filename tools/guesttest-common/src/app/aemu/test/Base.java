@@ -172,6 +172,7 @@ public abstract class Base extends Activity {
         try {
             if (run(cur)) return;
             if (cur.equals("device")) device();
+            else if (cur.equals("binder")) bg(new Runnable() { public void run() { try { binder(); } catch (Exception e) { line("binder.error", e); } } });
             else if (cur.equals("cpu")) bg(new Runnable() { public void run() { try { cpu(); } catch (Exception e) { line("cpu.error", e); } } });
             else if (cur.equals("disk")) bg(new Runnable() { public void run() { try { disk(); } catch (Exception e) { line("disk.error", e); } } });
             else if (cur.equals("net")) bg(new Runnable() { public void run() { net(); } });
@@ -258,6 +259,28 @@ public abstract class Base extends Activity {
         double x = 0; long a = 1;
         for (int i = 1; i <= n; i++) { a = a * 6364136223846793005L + 1442695040888963407L; x += Math.sqrt((a >>> 11) & 0xffff) / i; }
         return x;
+    }
+
+    /* the cost of one synchronous binder call (PING_TRANSACTION, answered by the target's binder thread) and of
+     * Process.myUid() (getuid) - both are trapped by the engine on a phone */
+    void binder() throws Exception {
+        Class<?> sm = Class.forName("android.os.ServiceManager");
+        java.lang.reflect.Method get = sm.getMethod("getService", String.class);
+        String[] names = { "activity", "SurfaceFlinger" };
+        for (String nm : names) {
+            android.os.IBinder b = (android.os.IBinder) get.invoke(null, nm);
+            if (b == null) { line("binder." + nm, "none"); continue; }
+            for (int i = 0; i < 200; i++) b.pingBinder();
+            int n = 2000;
+            long t = System.nanoTime();
+            for (int i = 0; i < n; i++) b.pingBinder();
+            line("binder." + nm + "_ping_us", f1((System.nanoTime() - t) / 1000.0 / n));
+        }
+        int n = 20000;
+        long t = System.nanoTime();
+        int u = 0;
+        for (int i = 0; i < n; i++) u += android.os.Process.myUid();
+        line("binder.getuid_us", f1((System.nanoTime() - t) / 1000.0 / n) + (u == 1 ? "" : ""));
     }
 
     void cpu() throws Exception {
