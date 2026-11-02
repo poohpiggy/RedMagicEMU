@@ -514,7 +514,7 @@ class Importer(
                 // other partitions as separate images (Samsung CSC: prism, optics; pre-super AP: vendor, product, odm)
                 base.matches(PART_IMAGE) && e.isFile && e.size > 4096 -> {
                     val p = base.lowercase().substringBefore('.')
-                    val mount = when (p) { "product", "system_ext" -> "system/$p"; else -> p }
+                    val mount = when (p) { "product", "system_ext" -> "system/$p"; "hidden" -> "preload"; else -> p }
                     runCatching {
                         val t = spill(maybeLz4(tar, base), base)
                         try { FileChannel.open(t.toPath(), StandardOpenOption.READ).use { c -> importImage(ChannelSource(c), mount) } } finally { t.delete() }
@@ -988,8 +988,9 @@ class Importer(
     }
 
     companion object {
-        /** partition images other than system inside a tar (taken after system, which SYSTEM_IMAGE catches first) */
-        private val PART_IMAGE = Regex("(?i)(vendor|product|odm|prism|optics)\\.img(\\.ext4)?(\\.lz4)?")
+        /** partition images other than system inside a tar (taken after system, which SYSTEM_IMAGE catches first);
+         *  hidden.img is Samsung's /preload (Galaxy S2 4.x mounts it there; /system/app links into it) */
+        private val PART_IMAGE = Regex("(?i)(vendor|product|odm|prism|optics|hidden)\\.img(\\.ext4)?(\\.lz4)?")
         /** system partition images by name (ext4/sparse, Samsung RFS, YAFFS2 dumps, super.img of 10+, erofs, f2fs) */
         private val SYSTEM_IMAGE = Regex("(?i)system(_[a-z0-9]+)?(\\.ext4|\\.erofs|\\.f2fs)?\\.img(\\.ext4)?|" +
             "system_image\\.img|system\\.raw\\.img|factoryfs\\.(img|rfs)|" +
