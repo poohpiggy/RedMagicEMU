@@ -191,6 +191,7 @@ class TreeFixer(
         samsungEfs()
         keyLayout()
         pixelFlingerNoCodegen()
+        kuserTls()
         for (n in LOGS) File(root, "dev/log/$n").let { if (!it.isFile) { it.parentFile?.mkdirs(); it.createNewFile() } }
         makeFb()
     }
@@ -309,6 +310,91 @@ class TreeFixer(
      * the first blended window). pick_scanline already has the way out it takes when generation fails: the generic C
      * scanline. Its codegen branch is replaced with that fallback; done only when the original bytes are there.
      */
+    /**
+     * ARMv5 builds of bionic, and the GLES wrappers that inline its __get_tls(), read the thread pointer from the
+     * kernel's user helper page: the word at 0xffff0ff0 that the kernel rewrites on every context switch when the CPU
+     * has no TLS register (arch/arm/kernel/entry-armv.S, __kuser_get_tls). One shared word cannot hold the thread
+     * pointer of several threads running at once, so our qemu serves each such read through a fault (a SIGSEGV and a
+     * trapped sigprocmask, about 5 µs): on 2.2 that is every GL call and every pthread_getspecific(). The ARMv7 build of
+     * the same code reads TPIDRURO (mrc p15, 0, rY, c13, c0, 3), which qemu sets in the same set_tls call; the reads are
+     * rewritten to it. ARM: "mvn rX, #0xf000 … ldr rY, [rX, #-15]", any condition. Thumb: "ldr rX, =0xffff0ff0;
+     * ldr rY, [rX]" becomes one 32-bit mrc, only where rX is not read again before it is overwritten or the function
+     * returns (other Thumb reads stay as they are).
+     */
+    private fun kuserTls() {
+        if (!kk32 || img.api > 13) return
+        val mark = File(root, "system/.aemu-tls")
+        if (mark.isFile) return
+        var files = 0; var sites = 0
+        fun patch(f: File) {
+            val d = runCatching { f.readBytes() }.getOrNull() ?: return
+            if (d.size < 52 || d[0] != 0x7f.toByte() || d[1] != 'E'.code.toByte() || d[2] != 'L'.code.toByte() || d[3] != 'F'.code.toByte() ||
+                d[4].toInt() != 1 || d[18].toInt() != 40) return
+            val bb = java.nio.ByteBuffer.wrap(d).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            fun h(at: Int) = bb.getShort(at).toInt() and 0xffff
+            var n = 0
+            var i = 0
+            while (i + 20 <= d.size) {                                  // ARM
+                val w = bb.getInt(i)
+                if ((w and 0x0fff0fff) == 0x03e00a0f && (w ushr 28) != 15) {
+                    val x = (w ushr 12) and 15
+                    for (j in 1..4) {
+                        val v = bb.getInt(i + 4 * j)
+                        if ((v and 0x0ff00fff) == 0x0510000f && (v ushr 28) != 15 && ((v ushr 16) and 15) == x) {
+                            bb.putInt(i + 4 * j, (v and 0xf0000000.toInt()) or 0x0e1d0f70 or (((v ushr 12) and 15) shl 12)); n++; break
+                        }
+                        if (((v ushr 16) and 15) == x || ((v ushr 12) and 15) == x) break
+                    }
+                }
+                i += 4
+            }
+            i = 0
+            while (i + 24 <= d.size) {                                  // Thumb
+                val t0 = h(i)
+                if ((t0 and 0xf800) == 0x4800) {
+                    val x = (t0 ushr 8) and 7
+                    val lit = ((i + 4) and 3.inv()) + (t0 and 0xff) * 4
+                    val t1 = h(i + 2)
+                    if (lit + 4 <= d.size && bb.getInt(lit) == 0xffff0ff0.toInt() && (t1 and 0xffc0) == 0x6800 && ((t1 ushr 3) and 7) == x) {
+                        val y = t1 and 7
+                        var dead = x == y
+                        var k = i + 4
+                        while (!dead && k < i + 20) {
+                            val t = h(k)
+                            if (t == 0x4770 || (t and 0xff00) == 0xbd00) { dead = true; break }   // bx lr, pop {…, pc}
+                            val op = t and 0xf800
+                            val reads = when (op) {
+                                0x6800 -> setOf((t ushr 3) and 7)                              // ldr rd, [rn, #i]
+                                0x6000 -> setOf((t ushr 3) and 7, t and 7)                     // str rd, [rn, #i]
+                                0x3000 -> setOf((t ushr 8) and 7)                              // adds rd, #i
+                                0x2000 -> emptySet()                                           // movs rd, #i
+                                else -> null
+                            }
+                            if (reads == null || x in reads) break
+                            val wr = when (op) { 0x6800 -> t and 7; 0x3000, 0x2000 -> (t ushr 8) and 7; else -> -1 }
+                            if (wr == x) { dead = true; break }
+                            k += 2
+                        }
+                        if (dead) { bb.putShort(i, 0xee1d.toShort()); bb.putShort(i + 2, (0x0f70 or (y shl 12)).toShort()); n++ }
+                    }
+                }
+                i += 2
+            }
+            if (n == 0) return
+            runCatching { f.writeBytes(d) }.onSuccess { files++; sites += n }
+        }
+        fun walk(d: File, depth: Int) {
+            if (java.nio.file.Files.isSymbolicLink(d.toPath())) return
+            for (f in d.listFiles().orEmpty()) {
+                if (java.nio.file.Files.isSymbolicLink(f.toPath())) continue
+                if (f.isDirectory) { if (depth < 3) walk(f, depth + 1) } else if (f.isFile && f.length() in 52..64_000_000) patch(f)
+            }
+        }
+        for (dir in listOf("system/lib", "system/bin", "system/xbin", "system/vendor/lib", "vendor/lib")) File(root, dir).let { if (it.isDirectory) walk(it, 0) }
+        runCatching { mark.writeText("$files $sites\n") }
+        log("ARMv5 TLS reads: $sites in $files files read TPIDRURO")
+    }
+
     private fun pixelFlingerNoCodegen() {
         if (img.api >= 3) return
         val f = File(root, "system/lib/libpixelflinger.so")
