@@ -263,6 +263,14 @@ class Importer(
                 base.equals("recovery.img", true) && e.size < 64_000_000 -> zip.getInputStream(e).use { recovery = it.readBytes() }
                 base.matches(SYSTEM_IMAGE) ->
                     withEntrySource(zip, e) { importImage(it, "system") }
+                // a TWRP backup zipped up (TWRP/BACKUPS/<serial>/<name>/): system.ext4.win is a tar of the partition's
+                // files (gzip when compression was on), boot.emmc.win the raw boot partition
+                base.matches(Regex("(?i)system\\.(ext[234]|yaffs2|f2fs)\\.win")) && !gotSystem -> zip.getInputStream(e).use { s ->
+                    val b = java.io.BufferedInputStream(s, 1 shl 16)
+                    b.mark(2); val gz = b.read() == 0x1f && b.read() == 0x8b; b.reset()
+                    importTarStream(if (gz) GZIPInputStream(b, 1 shl 16) else b, base, depth + 1)
+                }
+                base.matches(Regex("(?i)boot\\.emmc\\.win")) && e.size < 64_000_000 -> zip.getInputStream(e).use { takeBoot(it.readBytes()) }
                 base.equals("payload.bin", true) -> withEntrySource(zip, e) { importPayload(it, if (depth == 0 && !n.contains('/')) topInput else null) }
                 // Sony .ftf: system.sin is the system partition, kernel.sin the kernel with the ramdisk
                 base.matches(Regex("(?i)(system|kernel|boot)\\.sin")) && !(gotSystem && base.startsWith("system", true)) ->
@@ -528,7 +536,10 @@ class Importer(
                 base.lowercase().endsWith(".zip") && e.isFile && e.size > 20_000_000 -> {
                     handleNestedZip(spill(tar.nonClosing(), base), base, depth)
                 }
-                n.matches(Regex("^(system|data|dev|sbin|vendor|etc)(/.*)?$")) || n.matches(Regex("^[^/]+\\.rc$")) || n == "default.prop" || n.startsWith("dhd.") -> {
+                // (not in a TWRP system backup: its paths are relative to /system, and etc/, vendor/ there are
+                // system/etc, system/vendor - taken by the branch below)
+                !(name.contains("system", true) && name.endsWith(".win", true)) &&
+                (n.matches(Regex("^(system|data|dev|sbin|vendor|etc)(/.*)?$")) || n.matches(Regex("^[^/]+\\.rc$")) || n == "default.prop" || n.startsWith("dhd.")) -> {
                     // файлы корня (рамдиск, dhd.*) берём, только если архив — целое дерево rootfs
                     if (fullRoot != true && !n.startsWith("system") && !(n.startsWith("dhd.") || n.endsWith(".rc") || n == "default.prop" || n.startsWith("sbin"))) continue
                     when {
