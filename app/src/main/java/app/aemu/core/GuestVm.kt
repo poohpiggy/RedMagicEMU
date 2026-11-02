@@ -298,6 +298,19 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             val ss = if (File(paths.root, kernel.eglLib).isFile) kernel.gles else "0"
             // (32-bit programs read it as 0 through the runner: they only have the GLES 1 renderer)
             overrides["ro.kernel.qemu.gles"] = ss; overrides["qemu.gles"] = ss
+            // 4.x with our GL bridge for 32-bit programs: the window toolkit draws on the GPU only when
+            // GLES20Canvas.isAvailable() - with ro.kernel.qemu set, that is ro.kernel.qemu.gles == 1
+            // (frameworks/base core/jni/android_view_GLES20Canvas.cpp 4.0-4.4). With 0 every app of 4.x drew its
+            // views through Skia on the CPU (TouchWiz home 46 fps, gfxinfo: no display lists). The loader of libEGL
+            // keeps reading qemu.gles (Loader.cpp checkGlesEmulationStatus), which stays as it is; a loader that
+            // takes the emulation driver finds the bridge under that name too. (4.0: HWUI through the bridge draws
+            // stripes - xm7k64 02.11 - left on the CPU until that is found)
+            if (img.abi != "arm64-v8a" && img.api in 16..22 && s.gpu && s.hwui && open32Bridge(engine, img, paths.dir)) {
+                overrides["ro.kernel.qemu.gles"] = "1"
+                val egl = File(paths.root, "system/lib/egl")
+                val emu = File(egl, "libGLES_emulation.so")
+                if (File(egl, "libGLES_aemu.so").isFile && !emu.exists()) runCatching { android.system.Os.symlink("libGLES_aemu.so", emu.path) }
+            }
         }
         var glBridge = false
         var glInfo = ""
