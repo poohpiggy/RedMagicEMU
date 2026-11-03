@@ -53,7 +53,9 @@ object InitPlan {
         // режимы, в которые эмулятор не грузится: заводской, зарядка, восстановление
         // (+ Samsung's FOTA update mode: init reads fota.rc only for bootmode=fota; its BOOTCLASSPATH lacks apache-xml,
         // so the odex files were "stale" - GT-P7510 3.1)
-        val skip = Regex("""(?i)^(factory_init|meta_init|init[.]charging|init[.]recovery|lpm|fota|FWUpgradeInit).*[.]rc$""")
+        // MTK's advanced_meta_init.rc is the META mode's init.rc too: its "service netd" with one socket (no dnsproxyd,
+        // mdns) replaced the real one and netd exited at DnsProxyListener (Lenovo B6000/B8000 4.2)
+        val skip = Regex("""(?i)^(factory_init|(advanced_)?meta_init|init[.]charging|init[.]recovery|lpm|fota|FWUpgradeInit).*[.]rc$""")
         val dirs = ArrayList<String>()
         val setprops = LinkedHashMap<String, String>()
         for (f in files) {
