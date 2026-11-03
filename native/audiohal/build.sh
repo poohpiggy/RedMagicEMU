@@ -20,6 +20,9 @@ mkdir -p "$(dirname "$OUT")"
   -Wl,--hash-style=sysv -Wl,-z,norelro -Wl,--build-id=none -Wl,-soname,audio.primary.default.so \
   -o "$(dirname "$OUT")/audio.primary.ics.so" audio_hal.c -lc
 "$BIN/llvm-strip" "$(dirname "$OUT")/audio.primary.ics.so" 2>/dev/null || true
+# Android 4.1: 4.2 layout, device API version 1.0
+"$BIN/clang" --target=armv7a-linux-androideabi21 -march=armv7-a -mthumb -mfloat-abi=softfp -Os -fPIC -shared   -nostdlib -ffreestanding -fno-builtin -fvisibility=hidden -fno-stack-protector -DAEMU_DEVVER=0x0100   -Wl,--hash-style=sysv -Wl,-z,norelro -Wl,--build-id=none -Wl,-soname,audio.primary.default.so   -o "$(dirname "$OUT")/audio.primary.jb41.so" audio_hal.c -lc
+"$BIN/llvm-strip" "$(dirname "$OUT")/audio.primary.jb41.so" 2>/dev/null || true
 # Qualcomm CAF variants: extra set_fm_volume / open_output_session slots in audio_hw_device
 for v in ics; do
   [ $v = ics ] && D=-DAEMU_ICS || D=

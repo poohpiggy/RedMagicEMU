@@ -489,7 +489,12 @@ static int hal_open(const struct hw_module *m, const char *id, struct hw_device 
 #ifdef AEMU_ICS
     d->common.version = 0;               /* 4.0: no device API versioning */
 #else
-    d->common.version = 0x0200;          /* AUDIO_DEVICE_API_VERSION_2_0 */
+#ifndef AEMU_DEVVER
+#define AEMU_DEVVER 0x0200                /* AUDIO_DEVICE_API_VERSION_2_0 */
+#endif
+    /* 4.1 AudioFlinger::load_audio_interface wants exactly AUDIO_DEVICE_API_VERSION_1_0 (0x0100), else BAD_VALUE
+     * and no output (frameworks/av android-4.1.2_r1 AudioFlinger.cpp:202); its audio_hw_device layout matches 4.2 */
+    d->common.version = AEMU_DEVVER;
 #endif
     d->common.module = (struct hw_module *)m;
     d->common.close = d_close;

@@ -110,7 +110,8 @@ class GlCheck {
         if (!EGL14.eglInitialize(dpy, ver, 0, ver, 1)) { ok("egl_init", false, "0x" + Integer.toHexString(EGL14.eglGetError())); return; }
         m.line("glcheck.egl_version", ver[0] + "." + ver[1]);
         int[] n = new int[1];
-        EGL14.eglGetConfigs(dpy, null, 0, 0, n, 0);
+        // EGL14 JNI throws "configs == null" for a null array (android_opengl_EGL14.cpp), so pass room for all of them
+        EGL14.eglGetConfigs(dpy, new EGLConfig[256], 0, 256, n, 0);
         m.line("glcheck.egl_configs", n[0]);
         EGLConfig[] cs = new EGLConfig[1];
         int[] want = { EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT, EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT, EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8,

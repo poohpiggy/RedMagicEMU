@@ -1131,7 +1131,9 @@ class TreeFixer(
                 from != "audio.primary.default.so" || htcLike -> from
                 // 4.0 has its own audio_hw_device layout; Qualcomm CAF builds add set_fm_volume/open_output_session
                 img.api in 14..15 -> if (qcomAudioFlinger()) "audio.primary.ics-qcom.so" else "audio.primary.ics.so"
-                img.api >= 16 -> "audio.primary.aosp.so"
+                // 4.1 AudioFlinger accepts only device API version 1.0 (AudioFlinger.cpp:202, android-4.1.2_r1)
+                img.api == 16 -> "audio.primary.jb41.so"
+                img.api >= 17 -> "audio.primary.aosp.so"
                 else -> from
             }
             val asset = if (name.startsWith("@")) "engines/common/${name.drop(1)}" else "engines/${if (kk32) "kk" else engine.id}/$name"
