@@ -131,6 +131,41 @@ object ElfPatch {
         return n
     }
 
+    /**
+     * ICS libgui built with ALLOW_DEQUEUE_CURRENT_BUFFER (Tegra boards): SurfaceTexture::dequeueBuffer hands out the
+     * buffer the consumer still shows when no other is free. The flag "requires the drivers (Gralloc, GL ...) to do
+     * implicit cross-process synchronization" (SurfaceTexture.cpp android-4.0.4, line 39): Tegra's gralloc lock waits
+     * until SurfaceFlinger has let go of it. The emulator's gralloc and GL are not Tegra's and do not wait, so the client
+     * draws into the current buffer and queueBuffer refuses it ("slot N is current!", -EINVAL) - the window's
+     * Surface.unlockCanvasAndPost throws, launcher and system_server die. Here the occupied-and-current case of the
+     * search loop is skipped: with no free buffer the synchronous dequeue waits for SurfaceFlinger, as libgui without
+     * the flag does. The shape (Thumb-2): ldr.w rA,[rB,#cur]; cmp; bne +n; ldr.w rC,[rB,#cur]; cmp; beq - two checks
+     * of the slot against mCurrentTexture, of which the first (non-free slot) becomes "b +n". Only a build with the
+     * flag has it (AOSP 4.0.4 and Huawei 4.0.3 libgui: none). Returns 1 when patched.
+     */
+    fun noDequeueCurrent(f: File): Int {
+        val sym = symbols(f, setOf("_ZN7android14SurfaceTexture13dequeueBufferEPijjjj"))?.values?.firstOrNull() ?: return 0
+        if ((sym shr 40) and 1L == 0L) return 0   // Thumb code only
+        val d = runCatching { f.readBytes() }.getOrNull() ?: return 0
+        val start = (sym and 0xffffffffffL).toInt()
+        val b = ByteBuffer.wrap(d).order(ByteOrder.LITTLE_ENDIAN)
+        fun h(o: Int) = b.getShort(o).toInt() and 0xffff
+        val hits = ArrayList<Int>()
+        var o = start
+        while (o + 16 <= minOf(d.size, start + 0x500)) {
+            val h0 = h(o); val h1 = h(o + 2); val h2 = h(o + 4); val h3 = h(o + 6)
+            val h4 = h(o + 8); val h5 = h(o + 10); val h6 = h(o + 12); val h7 = h(o + 14)
+            if ((h0 and 0xfff0) == 0xf8d0 && h4 == h0 && (h1 and 0xfff) == (h5 and 0xfff) &&
+                (h2 and 0xffc0) == 0x4280 && (h6 and 0xffc0) == 0x4280 &&
+                (h3 and 0xff00) == 0xd100 && (h3 and 0x80) == 0 && (h7 and 0xff00) == 0xd000) hits += o + 6
+            o += 2
+        }
+        if (hits.size != 1) return 0
+        // bne <imm8> (T1, forward) -> b <imm11> (T2): the same forward offset
+        b.putShort(hits[0], (0xe000 or (h(hits[0]) and 0xff)).toShort())
+        return if (runCatching { f.writeBytes(d) }.isSuccess) 1 else 0
+    }
+
     /** Сделать функции «return 0». Возвращает число изменённых (уже исправленные не считаются). */
     fun returnZero(f: File, names: Set<String>): Int {
         val syms = symbols(f, names) ?: return 0

@@ -193,6 +193,7 @@ class TreeFixer(
         pixelFlingerNoCodegen()
         kuserTls()
         preloadHints()
+        noDequeueCurrent()
         for (n in LOGS) File(root, "dev/log/$n").let { if (!it.isFile) { it.parentFile?.mkdirs(); it.createNewFile() } }
         makeFb()
     }
@@ -397,6 +398,15 @@ class TreeFixer(
         for (dir in listOf("system/lib", "system/bin", "system/xbin", "system/vendor/lib", "vendor/lib")) File(root, dir).let { if (it.isDirectory) walk(it, 0) }
         runCatching { mark.writeText("$files $sites\n") }
         log("ARMv5 TLS reads: $sites in $files files read TPIDRURO")
+    }
+
+    /** ICS libgui with ALLOW_DEQUEUE_CURRENT_BUFFER: the emulator's drivers do not do the implicit sync the flag needs
+     *  (ElfPatch.noDequeueCurrent); 4.0 only (4.1 replaced SurfaceTexture's queue with BufferQueue). */
+    private fun noDequeueCurrent() {
+        if (img.api !in 14..15) return
+        val f = File(root, "system/lib/libgui.so")
+        if (!f.isFile || java.nio.file.Files.isSymbolicLink(f.toPath())) return
+        if (ElfPatch.noDequeueCurrent(f) > 0) log("libgui: dequeueBuffer no longer hands out the current buffer (ALLOW_DEQUEUE_CURRENT_BUFFER build)")
     }
 
     /** 32-bit firmwares under qemu: preload hints with should-be-one bits cleared in string routines (ElfPatch.fixPreloadHints);
