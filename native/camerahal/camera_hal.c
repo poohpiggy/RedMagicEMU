@@ -133,6 +133,7 @@ struct camera_device {
     notify_cb notify; data_cb data; request_memory get_memory; void *user;
     char *params;
     int served;     /* the camera service gave the parameters: setParameters goes back to it */
+    volatile int focusing;   /* focus threads still running: close waits for them */
 };
 
 #define MSG_SHUTTER 0x002
@@ -398,7 +399,23 @@ static int c_start_rec(struct camera_device *d) { (void)d; return -38; }   /* vi
 static void c_stop_rec(struct camera_device *d) { (void)d; }
 static int c_rec_enabled(struct camera_device *d) { (void)d; return 0; }
 static void c_release_frame(struct camera_device *d, const void *p) { (void)d; (void)p; }
-static int c_focus(struct camera_device *d) { if ((d->msgs & MSG_FOCUS) && d->notify) d->notify(MSG_FOCUS, 1, 0, d->user); return 0; }
+/* The focus result goes out from a thread of its own, as a real HAL's does: CameraClient::autoFocus holds mLock while
+ * calling us, and its notifyCallback takes that lock with lockIfMessageWanted (tryLock in a loop while the message is
+ * enabled) - answered from inside autoFocus it spins forever (frameworks/av android-4.4.4_r1 CameraClient.cpp:651) */
+extern int pthread_detach(long t);
+static void *focus_done(void *arg) {
+    struct camera_device *d = arg;
+    usleep(30000);
+    if (d->running && (d->msgs & MSG_FOCUS) && d->notify) d->notify(MSG_FOCUS, 1, 0, d->user);
+    __sync_fetch_and_sub(&d->focusing, 1);
+    return 0;
+}
+static int c_focus(struct camera_device *d) {
+    long t;
+    __sync_fetch_and_add(&d->focusing, 1);
+    if (pthread_create(&t, 0, focus_done, d) == 0) pthread_detach(t); else __sync_fetch_and_sub(&d->focusing, 1);
+    return 0;
+}
 static int c_cancel_focus(struct camera_device *d) { (void)d; return 0; }
 static int c_take_picture(struct camera_device *d) { say(d, "shot\n"); return 0; }
 static int c_cancel_picture(struct camera_device *d) { (void)d; return 0; }
@@ -440,6 +457,7 @@ static struct camera_ops ops = {
 static int dev_close(struct hw_device *h) {
     struct camera_device *d = (struct camera_device *)h;
     c_release(d);
+    for (int i = 0; d->focusing > 0 && i < 50; i++) usleep(10000);
     free(d->params);
     free(d);
     return 0;
