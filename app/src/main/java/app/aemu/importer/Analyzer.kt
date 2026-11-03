@@ -107,8 +107,14 @@ class Analyzer(private val ctx: Context, private val paths: VmPaths, private val
             // bar icon slot" and Launcher2 on a missing resource at sw360dp; it gets the WXGA tablet screen as 3.x does
             all["ro.build.characteristics"]?.split(',')?.contains("tablet") == true && all["ro.sf.lcd_density"] == null ->
                 VmSettings(width = 1280, height = 800, density = 160)
+            // an mdpi/ldpi build keeps its own density: aapt's PRODUCT_AAPT_PREF_CONFIG drops the other densities, and the
+            // layouts kept for them may name stripped drawables (Xperia Active ST17i 4.0.4: SemcPhone's default layout
+            // refers to 0x7f02004e, present only for the layout-mdpi variant's sake - com.android.phone died at 240 dpi)
+            density <= 160 && all["ro.build.characteristics"]?.split(',')?.contains("tablet") == true ->
+                VmSettings(width = 1280, height = 800, density = 160)
+            density <= 120 -> VmSettings(width = 240, height = 320, density = 120)
+            density <= 160 -> VmSettings(width = 320, height = 480, density = 160)
             // 540×960 — лучший баланс скорости и чёткости под эмуляцией; поменять можно в настройках
-            density <= 160 -> VmSettings(width = 480, height = 800, density = 240)
             // a firmware made for a QHD panel (560 dpi and up) may have no layout that fits an hdpi screen: the Galaxy
             // S6 launcher on 5.x gets a zero-wide item at 540×960/240 and dies in a loop; 720×1280/320 is the smallest
             // screen it was checked on
