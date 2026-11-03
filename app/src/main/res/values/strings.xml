@@ -239,4 +239,26 @@
     <string name="sort_skin">Skin</string>
     <string name="sort_last_run">Last started</string>
     <string name="sort_size">Size</string>
+    <string name="m_camera">Camera</string>
+    <string name="cam_back">Back</string>
+    <string name="cam_front">Front</string>
+    <string name="cam_external">External</string>
+    <string name="cam_reset">Reset to automatic</string>
+    <string name="cam_reset_q">Forget every camera edit of this system and take the phone cameras as they are?</string>
+    <string name="cam_unsupported">The camera service serves Android 4.0–4.4 for now; this system keeps its built-in camera list.</string>
+    <string name="cam_hint">Values come from the phone camera, in the format of this Android version. Change, remove or add any parameter (* = changed). Parameters apply when an app opens the camera; the number of cameras, facing and orientation after a restart of the system.</string>
+    <string name="cam_add_camera">Add camera</string>
+    <string name="cam_remove_camera">Remove camera</string>
+    <string name="cam_none">No cameras</string>
+    <string name="cam_phone_camera">Phone camera</string>
+    <string name="cam_facing">Facing</string>
+    <string name="cam_orientation">Sensor orientation</string>
+    <string name="cam_mirror">Mirror the picture</string>
+    <string name="cam_search">Search parameters</string>
+    <string name="cam_add_param">Add parameter</string>
+    <string name="cam_remove_param">Remove parameter</string>
+    <string name="cam_key">Key</string>
+    <string name="cam_value">Value</string>
+    <string name="cam_add">Add</string>
+    <string name="cam_save">Save</string>
 </resources>

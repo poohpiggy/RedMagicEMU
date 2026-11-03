@@ -123,7 +123,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     /** the phone's microphone for the guest (audio HAL input → /dev/aemu_mic) */
     val mic = AudioIn(ctx, paths.root, ::log)
     /** the phone's cameras for the guest (camera HAL → /dev/socket/aemu_cam) */
-    val camera = CameraFeed(ctx, paths, ::log)
+    val camera = CameraFeed(ctx, paths, img.api, ::log)
     /** the phone's video encoder for the guest's OMX encoder (native/omxvenc → /dev/socket/aemu_venc) */
     val venc = VideoEncoderFeed(paths, ::log)
     /** hardware overlays of 2.x (overlay HAL → /dev/socket/aemu_ovl), drawn over the screen */

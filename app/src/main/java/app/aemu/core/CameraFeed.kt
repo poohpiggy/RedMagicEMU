@@ -10,6 +10,7 @@ import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest as CR
 import android.media.Image
 import android.media.ImageReader
 import android.net.LocalSocket
@@ -32,8 +33,15 @@ import java.nio.ByteOrder
  * "ovl <id>" (2.3 HALs that show the preview through an overlay, camera_gb.cpp): the host draws each preview frame
  * into that overlay itself (OverlayFeed), so the picture does not travel through the guest; "ovl 0" stops it.
  * Frames are 640×480 straight from the sensor (the HAL reports the sensor orientation, the guest rotates).
+ * Camera service (CameraProfile, 4.0-4.4 HAL): "info" -> type 4 text "<count>;<facing>,<orientation>;..." (one-shot
+ * connection, before any open); "params" after open -> type 4 text, the flattened Camera.Parameters of that camera;
+ * "set <flattened>" -> what the guest application set, applied to the phone's camera (zoom, flash, focus, exposure,
+ * white balance, effect, scene, antibanding; picture size, rotation and JPEG quality for the still). An empty type 4
+ * answer (other versions) leaves the HAL on its built-in list.
  */
-class CameraFeed(private val ctx: Context, private val paths: VmPaths, private val log: (String) -> Unit) {
+class CameraFeed(private val ctx: Context, private val paths: VmPaths, private val api: Int, private val log: (String) -> Unit) {
+    /** the camera service serves this guest (CameraProfile.API_RANGE): parameters, count and pictures come from it */
+    private val served = api in CameraProfile.API_RANGE
     private val server = UnixServer(paths.socket("aemu_cam"), "camera") { c -> Session(c).run() }
     @Volatile var onPermissionNeeded: (() -> Unit)? = null
 
@@ -55,6 +63,13 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         @Volatile private var zoom = 100
         @Volatile private var outW = W
         @Volatile private var outH = H
+        @Volatile private var mirror = false
+        @Volatile private var cam: CameraProfile.Cam? = null
+        @Volatile private var guestParams: Map<String, String> = emptyMap()
+        @Volatile private var still: ImageReader? = null
+        @Volatile private var session: CameraCaptureSession? = null
+        @Volatile private var preview: android.hardware.camera2.CaptureRequest.Builder? = null
+        @Volatile private var pictureSize = android.util.Size(W, H)
         private val nv21 = ByteArray(W * H * 3 / 2)
         private val zbuf = ByteArray(W * H * 3 / 2)
         private var sized = ByteArray(0)
@@ -71,7 +86,17 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                     val line = r.readLine() ?: break
                     val p = line.trim().split(' ')
                     when (p[0]) {
-                        "open" -> if (java.io.File(paths.bin, "camera.test").exists()) openTest() else open(p.getOrNull(1) == "1")
+                        "open" -> {
+                            val n = p.getOrNull(1)?.toIntOrNull() ?: 0
+                            var front = n == 1
+                            if (served) CameraProfile.load(ctx, paths).cams.getOrNull(n)?.let { c ->
+                                cam = c; mirror = c.mirror; front = c.facing == 1
+                                val q = CameraProfile.effective(ctx, c, api); guestParams = q
+                                q["picture-size"]?.let { parseSize(it) }?.let { pictureSize = it }
+                            }
+                            // off the command loop: "params" must be answered while the phone camera opens (or asks for permission)
+                            if (java.io.File(paths.bin, "camera.test").exists()) openTest() else if (served) handler.post { open(front) } else open(front)
+                        }
                         "start" -> streaming = true
                         "stop" -> streaming = false
                         "shot" -> shot = true
@@ -83,12 +108,15 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                         }
                         "zoom" -> zoom = (p.getOrNull(1)?.toIntOrNull() ?: 100).coerceIn(100, 800)
                         "ovl" -> overlay = p.getOrNull(1)?.toIntOrNull() ?: 0
+                        "info" -> sendText(if (served) info() else "")
+                        "params" -> sendText(cam?.let { CameraProfile.flatten(CameraProfile.effective(ctx, it, api).also { q -> guestParams = q }) } ?: "")
+                        "set" -> if (served) applyParams(CameraProfile.unflatten(line.trim().substringAfter(' ', "")))
                         "close" -> break
                     }
                 }
             } finally {
                 streaming = false
-                runCatching { device?.close() }; runCatching { reader?.close() }
+                runCatching { device?.close() }; runCatching { reader?.close() }; runCatching { still?.close() }
                 thread.quitSafely()
                 runCatching { sock.close() }
             }
@@ -108,7 +136,8 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             }
             val cm = ctx.getSystemService(CameraManager::class.java)
             val want = if (front) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
-            val id = cm.cameraIdList.firstOrNull { cm.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == want }
+            val id = cam?.host?.takeIf { it in cm.cameraIdList }
+                ?: cm.cameraIdList.firstOrNull { cm.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == want }
                 ?: cm.cameraIdList.firstOrNull() ?: run { log("camera: the phone has no camera"); return }
             sensorOrient = cm.getCameraCharacteristics(id).get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
             val ir = ImageReader.newInstance(W, H, ImageFormat.YUV_420_888, 2)
@@ -124,9 +153,15 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                         cm.getCameraCharacteristics(id).get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
                             ?.filter { it.upper == 30 }?.maxByOrNull { it.lower }
                             ?.let { req.set(android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
+                        preview = req
+                        // the still: the phone's own JPEG at the picture size the guest application chose
+                        val st = if (served) runCatching { ImageReader.newInstance(pictureSize.width, pictureSize.height, ImageFormat.JPEG, 2) }.getOrNull() else null
+                        still = st
+                        st?.setOnImageAvailableListener({ r -> r.acquireLatestImage()?.use { stillDone(it) } }, handler)
+                        if (served) applyTo(req)
                         @Suppress("DEPRECATION")
-                        d.createCaptureSession(listOf(ir.surface), object : CameraCaptureSession.StateCallback() {
-                            override fun onConfigured(s: CameraCaptureSession) { runCatching { s.setRepeatingRequest(req.build(), null, handler) } }
+                        d.createCaptureSession(listOfNotNull(ir.surface, st?.surface), object : CameraCaptureSession.StateCallback() {
+                            override fun onConfigured(s: CameraCaptureSession) { session = s; runCatching { s.setRepeatingRequest(req.build(), null, handler) } }
                             override fun onConfigureFailed(s: CameraCaptureSession) { log("camera: session not configured") }
                         }, handler)
                     }.onFailure { runCatching { d.close() }; return }
@@ -141,6 +176,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             if (!streaming && !shot) return
             val t0 = System.nanoTime()
             toNv21(img)
+            if (mirror) mirrorNv21()
             process(t0)
         }
 
@@ -169,6 +205,11 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             val z = zoom
             if (z > 100) zoomNv21(z)
             runCatching {
+                if (shot && still != null && session != null && device != null) {
+                    shot = false
+                    if (takeStill()) return
+                    shot = true
+                }
                 if (shot) {
                     shot = false
                     val jpg = ByteArrayOutputStream(200_000)
@@ -195,6 +236,109 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                 }
                 if (frames == 1) firstNs = t1
             }.onFailure { streaming = false }
+        }
+
+        private fun sendText(t: String) { val b = t.toByteArray(); send(4, b, b.size, w = 0, h = 0) }
+
+        /** "<count>;<facing>,<orientation>;..." from the profile */
+        private fun info(): String {
+            val cams = CameraProfile.load(ctx, paths).cams
+            return cams.size.toString() + cams.joinToString("") { ";${it.facing},${it.orientation}" }
+        }
+
+        private fun parseSize(s: String): android.util.Size? {
+            val i = s.indexOf('x'); if (i <= 0) return null
+            val w = s.substring(0, i).toIntOrNull() ?: return null; val h = s.substring(i + 1).toIntOrNull() ?: return null
+            return if (w in 16..8192 && h in 16..8192) android.util.Size(w, h) else null
+        }
+
+        /** what the guest application set (Camera.setParameters): kept, and the phone's camera follows it */
+        private fun applyParams(p: Map<String, String>) {
+            guestParams = p
+            val ratios = p["zoom-ratios"]?.split(',')?.mapNotNull { it.toIntOrNull() }
+            p["zoom"]?.toIntOrNull()?.let { i -> ratios?.getOrNull(i)?.let { zoom = it.coerceIn(100, 800) } }
+            p["preview-size"]?.let { parseSize(it) }?.let { if (it.width % 2 == 0 && it.height % 2 == 0 && it.width <= 1920 && it.height <= 1080) { outW = it.width; outH = it.height } }
+            val ps = p["picture-size"]?.let { parseSize(it) }
+            if (ps != null && ps != pictureSize) { pictureSize = ps; handler.post { reconfigure() } }
+            preview?.let { r -> handler.post { runCatching { applyTo(r); session?.setRepeatingRequest(r.build(), null, handler) } } }
+        }
+
+        /** the guest's parameters as camera2 controls of the phone's camera */
+        private fun applyTo(r: CR.Builder) {
+            val p = guestParams
+            fun mode(v: String?, m: Map<String, Int>) = v?.let { m[it] }
+            mode(p["focus-mode"], mapOf("auto" to 1, "macro" to 2, "continuous-video" to 3, "continuous-picture" to 4, "edof" to 5, "fixed" to 0, "infinity" to 0))
+                ?.let { r.set(CR.CONTROL_AF_MODE, it); if (p["focus-mode"] == "infinity") r.set(CR.LENS_FOCUS_DISTANCE, 0f) }
+            mode(p["whitebalance"], mapOf("auto" to 1, "incandescent" to 2, "fluorescent" to 3, "warm-fluorescent" to 4, "daylight" to 5, "cloudy-daylight" to 6, "twilight" to 7, "shade" to 8))
+                ?.let { r.set(CR.CONTROL_AWB_MODE, it) }
+            mode(p["effect"], mapOf("none" to 0, "mono" to 1, "negative" to 2, "solarize" to 3, "sepia" to 4, "posterize" to 5, "whiteboard" to 6, "blackboard" to 7, "aqua" to 8))
+                ?.let { r.set(CR.CONTROL_EFFECT_MODE, it) }
+            mode(p["antibanding"], mapOf("off" to 0, "50hz" to 1, "60hz" to 2, "auto" to 3))
+                ?.let { r.set(CR.CONTROL_AE_ANTIBANDING_MODE, it) }
+            val scene = mode(p["scene-mode"], mapOf("action" to 2, "portrait" to 3, "landscape" to 4, "night" to 5, "night-portrait" to 6, "theatre" to 7, "beach" to 8, "snow" to 9, "sunset" to 10, "steadyphoto" to 11, "fireworks" to 12, "sports" to 13, "party" to 14, "candlelight" to 15, "barcode" to 16, "hdr" to 18))
+            r.set(CR.CONTROL_MODE, if (scene != null) 2 else 1)
+            if (scene != null) r.set(CR.CONTROL_SCENE_MODE, scene)
+            p["exposure-compensation"]?.toIntOrNull()?.let { r.set(CR.CONTROL_AE_EXPOSURE_COMPENSATION, it) }
+            p["auto-exposure-lock"]?.let { r.set(CR.CONTROL_AE_LOCK, it == "true") }
+            p["auto-whitebalance-lock"]?.let { r.set(CR.CONTROL_AWB_LOCK, it == "true") }
+            when (p["flash-mode"]) {
+                "torch" -> { r.set(CR.CONTROL_AE_MODE, 1); r.set(CR.FLASH_MODE, 2) }
+                "on" -> { r.set(CR.CONTROL_AE_MODE, 3); r.set(CR.FLASH_MODE, 0) }
+                "auto" -> { r.set(CR.CONTROL_AE_MODE, 2); r.set(CR.FLASH_MODE, 0) }
+                "off" -> { r.set(CR.CONTROL_AE_MODE, 1); r.set(CR.FLASH_MODE, 0) }
+            }
+        }
+
+        /** a new picture size: the still stream is rebuilt (camera2 fixes stream sizes per session) */
+        private fun reconfigure() {
+            val d = device ?: return; val ir = reader ?: return; val r = preview ?: return
+            runCatching { session?.close() }; runCatching { still?.close() }
+            val st = runCatching { ImageReader.newInstance(pictureSize.width, pictureSize.height, ImageFormat.JPEG, 2) }.getOrNull()
+            still = st; session = null
+            st?.setOnImageAvailableListener({ rr -> rr.acquireLatestImage()?.use { stillDone(it) } }, handler)
+            @Suppress("DEPRECATION")
+            runCatching {
+                d.createCaptureSession(listOfNotNull(ir.surface, st?.surface), object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(s: CameraCaptureSession) { session = s; runCatching { s.setRepeatingRequest(r.build(), null, handler) } }
+                    override fun onConfigureFailed(s: CameraCaptureSession) { log("camera: picture size $pictureSize not configured") }
+                }, handler)
+            }
+        }
+
+        /** the picture through the phone's JPEG stream; false: none (the preview frame is used instead) */
+        private fun takeStill(): Boolean {
+            val d = device ?: return false; val s = session ?: return false; val st = still ?: return false
+            return runCatching {
+                val r = d.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply { addTarget(st.surface) }
+                applyTo(r)
+                val p = guestParams
+                r.set(CR.JPEG_QUALITY, (p["jpeg-quality"]?.toIntOrNull() ?: 90).coerceIn(1, 100).toByte())
+                // the guest's "rotation" (Parameters.setRotation): the turn its camera application wants in the file
+                r.set(CR.JPEG_ORIENTATION, (p["rotation"]?.toIntOrNull() ?: 0).let { (it % 360 + 360) % 360 })
+                val tw = p["jpeg-thumbnail-width"]?.toIntOrNull() ?: 0; val th = p["jpeg-thumbnail-height"]?.toIntOrNull() ?: 0
+                r.set(CR.JPEG_THUMBNAIL_SIZE, android.util.Size(tw, th))
+                r.set(CR.JPEG_THUMBNAIL_QUALITY, (p["jpeg-thumbnail-quality"]?.toIntOrNull() ?: 90).coerceIn(1, 100).toByte())
+                s.capture(r.build(), null, handler)
+                true
+            }.getOrDefault(false)
+        }
+
+        private fun stillDone(img: Image) {
+            val b = img.planes[0].buffer
+            val a = ByteArray(b.remaining()); b.get(a)
+            streaming = false   // a picture stops the preview until the guest starts it again
+            send(2, a, a.size)
+            log("camera: picture ${img.width}x${img.height}, ${a.size / 1024} KB")
+        }
+
+        /** the frame flipped left-right (a "mirror" camera of the profile) */
+        private fun mirrorNv21() {
+            for (y in 0 until H) { var a = y * W; var b = a + W - 1; while (a < b) { val t = nv21[a]; nv21[a] = nv21[b]; nv21[b] = t; a++; b-- } }
+            val n = W * H
+            for (y in 0 until H / 2) {
+                var a = n + y * W; var b = a + W - 2
+                while (a < b) { val v = nv21[a]; val u = nv21[a + 1]; nv21[a] = nv21[b]; nv21[a + 1] = nv21[b + 1]; nv21[b] = v; nv21[b + 1] = u; a += 2; b -= 2 }
+            }
         }
 
         private fun send(type: Int, a: ByteArray, n: Int, b: ByteArray? = null, w: Int = W, h: Int = H) {

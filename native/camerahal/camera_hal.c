@@ -132,6 +132,7 @@ struct camera_device {
     struct preview_ops *window;
     notify_cb notify; data_cb data; request_memory get_memory; void *user;
     char *params;
+    int served;     /* the camera service gave the parameters: setParameters goes back to it */
 };
 
 #define MSG_SHUTTER 0x002
@@ -221,6 +222,42 @@ static int read_full(int fd, void *buf, unsigned long n) {
     char *p = buf;
     while (n) { long k = read(fd, p, n); if (k <= 0) return -1; p += k; n -= (unsigned long)k; }
     return 0;
+}
+
+/* The camera service's text answer (type 4: "info", "params"); 0 when it has none (an empty answer: the host keeps
+ * this version on the built-in list below) */
+static char *host_text(int fd) {
+    int32_t hdr[4];
+    if (read_full(fd, hdr, sizeof(hdr)) < 0 || hdr[0] != 4 || hdr[3] <= 0 || hdr[3] > (64 << 10)) return 0;
+    char *t = malloc((unsigned long)hdr[3] + 1);
+    if (!t) return 0;
+    if (read_full(fd, t, (unsigned long)hdr[3]) < 0) { free(t); return 0; }
+    t[hdr[3]] = 0;
+    return t;
+}
+
+/* The cameras the service offers: "<count>;<facing>,<orientation>;..." asked once over a short connection */
+#define MAXCAM 8
+static int g_count = -1, g_facing[MAXCAM], g_orient[MAXCAM];
+static int num(const char **p) { int v = 0; while (**p >= '0' && **p <= '9') v = v * 10 + (*(*p)++ - '0'); return v; }
+static void load_info(void) {
+    if (g_count >= 0) return;
+    g_count = 2; g_facing[0] = 0; g_orient[0] = 90; g_facing[1] = 1; g_orient[1] = 270;   /* built-in: back and front */
+    int fd = host_connect();
+    if (fd < 0) return;
+    write(fd, "info\n", 5);
+    char *t = host_text(fd);
+    write(fd, "close\n", 6);
+    close(fd);
+    if (!t) return;
+    const char *q = t;
+    int n = num(&q);
+    if (n >= 1 && n <= MAXCAM) {
+        int i = 0;
+        while (i < n && *q == ';') { q++; g_facing[i] = num(&q); if (*q == ',') q++; g_orient[i] = num(&q); i++; }
+        if (i == n) g_count = n;
+    }
+    free(t);
 }
 
 static void show(struct camera_device *d, const unsigned char *rgba, int w, int h) {
@@ -370,6 +407,11 @@ static int c_set_params(struct camera_device *d, const char *p) {
     char *n = sdup(p);
     if (!n) return -12;
     free(d->params); d->params = n;
+    if (d->served) {
+        /* the camera service applies it to the phone's camera (one line: the flattened string has no newline) */
+        for (char *c = n; *c; c++) if (*c == '\n') *c = ' ';
+        say(d, "set "); say(d, n); say(d, "\n");
+    }
     return 0;
 }
 static char *c_get_params(struct camera_device *d) { return sdup(d->params ? d->params : DEFAULTS); }
@@ -405,7 +447,8 @@ static int dev_close(struct hw_device *h) {
 
 static int cam_open(const struct hw_module *m, const char *id, struct hw_device **out) {
     int n = (id && id[0] >= '0' && id[0] <= '9') ? id[0] - '0' : 0;
-    if (n > 1) return -22;
+    load_info();
+    if (n >= g_count) return -22;
     struct camera_device *d = calloc(1, sizeof(*d));
     if (!d) return -12;
     d->common.tag = HARDWARE_DEVICE_TAG;
@@ -420,18 +463,24 @@ static int cam_open(const struct hw_module *m, const char *id, struct hw_device 
     d->id = n;
     d->fd = host_connect();
     if (d->fd < 0) { free(d); return -19; /* -ENODEV: the host does not serve a camera */ }
-    say(d, n ? "open 1\n" : "open 0\n");
+    char cmd[] = "open 0\nparams\n";
+    cmd[5] = (char)('0' + n);
+    say(d, cmd);
+    /* the service's parameters for this camera (the first answer, before any frame: frames follow "start") */
+    char *pp = host_text(d->fd);
+    if (pp) { d->params = pp; d->served = 1; }
     d->running = 1;
     if (pthread_create(&d->thread, 0, reader, d) != 0) { close(d->fd); free(d); return -12; }
     *out = &d->common;
     return 0;
 }
 
-static int cam_count(void) { return 2; }
+static int cam_count(void) { load_info(); return g_count; }
 static int cam_info(int id, struct camera_info *info) {
-    if (id < 0 || id > 1) return -22;
-    info->facing = id;                      /* 0 back, 1 front */
-    info->orientation = id ? 270 : 90;      /* the phone's sensors are mounted sideways, frames come unrotated */
+    load_info();
+    if (id < 0 || id >= g_count) return -22;
+    info->facing = g_facing[id];            /* 0 back, 1 front */
+    info->orientation = g_orient[id];       /* the phone's sensors are mounted sideways, frames come unrotated */
 #ifdef CAM_MODULE_24
     info->device_version = 0x100;           /* CAMERA_DEVICE_API_VERSION_1_0 */
     info->static_characteristics = 0;

@@ -16,6 +16,7 @@ import androidx.compose.material.icons.rounded.Label
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.BatteryStd
 import androidx.compose.material.icons.rounded.Cast
+import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.InstallMobile
 import androidx.compose.material.icons.rounded.Tune
@@ -431,7 +432,7 @@ class VmActivity : ComponentActivity() {
         }
     }
 
-    private enum class Dlg { NONE, SMS, CALL, BATTERY, ADB, DEVICE, APPS, BADGE, HUD }
+    private enum class Dlg { NONE, SMS, CALL, BATTERY, ADB, DEVICE, APPS, BADGE, HUD, CAMERA }
 
     // position of the floating menu button, kept across launches
     private val uiPrefs by lazy { getSharedPreferences("vm_ui", MODE_PRIVATE) }
@@ -1023,6 +1024,8 @@ class VmActivity : ComponentActivity() {
                             enabled = running, onClick = { menu = false; dialog = Dlg.BATTERY })
                         DropdownMenuItem(text = { Text(stringResource(R.string.m_install_apk)) }, leadingIcon = { Icon(Icons.Rounded.InstallMobile, null) },
                             enabled = running, onClick = { menu = false; pickApk.launch(arrayOf("application/vnd.android.package-archive", "application/octet-stream", "*/*")) })
+                        DropdownMenuItem(text = { Text(stringResource(R.string.m_camera)) }, leadingIcon = { Icon(Icons.Rounded.PhotoCamera, null) },
+                            onClick = { menu = false; dialog = Dlg.CAMERA })
                         DropdownMenuItem(text = { Text(stringResource(R.string.m_device)) }, leadingIcon = { Icon(Icons.Rounded.Tune, null) },
                             enabled = running, onClick = { menu = false; dialog = Dlg.DEVICE })
                         DropdownMenuItem(text = { Text(stringResource(R.string.m_adb)) }, leadingIcon = { Icon(Icons.Rounded.Lan, null) },
@@ -1060,6 +1063,7 @@ class VmActivity : ComponentActivity() {
                 Dlg.BATTERY -> BatteryDialog { dialog = Dlg.NONE }
                 Dlg.ADB -> AdbDialog { dialog = Dlg.NONE }
                 Dlg.DEVICE -> DeviceDialog { dialog = Dlg.NONE }
+                Dlg.CAMERA -> CameraSettings(this@VmActivity, vm.paths, vm.img.api) { dialog = Dlg.NONE }
                 Dlg.APPS -> AppsDialog { dialog = Dlg.NONE }
                 Dlg.BADGE -> BadgeDialog { dialog = Dlg.NONE }
                 Dlg.HUD -> HudDialog { dialog = Dlg.NONE }

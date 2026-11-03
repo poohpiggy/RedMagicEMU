@@ -238,4 +238,26 @@
     <string name="sort_skin">Оболочка</string>
     <string name="sort_last_run">Последний запуск</string>
     <string name="sort_size">Размер</string>
+    <string name="m_camera">Камера</string>
+    <string name="cam_back">Задняя</string>
+    <string name="cam_front">Фронтальная</string>
+    <string name="cam_external">Внешняя</string>
+    <string name="cam_reset">Сбросить к авто</string>
+    <string name="cam_reset_q">Забыть все правки камеры этой системы и брать камеры телефона как есть?</string>
+    <string name="cam_unsupported">Служба камеры пока обслуживает Android 4.0–4.4; у этой системы остаётся встроенный список камеры.</string>
+    <string name="cam_hint">Значения взяты с камеры телефона в формате этой версии Android. Любой параметр можно изменить, удалить или добавить (* — изменён). Параметры применяются при открытии камеры приложением; число камер, направление и поворот — после перезапуска системы.</string>
+    <string name="cam_add_camera">Добавить камеру</string>
+    <string name="cam_remove_camera">Удалить камеру</string>
+    <string name="cam_none">Камер нет</string>
+    <string name="cam_phone_camera">Камера телефона</string>
+    <string name="cam_facing">Направление</string>
+    <string name="cam_orientation">Поворот матрицы</string>
+    <string name="cam_mirror">Зеркалить картинку</string>
+    <string name="cam_search">Поиск параметров</string>
+    <string name="cam_add_param">Добавить параметр</string>
+    <string name="cam_remove_param">Удалить параметр</string>
+    <string name="cam_key">Ключ</string>
+    <string name="cam_value">Значение</string>
+    <string name="cam_add">Добавить</string>
+    <string name="cam_save">Сохранить</string>
 </resources>
