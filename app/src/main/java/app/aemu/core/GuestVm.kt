@@ -35,6 +35,19 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         fun open32Bridge(engine: Engine, img: GuestImage, dir: File): Boolean =
             engine == Engine.N64 && img.abi != "arm64-v8a" && !File(dir, "glclosed").isFile &&
                 (img.api < 23 || File(dir, "glopen").isFile)
+        /** debug.aemu.gl of an open32 firmware (guest.c policy): the text of "glopen" if there is one; 4.4 defaults to
+         *  3 - the compositor and everything else on the open bridge, which then serves the display itself (guest.c
+         *  own_egl) and no closed GL server runs (desktop, tester, 16 4.x images by screenshot 03.11); the rest 2 (the
+         *  compositor on the closed bridge). 4.0-4.3 compose in GLES 1 from window buffers in memory: with 3 a GL
+         *  program's frame is read back and uploaded again (tester gl1 119 -> 79 fps on 4.3) until the 32-bit gralloc
+         *  keeps buffers on the host (PLAN 3.1); 5.x not checked yet */
+        fun open32Mode(img: GuestImage, dir: File): Int =
+            runCatching { File(dir, "glopen").readText().trim().toInt() }.getOrDefault(if (img.api == 19) 3 else 2)
+        /** the compositor of an open32 firmware draws through the open bridge, which reads its framebuffer target
+         *  back into fb0 as RGBA_8888 - the format the kernel reports (run64.c fb_ioctl); otherwise the closed GL
+         *  server writes RGB565 frames there */
+        fun open32Compositor(engine: Engine, img: GuestImage, dir: File): Boolean =
+            open32Bridge(engine, img, dir) && (img.api >= 23 || open32Mode(img, dir) >= 3)
     }
     enum class State { STOPPED, PREPARING, BOOTING, RUNNING, FAILED, STOPPING }
 
@@ -162,7 +175,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     /** a 32-bit firmware on the arm64 kernel (open32) with the 4.4 engine's GL server: fb0 holds RGB565 frames, as on that engine */
     // 6.0+ under the open bridge: the compositor's framebuffer target (GRALLOC_USAGE_HW_FB) is read back by the guest
     // bridge into fb0 as RGBA_8888, the format the kernel reports (run64.c fb_ioctl) - not the GL server's RGB565
-    val fb565: Boolean get() = engine == Engine.N64 && img.abi != "arm64-v8a" && settings.gpu && !(img.api >= 23 && open32Bridge(engine, img, paths.dir))
+    val fb565: Boolean get() = engine == Engine.N64 && img.abi != "arm64-v8a" && settings.gpu && !open32Compositor(engine, img, paths.dir)
     /** 0.9-1.x: SurfaceFlinger draws RGB565 itself (whatever bpp fbdev reports) and flips between two such pages */
     val fbLegacy565: Boolean get() = engine == Engine.N64 && img.api < 3
 
@@ -335,7 +348,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             paths.socket("aemu_gl").parentFile?.mkdirs()
             val r = GlHost.start(paths.socket("aemu_gl").absolutePath)
             log("open GPU bridge (32-bit): $r")
-            if (r.startsWith("ok")) overrides["debug.aemu.gl"] = runCatching { File(paths.dir, "glopen").readText().trim() }.getOrDefault("").takeIf { it.isNotEmpty() } ?: "2"
+            if (r.startsWith("ok")) overrides["debug.aemu.gl"] = if (open32Gl) "${open32Mode(img, paths.dir)}" else runCatching { File(paths.dir, "glopen").readText().trim() }.getOrDefault("").takeIf { it.isNotEmpty() } ?: "2"
         }
         // 7.0+ libEGL ignores egl.cfg and takes the first libGLES_*.so it finds; without the bridge: the software one
         if (img.api >= 24 && !s.gpu) {
@@ -752,7 +765,11 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         paths.glSock.parentFile?.mkdirs()
         paths.glSock.delete()
         when (engine) {
-            Engine.N64 -> if (img.abi != "arm64-v8a") {
+            Engine.N64 -> if (img.abi != "arm64-v8a" && open32Compositor(engine, img, paths.dir)) {
+                // the open bridge serves every context and the display itself (guest.c own_egl); the compositor's
+                // frames reach fb0 through the firmware's framebuffer HAL
+                log("GPU bridge: open (no glserverd)")
+            } else if (img.abi != "arm64-v8a") {
                 // a whole 32-bit firmware (open32): the 4.4 engine's GL server draws its frames into fb0, as on that engine
                 log("GPU bridge: standalone glserverd (open32)")
                 spawn("glserverd", listOf(paths.nativeBin(Engine.KK.glserverd).absolutePath,

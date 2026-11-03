@@ -25,6 +25,7 @@
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <time.h>
 #include <fcntl.h>
 #include "common.h"
 #include "../grallocwrap/note.h"
@@ -906,9 +907,34 @@ static GLenum local_glGetError(void) {
     if (T) { T->clean = e == 0; T->cleanctx = T->ctx; }
     return e;
 }
+/* debug.aemu.gl (GuestVm): 0 off, 1 a program's own contexts, 2 the window toolkit's as well, 3 the compositor too */
+static int gl_mode(void) {
+    static int mode = -1;
+    if (mode < 0) {
+        char v[96] = "";
+        __system_property_get("debug.aemu.gl", v);
+        mode = v[0] >= '0' && v[0] <= '9' ? v[0] - '0' : 0;
+    }
+    return mode;
+}
+/* The display of its own: a 32-bit firmware with everything on the GPU (mode 3) and no SwiftShader in the tree has
+ * (no SwiftShader that loads) nothing to stand behind this driver but the 4.4 engine's closed bridge (glsplit -> libGLES_bridge -> glserverd),
+ * which also dies on a glGetString without a context (Samsung 4.3) and takes every display of the system with it.
+ * Then the display, its configs and strings, images of window buffers and fences are this driver's own (EGL 1.4,
+ * egl.h), and every context goes to the phone's GPU: GLES 1 through the 1.x driver, GLES 2/3 through the host. */
+static int own_egl(void) {
+#ifdef __LP64__
+    return 0;
+#else
+    static int own = -1;
+    /* (the kernel's 32-bit SwiftShader lies in every tree but needs bionic of 6.0: libsync, libutils of that release) */
+    if (own < 0) own = gl_mode() >= 3 && !(ss_open("libEGL_swiftshader.so") && ss_open("libGLESv2_swiftshader.so"));
+    return own;
+#endif
+}
 static void ss_load(void) {
     pthread_mutex_lock(&g_lock);
-    if (!SS.up) {
+    if (!SS.up && !own_egl()) {
         SS.egl = ss_open("libEGL_swiftshader.so");
         SS.v2 = ss_open("libGLESv2_swiftshader.so");
         SS.v1 = ss_open("libGLESv1_CM_swiftshader.so");
@@ -920,6 +946,8 @@ static void ss_load(void) {
         }
 #endif
         if (!SS.egl || !SS.v2) LOG("SwiftShader is not there: %s", dlerror());
+    }
+    if (!SS.up) {
         for (int i = 0; i < N_FUNCS; i++) {
             void *f = SS.v2 ? dlsym(SS.v2, kNames[i]) : 0;
             SS.t2[i] = f ? f : (void *)nothing;
@@ -961,8 +989,106 @@ static __thread EGLint t_err;
     EXPORT ret name params { static ret (*f) params; if (!f) f = sse(#name); return f ? f args : (ret)0; }
 #define SSF(ret, name, params) static ret (*name) params; if (!name) name = sse("egl" #name)
 
-FWD(EGLDisplay, eglGetDisplay, (void *native), (native))
-FWD(EGLBoolean, eglInitialize, (EGLDisplay d, EGLint *major, EGLint *minor), (d, major, minor))
+/* ---- the display of its own (own_egl) ----
+ * Configs: RGBA_8888, RGBX_8888 and RGB_565 (the HAL formats a window of 2.x-7.x takes, as NATIVE_VISUAL_ID - libEGL
+ * sets the window's format from it), each without depth, with 16 and with 24/8, for windows and pbuffers, ES 1/2/3,
+ * recordable and framebuffer targets (EGL_ANDROID_recordable/_framebuffer_target: 4.x SurfaceFlinger asks for both).
+ * Selection and order as eglChooseConfig of EGL 1.4 (3.4.1.2): sizes at least, bit masks contained, the rest exact;
+ * more of the asked colour bits first, then the smaller buffer, depth, stencil and id. */
+#define OWN_DPY ((EGLDisplay)(uintptr_t)1)
+#define EGL_DONT_CARE ((EGLint)-1)
+static const struct { EGLint r, g, b, a, depth, stencil, vis; } kCfg[] = {
+    { 8, 8, 8, 8, 0, 0, 1 }, { 8, 8, 8, 8, 16, 0, 1 }, { 8, 8, 8, 8, 24, 8, 1 },
+    { 8, 8, 8, 0, 0, 0, 2 }, { 8, 8, 8, 0, 16, 0, 2 }, { 8, 8, 8, 0, 24, 8, 2 },
+    { 5, 6, 5, 0, 0, 0, 4 }, { 5, 6, 5, 0, 16, 0, 4 }, { 5, 6, 5, 0, 24, 8, 4 },
+};
+#define N_CFG ((EGLint)(sizeof kCfg / sizeof kCfg[0]))
+static EGLBoolean own_err(EGLint e) { t_err = e; return 0; }
+static int own_cfg_index(EGLConfig c) { intptr_t i = (intptr_t)c - 1; return i >= 0 && i < N_CFG ? (int)i : -1; }
+static EGLint own_list(const EGLint *a, EGLint name, EGLint def) {
+    for (; a && *a != EGL_NONE; a += 2) if (*a == name) return a[1];
+    return def;
+}
+/* value of an attribute; 0 = no such attribute */
+static int own_attr(int i, EGLint a, EGLint *v) {
+    EGLint x;
+    switch (a) {
+    case 0x3020: x = kCfg[i].r + kCfg[i].g + kCfg[i].b + kCfg[i].a; break;     /* BUFFER_SIZE */
+    case 0x3021: x = kCfg[i].a; break;
+    case 0x3022: x = kCfg[i].b; break;
+    case 0x3023: x = kCfg[i].g; break;
+    case 0x3024: x = kCfg[i].r; break;
+    case 0x3025: x = kCfg[i].depth; break;
+    case 0x3026: x = kCfg[i].stencil; break;
+    case 0x3027: x = 0x3038; break;                 /* CONFIG_CAVEAT: NONE */
+    case 0x3028: x = i + 1; break;                  /* CONFIG_ID */
+    case 0x3029: x = 0; break;                      /* LEVEL */
+    case 0x302A: case 0x302C: x = 4096; break;      /* MAX_PBUFFER_HEIGHT / WIDTH */
+    case 0x302B: x = 4096 * 4096; break;
+    case 0x302D: x = 1; break;                      /* NATIVE_RENDERABLE */
+    case 0x302E: x = kCfg[i].vis; break;            /* NATIVE_VISUAL_ID: the HAL pixel format */
+    case 0x302F: x = 0; break;                      /* NATIVE_VISUAL_TYPE */
+    case 0x3031: case 0x3032: x = 0; break;         /* SAMPLES, SAMPLE_BUFFERS */
+    case 0x3033: x = 0x0005; break;                 /* SURFACE_TYPE: PBUFFER | WINDOW */
+    case 0x3034: x = 0x3038; break;                 /* TRANSPARENT_TYPE: NONE */
+    case 0x3035: case 0x3036: case 0x3037: x = 0; break;
+    case 0x3039: case 0x303A: x = 0; break;         /* BIND_TO_TEXTURE_RGB(A) */
+    case 0x303B: x = 0; break;                      /* MIN_SWAP_INTERVAL */
+    case 0x303C: x = 1; break;                      /* MAX_SWAP_INTERVAL */
+    case 0x303D: case 0x303E: x = 0; break;         /* LUMINANCE_SIZE, ALPHA_MASK_SIZE */
+    case 0x303F: x = 0x308E; break;                 /* COLOR_BUFFER_TYPE: RGB_BUFFER */
+    case 0x3040: case 0x3042: x = 0x0045; break;    /* RENDERABLE_TYPE, CONFORMANT: ES | ES2 | ES3 */
+    case 0x3041: x = 0x3038; break;                 /* MATCH_NATIVE_PIXMAP */
+    case 0x3142: case 0x3147: x = 1; break;         /* RECORDABLE_ANDROID, FRAMEBUFFER_TARGET_ANDROID */
+    default: return 0;
+    }
+    *v = x;
+    return 1;
+}
+static int own_match(int i, const EGLint *a) {
+    for (; a && *a != EGL_NONE; a += 2) {
+        EGLint want = a[1], have;
+        if (want == EGL_DONT_CARE) continue;
+        switch (a[0]) {
+        case 0x302A: case 0x302B: case 0x302C: case 0x302E: case 0x3035: case 0x3036: case 0x3037: case 0x3041:
+            continue;                               /* not selection criteria */
+        }
+        if (!own_attr(i, a[0], &have)) {        /* (a vendor's attribute: not a criterion of ours) */
+            static EGLint said;
+            if (said != a[0]) { said = a[0]; LOG("eglChooseConfig: attribute 0x%x = %d left out", a[0], want); }
+            continue;
+        }
+        switch (a[0]) {
+        case 0x3020: case 0x3021: case 0x3022: case 0x3023: case 0x3024: case 0x3025: case 0x3026:
+        case 0x3031: case 0x3032: case 0x303D: case 0x303E:
+            if (have < want) return 0;
+            break;
+        case 0x3033: case 0x3040: case 0x3042:
+            if ((have & want) != want) return 0;
+            break;
+        default:
+            if (have != want) return 0;
+        }
+    }
+    return 1;
+}
+EXPORT EGLDisplay eglGetDisplay(void *native) {
+    static EGLDisplay (*f)(void *);
+    if (own_egl()) return OWN_DPY;
+    if (!f) f = sse("eglGetDisplay");
+    return f ? f(native) : 0;
+}
+EXPORT EGLBoolean eglInitialize(EGLDisplay d, EGLint *major, EGLint *minor) {
+    static EGLBoolean (*f)(EGLDisplay, EGLint *, EGLint *);
+    if (own_egl()) {
+        if (d != OWN_DPY) return own_err(0x3008 /* BAD_DISPLAY */);
+        if (major) *major = 1;
+        if (minor) *minor = 4;
+        return 1;
+    }
+    if (!f) f = sse("eglInitialize");
+    return f ? f(d, major, minor) : 0;
+}
 /* The 32-bit engine's own bridge behind (glsplit -> libGLES_bridge -> glserverd) does not come back from a terminate:
  * its eglTerminate jumps through a freed table (2.2 GLSurfaceView: every GL activity that closes terminates the display,
  * SIGSEGV at pc 0xfffffffe in its GLThread), and a display it gave up is not served again. Its display is one per
@@ -971,18 +1097,79 @@ FWD(EGLBoolean, eglInitialize, (EGLDisplay d, EGLint *major, EGLint *minor), (d,
 EXPORT EGLBoolean eglTerminate(EGLDisplay d) {
     static EGLBoolean (*f)(EGLDisplay);
     if (!SS.up) ss_load();
-    if (SS.egl && SS.egl == SS.v1) { LOG("eglTerminate: the display stays"); return 1; }     /* the one-library bridge of the 32-bit engine */
+    if (own_egl() || (SS.egl && SS.egl == SS.v1)) return 1;     /* (own: nothing to end; the one-library bridge: it stays) */     /* the one-library bridge of the 32-bit engine */
     if (!f) f = sse("eglTerminate");
     return f ? f(d) : 0;
 }
-FWD(EGLBoolean, eglGetConfigs, (EGLDisplay d, EGLConfig *c, EGLint size, EGLint *n), (d, c, size, n))
-FWD(EGLBoolean, eglChooseConfig, (EGLDisplay d, const EGLint *a, EGLConfig *c, EGLint size, EGLint *n), (d, a, c, size, n))
-FWD(EGLBoolean, eglGetConfigAttrib, (EGLDisplay d, EGLConfig c, EGLint a, EGLint *v), (d, c, a, v))
+EXPORT EGLBoolean eglGetConfigs(EGLDisplay d, EGLConfig *c, EGLint size, EGLint *n) {
+    static EGLBoolean (*f)(EGLDisplay, EGLConfig *, EGLint, EGLint *);
+    if (own_egl()) {
+        if (!n) return own_err(0x300C /* BAD_PARAMETER */);
+        EGLint k = 0;
+        for (int i = 0; i < N_CFG && (!c || k < size); i++) { if (c) c[k] = (EGLConfig)(intptr_t)(i + 1); k++; }
+        *n = k;
+        return 1;
+    }
+    if (!f) f = sse("eglGetConfigs");
+    return f ? f(d, c, size, n) : 0;
+}
+EXPORT EGLBoolean eglChooseConfig(EGLDisplay d, const EGLint *a, EGLConfig *c, EGLint size, EGLint *n) {
+    static EGLBoolean (*f)(EGLDisplay, const EGLint *, EGLConfig *, EGLint, EGLint *);
+    if (own_egl()) {
+        if (!n) return own_err(0x300C);
+        int pick[N_CFG], k = 0;
+        EGLint id = own_list(a, 0x3028, EGL_DONT_CARE);
+        for (int i = 0; i < N_CFG; i++)
+            if (id != EGL_DONT_CARE ? id == i + 1 : own_match(i, a)) pick[k++] = i;
+        /* order (EGL 1.4 table 3.4): more of the asked colour bits, smaller buffer, depth, stencil, id */
+        int wr = own_list(a, 0x3024, 0) > 0, wg = own_list(a, 0x3023, 0) > 0, wb = own_list(a, 0x3022, 0) > 0, wa = own_list(a, 0x3021, 0) > 0;
+        for (int x = 1; x < k; x++) for (int y = x; y > 0; y--) {
+            int p = pick[y - 1], q = pick[y];
+            int bp = wr * kCfg[p].r + wg * kCfg[p].g + wb * kCfg[p].b + wa * kCfg[p].a;
+            int bq = wr * kCfg[q].r + wg * kCfg[q].g + wb * kCfg[q].b + wa * kCfg[q].a;
+            int sp = kCfg[p].r + kCfg[p].g + kCfg[p].b + kCfg[p].a, sq = kCfg[q].r + kCfg[q].g + kCfg[q].b + kCfg[q].a;
+            int later = bp != bq ? bp < bq : sp != sq ? sp > sq : kCfg[p].depth != kCfg[q].depth ? kCfg[p].depth > kCfg[q].depth :
+                kCfg[p].stencil != kCfg[q].stencil ? kCfg[p].stencil > kCfg[q].stencil : p > q;
+            if (!later) break;
+            pick[y - 1] = q; pick[y] = p;
+        }
+        EGLint m = 0;
+        for (int i = 0; i < k && (!c || m < size); i++) { if (c) c[m] = (EGLConfig)(intptr_t)(pick[i] + 1); m++; }
+        *n = m;
+        return 1;
+    }
+    if (!f) f = sse("eglChooseConfig");
+    return f ? f(d, a, c, size, n) : 0;
+}
+EXPORT EGLBoolean eglGetConfigAttrib(EGLDisplay d, EGLConfig c, EGLint a, EGLint *v) {
+    static EGLBoolean (*f)(EGLDisplay, EGLConfig, EGLint, EGLint *);
+    if (own_egl()) {
+        int i = own_cfg_index(c);
+        EGLint x;
+        if (i < 0) return own_err(0x3005 /* BAD_CONFIG */);
+        if (!own_attr(i, a, &x)) return own_err(0x3004 /* BAD_ATTRIBUTE */);
+        if (v) *v = x;
+        return 1;
+    }
+    if (!f) f = sse("eglGetConfigAttrib");
+    return f ? f(d, c, a, v) : 0;
+}
 /* The extensions get EGL_EXT_create_context_robustness: contexts on the phone's GPU lose themselves on a reset (host.c,
  * g_robust), and ANGLE (Chromium's WebView from 9x on) turns WebGL on only for a context it asked that of. */
 EXPORT const char *eglQueryString(EGLDisplay d, EGLint name) {
     static const char *(*f)(EGLDisplay, EGLint);
     static char *ext;
+    if (own_egl()) {
+        switch (name) {
+        case 0x3053: return "Android";                     /* VENDOR */
+        case 0x3054: return "1.4 AEmulator";               /* VERSION */
+        case 0x308D: return "OpenGL_ES";                   /* CLIENT_APIS */
+        case 0x3055: return "EGL_KHR_image EGL_KHR_image_base EGL_KHR_gl_texture_2D_image EGL_ANDROID_image_native_buffer "
+                            "EGL_KHR_fence_sync EGL_EXT_create_context_robustness EGL_ANDROID_recordable EGL_ANDROID_framebuffer_target";
+        }
+        own_err(0x300C);
+        return 0;
+    }
     if (!f) f = sse("eglQueryString");
     const char *s = f ? f(d, name) : 0;
     if (name != 0x3055 /* EGL_EXTENSIONS */ || !s) return s;
@@ -1003,9 +1190,24 @@ EXPORT const char *eglQueryString(EGLDisplay d, EGLint name) {
     }
     return ext;
 }
-FWD(EGLBoolean, eglBindAPI, (EGLenum api), (api))
-FWD(EGLenum, eglQueryAPI, (void), ())
-FWD(EGLBoolean, eglWaitNative, (EGLint engine), (engine))
+EXPORT EGLBoolean eglBindAPI(EGLenum api) {
+    static EGLBoolean (*f)(EGLenum);
+    if (own_egl()) return api == 0x30A0 /* OPENGL_ES_API */ ? 1 : own_err(0x300C);
+    if (!f) f = sse("eglBindAPI");
+    return f ? f(api) : 0;
+}
+EXPORT EGLenum eglQueryAPI(void) {
+    static EGLenum (*f)(void);
+    if (own_egl()) return 0x30A0;
+    if (!f) f = sse("eglQueryAPI");
+    return f ? f() : 0;
+}
+EXPORT EGLBoolean eglWaitNative(EGLint engine) {
+    static EGLBoolean (*f)(EGLint);
+    if (own_egl()) return 1;
+    if (!f) f = sse("eglWaitNative");
+    return f ? f(engine) : 0;
+}
 
 enum { S_WINDOW, S_PBUFFER };
 struct esurf {
@@ -1038,13 +1240,9 @@ static const char *prog_name(void) {
 
 /* ---- which side a new context goes to ---- */
 static int policy(int version) {
-    static int mode = -1, process;      /* process: 1 a program that may draw on the GPU, 2 one that may not */
-    if (mode < 0) {
-        char v[96] = "";
-        __system_property_get("debug.aemu.gl", v);
-        /* off unless asked for: 1 - a program's own contexts, 2 - the window toolkit's as well */
-        mode = v[0] >= '0' && v[0] <= '9' ? v[0] - '0' : 0;
-    }
+    static int process;      /* process: 1 a program that may draw on the GPU, 2 one that may not */
+    int mode = gl_mode();
+    if (own_egl()) return 1;     /* (nothing else to draw on) */
     if (!process) {
         /* (the name libc was started with: /proc/self/cmdline is the engine's runner) */
         const char *c = prog_name();
@@ -1256,7 +1454,7 @@ struct egl_native_window_t {
 };
 struct g1win { struct egl_native_window_t nw; struct esurf *s; uint8_t *va; };
 static struct {
-    int up; void *dpy, *cfg; void *t[N_FUNCS];
+    int up; void *dpy, *cfg; void *t[N_FUNCS], *f[N_FUNCS];     /* t: what a GLES 1 context calls; f: the 1.x driver's own */
     EGLContext (*CreateContext)(EGLDisplay, EGLConfig, EGLContext, const EGLint *);
     EGLBoolean (*DestroyContext)(EGLDisplay, EGLContext);
     EGLSurface (*CreateWindowSurface)(EGLDisplay, EGLConfig, void *, const EGLint *);
@@ -1265,6 +1463,64 @@ static struct {
     EGLBoolean (*MakeCurrent)(EGLDisplay, EGLSurface, EGLSurface, EGLContext);
     EGLBoolean (*SwapBuffers)(EGLDisplay, EGLSurface);
 } G1;
+/* Window buffers as textures of a GLES 1 context: SurfaceFlinger of 2.3-4.3 composes in GLES 1 and binds every
+ * layer's GraphicBuffer through an EGLImage (EGL_NATIVE_BUFFER_ANDROID), on 4.x as GL_TEXTURE_EXTERNAL_OES
+ * (frameworks/native services/surfaceflinger Layer.cpp / SurfaceTexture.cpp, OES_EGL_image_external). The 1.x driver
+ * has plain 2D textures only: an external target is its 2D one, and the image's pixels are loaded into the texture
+ * bound there (RGBA/RGBX/BGRA/565 as the buffer is, rows packed tight - GLES 1 has no UNPACK_ROW_LENGTH). */
+#define GL_TEXTURE_2D_ 0x0DE1
+#define GL_TEXTURE_EXTERNAL_OES_ 0x8D65
+static GLenum g1_target(GLenum t) { return t == GL_TEXTURE_EXTERNAL_OES_ ? GL_TEXTURE_2D_ : t; }
+typedef void (*g1_tex_fn)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *);
+static void g1_bind_texture(GLenum t, GLuint id) { ((void (*)(GLenum, GLuint))G1.f[IDX_glBindTexture])(g1_target(t), id); }
+static void g1_enable(GLenum cap) { ((void (*)(GLenum))G1.f[IDX_glEnable])(g1_target(cap)); }
+static void g1_disable(GLenum cap) { ((void (*)(GLenum))G1.f[IDX_glDisable])(g1_target(cap)); }
+static GLboolean g1_is_enabled(GLenum cap) { return ((GLboolean (*)(GLenum))G1.f[IDX_glIsEnabled])(g1_target(cap)); }
+static void g1_tex_parameteri(GLenum t, GLenum p, GLint v) { ((void (*)(GLenum, GLenum, GLint))G1.f[IDX_glTexParameteri])(g1_target(t), p, v); }
+static void g1_tex_parameterf(GLenum t, GLenum p, GLfloat v) { ((void (*)(GLenum, GLenum, GLfloat))G1.f[IDX_glTexParameterf])(g1_target(t), p, v); }
+static void g1_tex_parameterx(GLenum t, GLenum p, GLint v) { ((void (*)(GLenum, GLenum, GLint))G1.f[IDX_glTexParameterx])(g1_target(t), p, v); }
+static void g1_tex_parameteriv(GLenum t, GLenum p, const GLint *v) { ((void (*)(GLenum, GLenum, const GLint *))G1.f[IDX_glTexParameteriv])(g1_target(t), p, v); }
+static void g1_tex_parameterfv(GLenum t, GLenum p, const GLfloat *v) { ((void (*)(GLenum, GLenum, const GLfloat *))G1.f[IDX_glTexParameterfv])(g1_target(t), p, v); }
+static void g1_tex_parameterxv(GLenum t, GLenum p, const GLint *v) { ((void (*)(GLenum, GLenum, const GLint *))G1.f[IDX_glTexParameterxv])(g1_target(t), p, v); }
+static struct ANativeWindowBuffer *image_buffer(void *image);
+static void g1_image_target(GLenum target, void *image) {
+    struct ANativeWindowBuffer *b = image_buffer(image);
+    if (!b) return;
+    uint32_t w = (uint32_t)b->width, h = (uint32_t)b->height, stride = (uint32_t)b->stride, f = (uint32_t)b->format;
+    uint32_t bpp = f == 1 || f == 2 || f == 5 ? 4 : f == 4 ? 2 : 0;
+    if (!bpp || !w || !h) return;
+    uint8_t *va = buf_lock(b, 0);
+    if (!va) return;
+    uint8_t *px = va, *tight = 0;
+    if (stride != w || f == 5) {
+        if (!(tight = malloc((size_t)w * h * bpp))) { buf_unlock(b); return; }
+        for (uint32_t y = 0; y < h; y++) {
+            const uint8_t *s = va + (size_t)y * stride * bpp;
+            uint8_t *d = tight + (size_t)y * w * bpp;
+            if (f != 5) memcpy(d, s, (size_t)w * bpp);
+            else for (uint32_t x = 0; x < w; x++) { d[4 * x] = s[4 * x + 2]; d[4 * x + 1] = s[4 * x + 1]; d[4 * x + 2] = s[4 * x]; d[4 * x + 3] = s[4 * x + 3]; }
+        }
+        px = tight;
+    }
+    ((void (*)(GLenum, GLint))G1.f[IDX_glPixelStorei])(0x0CF5 /* UNPACK_ALIGNMENT */, bpp == 4 ? 4 : 2);
+    if (bpp == 4) ((g1_tex_fn)G1.f[IDX_glTexImage2D])(g1_target(target), 0, 0x1908, (GLsizei)w, (GLsizei)h, 0, 0x1908 /* RGBA */, 0x1401, px);
+    else ((g1_tex_fn)G1.f[IDX_glTexImage2D])(g1_target(target), 0, 0x1907, (GLsizei)w, (GLsizei)h, 0, 0x1907 /* RGB */, 0x8363 /* 5_6_5 */, px);
+    free(tight);
+    buf_unlock(b);
+}
+static void g1_external(void **t) {
+    t[IDX_glBindTexture] = (void *)g1_bind_texture;
+    t[IDX_glEnable] = (void *)g1_enable;
+    t[IDX_glDisable] = (void *)g1_disable;
+    t[IDX_glIsEnabled] = (void *)g1_is_enabled;
+    t[IDX_glTexParameteri] = (void *)g1_tex_parameteri;
+    t[IDX_glTexParameterf] = (void *)g1_tex_parameterf;
+    t[IDX_glTexParameterx] = (void *)g1_tex_parameterx;
+    t[IDX_glTexParameteriv] = (void *)g1_tex_parameteriv;
+    t[IDX_glTexParameterfv] = (void *)g1_tex_parameterfv;
+    t[IDX_glTexParameterxv] = (void *)g1_tex_parameterxv;
+    t[IDX_glEGLImageTargetTexture2DOES] = (void *)g1_image_target;
+}
 static int g1_up(void) {
     pthread_mutex_lock(&g_lock);
     if (!G1.up) {
@@ -1282,7 +1538,8 @@ static int g1_up(void) {
         if (GetDisplay && Initialize && Choose && G1.CreateContext && G1.DestroyContext && G1.CreateWindowSurface &&
             G1.CreatePbufferSurface && G1.DestroySurface && G1.MakeCurrent && G1.SwapBuffers &&
             (G1.dpy = GetDisplay(0)) && Initialize(G1.dpy, 0, 0) && Choose(G1.dpy, 0, &G1.cfg, 1, &n) && n > 0) {
-            for (int i = 0; i < N_FUNCS; i++) { void *f = dlsym(h, kNames[i]); G1.t[i] = f ? f : (void *)nothing; }
+            for (int i = 0; i < N_FUNCS; i++) { void *f = dlsym(h, kNames[i]); G1.t[i] = f ? f : (void *)nothing; G1.f[i] = G1.t[i]; }
+            g1_external(G1.t);
             G1.up = 1;
         } else LOG("no GLES 1 driver for the GPU (libGLES1_aemu.so): %s", h ? "incomplete" : dlerror());
     }
@@ -1503,6 +1760,7 @@ EXPORT EGLBoolean eglMakeCurrent(EGLDisplay d, EGLSurface draw, EGLSurface read,
             surf_unref(od); if (orr != od) surf_unref(orr);
             if (--old->current == 0x10000) ctx_free(old);
         }
+        if (!SS.up) ss_load();      /* (the encoder table; with a display of its own nothing else loaded it) */
         t_tbl = SS.enc;
         return 1;
     }
@@ -1534,6 +1792,7 @@ EXPORT EGLDisplay eglGetCurrentDisplay(void) {
 }
 EXPORT EGLint eglGetError(void) {
     if (t_err) { EGLint e = t_err; t_err = 0; return e; }
+    if (own_egl()) return EGL_SUCCESS;
     SSF(EGLint, GetError, (void));
     return GetError ? GetError() : EGL_SUCCESS;
 }
@@ -1541,6 +1800,7 @@ EXPORT EGLBoolean eglReleaseThread(void) {
     bridge_release(); g1_release();
     if (t_ss_ctx) ss_release(t_ss_ctx->dpy);
     t_tbl = 0;
+    if (own_egl()) return 1;
     SSF(EGLBoolean, ReleaseThread, (void));
     return ReleaseThread ? ReleaseThread() : 1;
 }
@@ -1647,7 +1907,8 @@ EXPORT EGLImageKHR eglCreateImageKHR(EGLDisplay d, EGLContext context, EGLenum t
         if (!h || id) { free(h); t_err = EGL_BAD_ALLOC; return 0; }
         return h;
     }
-    void *img = CreateImageKHR ? CreateImageKHR(d, c ? c->ss : 0, target, buffer, attribs) : 0;
+    void *img = own_egl() ? (target == 0x3140 && buffer ? malloc(8) : (t_err = EGL_BAD_MATCH, (void *)0)) :
+        CreateImageKHR ? CreateImageKHR(d, c ? c->ss : 0, target, buffer, attribs) : 0;
     if (img && target == 0x3140 /* EGL_NATIVE_BUFFER_ANDROID */) {
         struct ANativeWindowBuffer *b = buffer;
         pthread_mutex_lock(&g_lock);
@@ -1663,6 +1924,7 @@ EXPORT EGLBoolean eglDestroyImageKHR(EGLDisplay d, EGLImageKHR img) {
     for (int i = 0; i < 256; i++) if (g_img[i].img == img) { b = g_img[i].buf; host = g_img[i].host; g_img[i].img = 0; g_img[i].buf = 0; g_img[i].host = 0; break; }
     pthread_mutex_unlock(&g_lock);
     if (b) b->common.decRef(&b->common);
+    if (own_egl() && !host) { free(img); return b != 0; }
     if (host) {
         struct ts *T = ts_get();
         if (T) { begin(T, OP_IMAGE_DESTROY, 4, 4); put32(T, host); }
@@ -1671,6 +1933,13 @@ EXPORT EGLBoolean eglDestroyImageKHR(EGLDisplay d, EGLImageKHR img) {
     }
     SSF(EGLBoolean, DestroyImageKHR, (EGLDisplay, EGLImageKHR));
     return DestroyImageKHR ? DestroyImageKHR(d, img) : 0;
+}
+static struct ANativeWindowBuffer *image_buffer(void *image) {
+    struct ANativeWindowBuffer *b = 0;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < 256; i++) if (g_img[i].img == image) { b = g_img[i].buf; break; }
+    pthread_mutex_unlock(&g_lock);
+    return b;
 }
 static void e_glEGLImageTargetTexture2DOES(GLenum target, GLeglImageOES image) {
     struct ts *T = TS();
@@ -1737,6 +2006,7 @@ EXPORT EGLSyncKHR eglCreateSyncKHR(EGLDisplay d, EGLenum type, const EGLint *att
         begin(T, OP_PING, 0, 0); rsync(T); get32v(T);
         return BRIDGE_SYNC;
     }
+    if (own_egl()) return BRIDGE_SYNC;     /* (nothing drawn on this thread to wait for) */
     SSF(EGLSyncKHR, CreateSyncKHR, (EGLDisplay, EGLenum, const EGLint *));
     return CreateSyncKHR ? CreateSyncKHR(d, type, attribs) : 0;
 }
@@ -1761,6 +2031,29 @@ EXPORT EGLBoolean eglGetSyncAttribKHR(EGLDisplay d, EGLSyncKHR s, EGLint attr, E
     }
     SSF(EGLBoolean, GetSyncAttribKHR, (EGLDisplay, EGLSyncKHR, EGLint, EGLint *));
     return GetSyncAttribKHR ? GetSyncAttribKHR(d, s, attr, value) : 0;
+}
+
+/* The rest of what libEGL of 2.x-7.x may look up in a driver (egl_entries.in / egl_ext_entries): no such feature here.
+ * glsplit (the one-library shim for loaders that want libEGL_/libGLESv1_CM_/libGLESv2_<tag>.so) traps on a name the
+ * library behind it lacks. */
+EXPORT EGLSurface eglCreatePbufferFromClientBuffer(EGLDisplay d, EGLenum t, EGLClientBuffer b, EGLConfig c, const EGLint *a) {
+    (void)d; (void)t; (void)b; (void)c; (void)a; t_err = 0x300C; return 0;
+}
+EXPORT EGLBoolean eglLockSurfaceKHR(EGLDisplay d, EGLSurface s, const EGLint *a) { (void)d; (void)s; (void)a; t_err = EGL_BAD_MATCH; return 0; }
+EXPORT EGLBoolean eglUnlockSurfaceKHR(EGLDisplay d, EGLSurface s) { (void)d; (void)s; t_err = EGL_BAD_MATCH; return 0; }
+EXPORT EGLBoolean eglSetSwapRectangleANDROID(EGLDisplay d, EGLSurface s, EGLint l, EGLint t, EGLint w, EGLint h) {
+    (void)d; (void)s; (void)l; (void)t; (void)w; (void)h; return 1;     /* (the whole frame is carried anyway) */
+}
+EXPORT EGLClientBuffer eglGetRenderBufferANDROID(EGLDisplay d, EGLSurface s) {
+    struct esurf *e = s;
+    (void)d;
+    return e && e->kind == S_WINDOW ? (EGLClientBuffer)e->buf : 0;
+}
+EXPORT uint64_t eglGetSystemTimeFrequencyNV(void) { return 1000000000ull; }
+EXPORT uint64_t eglGetSystemTimeNV(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
 
 EXPORT void *eglGetProcAddress(const char *name) {

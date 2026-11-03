@@ -1063,7 +1063,7 @@ class TreeFixer(
         val copies = when (if (kk32) Engine.KK else engine) {
             Engine.KK -> listOf(
                 "libashmemshim.so" to "system/lib/libashmemshim.so",
-                "libGLES.so" to "system/lib/egl/libGLES_bridge.so",
+                (if (ownCompositor32()) "libGLES_aemu.so" else "libGLES.so") to "system/lib/egl/libGLES_bridge.so",
                 "audio.primary.default.so" to "system/lib/hw/audio.primary.default.so",
                 // the engine's gralloc behind the allocator layout the firmware's libui calls (native/gralloc32abi)
                 "gralloc.default.so" to "system/lib/libgralloc_kk.so",
@@ -1453,8 +1453,13 @@ class TreeFixer(
                     val all = names.filter { !(own && it == "libGLES_android.so") } +
                         (if (own) emptyList() else SW_SPLIT) +
                         (if (img.api >= 24) listOf("libGLES_emulation.so") else emptyList())
+                    // the compositor on the open bridge as well (GuestVm.open32Compositor): no closed bridge behind; the
+                    // split names (libEGL_/libGLESv1_CM_/libGLESv2_<tag>.so, Samsung 4.3's loader) are three files - three
+                    // copies of a driver, each with its own current context - so they get the one-library shim
+                    // (glsplit), which sends every call to the one open bridge under libGLES_bridge.so
+                    val splitNames = if (ownCompositor32()) setOf("libEGL_aemu.so", "libGLESv1_CM_aemu.so", "libGLESv2_aemu.so") + SW_SPLIT else emptySet()
                     runCatching {
-                        for (n in all) installAsset(asset, File(dir, n))
+                        for (n in all) installAsset(if (n in splitNames) "engines/kk/libGLES_split.so" else asset, File(dir, n))
                         val shim = File(dir, "libGLES_split.so")
                         if (open) installAsset("engines/kk/libGLES_split.so", shim) else shim.delete()
                         // GLES 1 contexts of the open bridge go to the GPU through the 1.x driver (guest1.c)
@@ -1547,6 +1552,7 @@ class TreeFixer(
     private fun openGl32(): Boolean = (if (kk32) GuestVm.open32Bridge(engine, img, paths.dir) else engine == Engine.KK && File(paths.dir, "glopen").isFile) &&
         assetSize(OPEN_GL) > 0
 
+    private fun ownCompositor32(): Boolean = kk32 && GuestVm.open32Compositor(engine, img, paths.dir) && assetSize(OPEN_GL) > 0
     private fun splitSize(): Long = runCatching { EngineAssets.size(ctx, "engines/kk/libGLES_split.so") }.getOrDefault(-1L)
 
     private fun makeDataDirs() {
