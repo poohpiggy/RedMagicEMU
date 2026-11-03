@@ -260,6 +260,23 @@ static long fake_memfile(const char *name, const char *content, u64 len) {
     return fd;
 }
 
+// /proc/version: a phone's app may not read it (SELinux proc_version, "Permission denied" for run-as too), while a
+// kernel of the firmware's time always had it (fs/proc/version.c: "Linux version %s (%s@%s) (%s) %s"). Samsung's 4.0
+// PlayReady plugin fopen()s it and calls fgets on the result unchecked (PlayreadyPlugIn::onInitialize) - drmserver
+// died, and with no drm.drmManager every pm/am started from a shell waited forever. Built from uname, the same as the
+// kernel's own line.
+static long version_open(void) {
+    static char out[512];
+    struct { char sys[65], node[65], rel[65], ver[65], mach[65], dom[65]; } u;
+    if (S1(160 /* uname */, &u) != 0) return -1;
+    u64 o = 0;
+#define ADD(t) do { const char *t_ = (t); u64 l_ = slen(t_); if (o + l_ >= sizeof out - 2) return -1; memcpy(out + o, t_, l_); o += l_; } while (0)
+    ADD("Linux version "); ADD(u.rel); ADD(" (android-build@aemu) (gcc version 4.4.3 (GCC) ) "); ADD(u.ver);
+#undef ADD
+    out[o++] = '\n';
+    return fake_memfile("aemu-version", out, o);
+}
+
 // ---------------------------------------------------------------------------------------------------- memory budget
 // /proc/meminfo scaled to the RAM the image is given (<root>/dev/.aemu-ram, in kB): the guest would otherwise see all
 // of the phone's memory and size its background by it (ColorOS 14 on a 12 GB phone: 128 cached processes, 150 in
@@ -973,6 +990,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
                 if (seq(P(1), "/dev/cpuctl/apps/bg_non_interactive/tasks")) return cg_open("/dev/cpuctl/bg_non_interactive/tasks", a[2]);
             }
             if (seq(P(1), "/proc/meminfo")) { long r = meminfo_open(); if (r >= 0) return r; }
+            if (seq(P(1), "/proc/version")) { long r = version_open(); if (r >= 0) return r; }
             u64 pl = slen(P(1));
             if (pre(P(1), "/proc/") && ((pl >= 13 && seq(P(1) + pl - 13, "/attr/current")) || (pl >= 10 && seq(P(1) + pl - 10, "/attr/exec")))) {
                 return fake_memfile("aemu-attr", "u:r:su:s0\n", 10);
