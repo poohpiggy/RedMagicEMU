@@ -239,7 +239,9 @@ class TreeFixer(
      * our HAL there; it forwards the DcRemove filter AudioFlinger links from that library to the original.
      */
     private fun swapMtkAudioHal() {
-        if (engine != Engine.KK || img.api < 17) return
+        // every 32-bit 4.2+ firmware (KK and open32 alike): left in place, AudioMTKHardware opens no output and
+        // MTK's AudioPolicyManagerBase dies on a null AudioOutputDescriptor (Lenovo B8000 4.2, mediaserver 139)
+        if (img.api < 17 || img.abi.startsWith("arm64")) return
         val lib = File(root, "system/lib/libaudio.primary.default.so")
         val orig = File(root, "system/lib/libaudio.mtk.so")
         if (!orig.isFile) {

@@ -534,7 +534,13 @@ __attribute__((visibility("default"))) struct hw_module HMI = {
     .tag = 0x48574d54,                    /* HARDWARE_MODULE_TAG */
     .module_api_version = 0x0001,         /* AUDIO_MODULE_API_VERSION_0_1 */
     .hal_api_version = 0,
+#ifdef AEMU_MTK
+    /* MediaTek's AudioFlinger asks hw_get_module_by_class("libaudio", "primary") (4.2 and 4.4 alike), and
+     * libhardware refuses a module whose id differs from the class: EINVAL, no output, mediaserver died */
+    .id = "libaudio",
+#else
     .id = "audio",
+#endif
     .name = "AEmulator audio HAL (/dev/eac)",
     .author = "AEmulator",
     .methods = &g_methods,

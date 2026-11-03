@@ -250,6 +250,9 @@ object InitPlan {
         // Qualcomm: камера, TrustZone, модем — лезут в /dev своего железа и сыплют ошибками
         "mm-qcamera", "qcamerasvr", "qseecomd", "bridgemgrd", "irsc_util", "mm-pp-daemon", "ks", "qcks", "efsks",
         "sensors.qcom", "location-mq", "xtwifi", "quipc", "usf_", "adsprpcd", "subsystem_ramdump",
+        // MediaTek: backlight AAL and display post-processing poll their /dev/mtk_disp ioctls in a loop (tens of
+        // thousands of log lines a second - the guest log lost everything else), analog TV, the combo chip's dump
+        "aal", "dpfd", "matv", "stp_dump",
     )
 
     private fun toService(s: RcService, r: Rule): GuestService {
