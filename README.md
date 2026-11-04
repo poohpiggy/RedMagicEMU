@@ -1,6 +1,16 @@
-# RedMagicEMU
+<p align="center">
+  <img src="docs/assets/redmagicemu-icon.svg" width="128" height="128" alt="RedMagicEMU placeholder icon">
+</p>
 
-[العربية](docs/i18n/README.ar.md) · [Deutsch](docs/i18n/README.de.md) · [Español](docs/i18n/README.es.md) · [فارسی](docs/i18n/README.fa.md) · [Français](docs/i18n/README.fr.md) · [हिन्दी](docs/i18n/README.hi.md) · [Bahasa Indonesia](docs/i18n/README.id.md) · [Italiano](docs/i18n/README.it.md) · [日本語](docs/i18n/README.ja.md) · [한국어](docs/i18n/README.ko.md) · [Polski](docs/i18n/README.pl.md) · [Português (Brasil)](docs/i18n/README.pt-BR.md) · [Русский](docs/i18n/README.ru.md) · [Türkçe](docs/i18n/README.tr.md) · [Українська](docs/i18n/README.uk.md) · [Tiếng Việt](docs/i18n/README.vi.md) · [简体中文](docs/i18n/README.zh-CN.md)
+<h1 align="center">RedMagicEMU</h1>
+
+<p align="center"><strong>Unofficial, independently maintained Android firmware emulator</strong></p>
+
+<p align="center" dir="ltr">
+  <strong>English</strong> · <a href="docs/i18n/README.zh-CN.md">简体中文</a> · <a href="docs/i18n/README.ja.md">日本語</a> · <a href="docs/i18n/README.ko.md">한국어</a> · <a href="docs/i18n/README.vi.md">Tiếng Việt</a> · <a href="docs/i18n/README.id.md">Bahasa Indonesia</a><br>
+  <a href="docs/i18n/README.de.md">Deutsch</a> · <a href="docs/i18n/README.fr.md">Français</a> · <a href="docs/i18n/README.es.md">Español</a> · <a href="docs/i18n/README.pt-BR.md">Português (Brasil)</a> · <a href="docs/i18n/README.it.md">Italiano</a> · <a href="docs/i18n/README.pl.md">Polski</a><br>
+  <a href="docs/i18n/README.ru.md">Русский</a> · <a href="docs/i18n/README.uk.md">Українська</a> · <a href="docs/i18n/README.tr.md">Türkçe</a> · <a href="docs/i18n/README.hi.md">हिन्दी</a> · <a href="docs/i18n/README.ar.md">&#x2068;العربية&#x2069;</a> · <a href="docs/i18n/README.fa.md">&#x2068;فارسی&#x2069;</a>
+</p>
 
 RedMagicEMU is an unofficial, independently maintained project based on [AEmulator](https://github.com/uxazu/AEmulator), itself based on the original [SENSES emulator](https://github.com/Istratii-tech/SENSES). It is not an official REDMAGIC product and is not affiliated with REDMAGIC.
 
