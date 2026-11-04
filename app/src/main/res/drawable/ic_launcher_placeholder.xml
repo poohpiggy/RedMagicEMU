@@ -1,0 +1,11 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Original placeholder: a stylized screen with an abstract prompt. -->
+    <path android:fillType="evenOdd" android:fillColor="#FFF7F7F8"
+        android:pathData="M30,31 L78,31 Q82,31 82,35 L82,70 Q82,74 78,74 L30,74 Q26,74 26,70 L26,35 Q26,31 30,31 Z M31,36 L31,69 L77,69 L77,36 Z" />
+    <path android:strokeColor="#FFFF5664" android:strokeWidth="4" android:strokeLineCap="round" android:strokeLineJoin="round" android:fillColor="@android:color/transparent"
+        android:pathData="M39,45 L48,53 L39,61 M54,61 L68,61" />
+</vector>

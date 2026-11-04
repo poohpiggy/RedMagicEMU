@@ -4,7 +4,6 @@
     <string name="channel_vm">Hệ thống đang chạy</string>
     <string name="vm_running">%1$s đang chạy</string>
     <string name="vm_running_hint">Nhấn để quay lại màn hình hệ thống</string>
-    <string name="lib_subtitle">Firmware Android cổ điển trên điện thoại hiện đại</string>
     <string name="help">Tệp được hỗ trợ</string>
     <string name="add_firmware">Thêm firmware</string>
     <string name="settings">Cài đặt</string>
@@ -15,10 +14,9 @@
     <string name="name">Tên</string>
     <string name="save">Lưu</string>
     <string name="storage_title">Thư mục chung cho hệ thống</string>
-    <string name="storage_text">Cho phép truy cập mọi tệp: thẻ nhớ của mỗi hệ thống sẽ nằm trong thư mục AEmulator của bộ nhớ trong — tiện để chép APK, nhạc và ảnh.</string>
+    <string name="storage_text">Cho phép truy cập mọi tệp: thẻ nhớ của mỗi hệ thống sẽ nằm trong thư mục RedMagicEMU của bộ nhớ trong — tiện để chép APK, nhạc và ảnh.</string>
     <string name="allow">Cho phép</string>
     <string name="empty_title">Chưa có hệ thống nào</string>
-    <string name="empty_text">Thêm firmware ARM cho Android 2.3–6.0: ZIP recovery, gói Odin (.tar.md5), system.img hoặc factory image.</string>
     <string name="empty_help">Tệp nào dùng được?</string>
     <string name="import_failed">Nhập thất bại</string>
     <string name="import_running">Đang nhập firmware</string>
@@ -30,7 +28,6 @@
     <string name="start">Chạy</string>
     <string name="rename">Đổi tên</string>
     <string name="help_title">Firmware được hỗ trợ</string>
-    <string name="help_text">• Android 2.3–4.4: firmware ARM 32-bit, chạy qua QEMU.\n• Android 5.0–17: firmware arm64 và GSI, chạy trực tiếp trên điện thoại.\n\nĐịnh dạng:\n• ZIP recovery CWM/TWRP (MIUI, CyanogenMod, bản port, đa số ROM tùy biến);\n• Samsung: Odin .tar / .tar.md5 hoặc ZIP chứa AP_*.tar.md5;\n• factory image của Google (.tgz / .zip);\n• system.img (ext4, sparse), bản sao lưu TWRP system.ext4.win;\n• OTA với system.new.dat(.br) + system.transfer.list.\n\nTốt nhất gói có boot.img: thứ tự khởi động dịch vụ được lấy từ đó.</string>
     <string name="vs_screen">Màn hình khách</string>
     <string name="vs_fixed_2x">Android 2.x dùng màn hình cố định 480×800, 240 dpi.</string>
     <string name="vs_screen_hint">Màn hình càng nhỏ hệ thống càng nhanh.</string>
@@ -99,7 +96,6 @@
     <string name="as_ton">Toncoin (TON)</string>
     <string name="as_copied">Đã sao chép địa chỉ</string>
     <string name="as_version">Phiên bản %1$s</string>
-    <string name="as_about">AEmulator chạy firmware Android cổ điển trên điện thoại hiện đại. Miễn phí và mã nguồn mở.</string>
     <string name="log_copy">Copy</string>
     <string name="log_export">Export .log</string>
     <string name="log_copied">Copied to clipboard</string>

@@ -4,7 +4,6 @@
     <string name="channel_vm">Sistema en ejecución</string>
     <string name="vm_running">%1$s está en ejecución</string>
     <string name="vm_running_hint">Toca para volver a la pantalla del sistema</string>
-    <string name="lib_subtitle">Firmware clásico de Android en un teléfono moderno</string>
     <string name="help">Archivos compatibles</string>
     <string name="add_firmware">Añadir firmware</string>
     <string name="settings">Ajustes</string>
@@ -15,10 +14,9 @@
     <string name="name">Nombre</string>
     <string name="save">Guardar</string>
     <string name="storage_title">Carpeta compartida de sistemas</string>
-    <string name="storage_text">Permite el acceso a todos los archivos: así la tarjeta de memoria de cada sistema estará en la carpeta AEmulator del almacenamiento interno, cómoda para APK, música y fotos.</string>
+    <string name="storage_text">Permite el acceso a todos los archivos: así la tarjeta de memoria de cada sistema estará en la carpeta RedMagicEMU del almacenamiento interno, cómoda para APK, música y fotos.</string>
     <string name="allow">Permitir</string>
     <string name="empty_title">Aún no hay sistemas</string>
-    <string name="empty_text">Añade un firmware ARM de Android 2.3–6.0: ZIP de recovery, archivo de Odin (.tar.md5), system.img o imagen de fábrica.</string>
     <string name="empty_help">¿Qué archivos sirven?</string>
     <string name="import_failed">La importación falló</string>
     <string name="import_running">Importando firmware</string>
@@ -30,7 +28,6 @@
     <string name="start">Iniciar</string>
     <string name="rename">Renombrar</string>
     <string name="help_title">Firmware compatible</string>
-    <string name="help_text">• Android 2.3–4.4: firmware ARM de 32 bits, mediante QEMU.\n• Android 5.0–17: firmware arm64 y GSI, de forma nativa en el teléfono.\n\nFormatos:\n• ZIP de recovery CWM/TWRP (MIUI, CyanogenMod, ports, la mayoría de ROM personalizadas);\n• Samsung: .tar / .tar.md5 de Odin o ZIP con AP_*.tar.md5;\n• imágenes de fábrica de Google (.tgz / .zip);\n• system.img (ext4, sparse), copia TWRP system.ext4.win;\n• OTA con system.new.dat(.br) + system.transfer.list.\n\nLo mejor es que el archivo incluya boot.img: de él se toma el orden de arranque de los servicios.</string>
     <string name="vs_screen">Pantalla invitada</string>
     <string name="vs_fixed_2x">Android 2.x usa una pantalla fija de 480×800 a 240 dpi.</string>
     <string name="vs_screen_hint">Una pantalla más pequeña hace el sistema más rápido.</string>
@@ -99,7 +96,6 @@
     <string name="as_ton">Toncoin (TON)</string>
     <string name="as_copied">Dirección copiada</string>
     <string name="as_version">Versión %1$s</string>
-    <string name="as_about">AEmulator ejecuta firmware clásico de Android en teléfonos modernos. Gratis y de código abierto.</string>
     <string name="log_copy">Copy</string>
     <string name="log_export">Export .log</string>
     <string name="log_copied">Copied to clipboard</string>

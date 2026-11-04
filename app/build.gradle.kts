@@ -57,16 +57,16 @@ android {
     productFlavors {
         create("standard") {
             dimension = "distribution"
-            applicationId = "app.aemu"
+            applicationId = "app.redmagicemu"
         }
         create("clone") {
             dimension = "distribution"
-            applicationId = "app.aemu.clone"
+            applicationId = "app.redmagicemu.clone"
         }
-        // a copy of this release that installs next to app.aemu (a package name part cannot start with a digit)
+        // a copy of this release that installs next to app.redmagicemu (a package name part cannot start with a digit)
         create("v0003") {
             dimension = "distribution"
-            applicationId = "app.aemu.v0003"
+            applicationId = "app.redmagicemu.v0003"
         }
     }
 
@@ -99,7 +99,7 @@ android {
     }
 
     androidResources {
-        noCompress += listOf("payload", "tar", "gz", "so", "img")
+        noCompress += listOf("payload", "tar", "gz", "img")
     }
 
     compileOptions {
@@ -137,17 +137,17 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
 }
 
-// sh: ./gradlew :app:copyReleaseApks -> release-apks/<version>/app.aemu.apk and app.aemu.0003.apk
+// sh: ./gradlew :app:copyReleaseApks -> release-apks/<version>/app.redmagicemu.apk and app.redmagicemu.0003.apk
 tasks.register<Copy>("copyReleaseApks") {
     dependsOn("assembleStandardRelease", "assembleV0003Release")
     val v = android.defaultConfig.versionName
     from(layout.buildDirectory.dir("outputs/apk/standard/release")) {
         include("*.apk")
-        rename { "app.aemu.apk" }
+        rename { "app.redmagicemu.apk" }
     }
     from(layout.buildDirectory.dir("outputs/apk/v0003/release")) {
         include("*.apk")
-        rename { "app.aemu.0003.apk" }
+        rename { "app.redmagicemu.0003.apk" }
     }
     into(rootProject.layout.projectDirectory.dir("release-apks/$v"))
 }

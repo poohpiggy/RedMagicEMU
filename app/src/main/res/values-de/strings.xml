@@ -4,7 +4,6 @@
     <string name="channel_vm">Laufendes System</string>
     <string name="vm_running">%1$s läuft</string>
     <string name="vm_running_hint">Tippen, um zum Systembildschirm zurückzukehren</string>
-    <string name="lib_subtitle">Klassische Android-Firmware auf einem modernen Handy</string>
     <string name="help">Unterstützte Dateien</string>
     <string name="add_firmware">Firmware hinzufügen</string>
     <string name="settings">Einstellungen</string>
@@ -15,10 +14,9 @@
     <string name="name">Name</string>
     <string name="save">Speichern</string>
     <string name="storage_title">Gemeinsamer Ordner für Systeme</string>
-    <string name="storage_text">Erlaube den Zugriff auf alle Dateien: Dann liegt die Speicherkarte jedes Systems im Ordner AEmulator des internen Speichers – praktisch für APKs, Musik und Fotos.</string>
+    <string name="storage_text">Erlaube den Zugriff auf alle Dateien: Dann liegt die Speicherkarte jedes Systems im Ordner RedMagicEMU des internen Speichers – praktisch für APKs, Musik und Fotos.</string>
     <string name="allow">Erlauben</string>
     <string name="empty_title">Noch keine Systeme</string>
-    <string name="empty_text">Füge eine ARM-Firmware für Android 2.3–6.0 hinzu: Recovery-ZIP, Odin-Archiv (.tar.md5), system.img oder Factory-Image.</string>
     <string name="empty_help">Welche Dateien gehen?</string>
     <string name="import_failed">Import fehlgeschlagen</string>
     <string name="import_running">Firmware wird importiert</string>
@@ -30,7 +28,6 @@
     <string name="start">Starten</string>
     <string name="rename">Umbenennen</string>
     <string name="help_title">Unterstützte Firmware</string>
-    <string name="help_text">• Android 2.3–4.4: 32-Bit-ARM-Firmware, läuft über QEMU.\n• Android 5.0–17: arm64-Firmware und GSIs, laufen nativ auf dem Handy.\n\nFormate:\n• CWM/TWRP-Recovery-ZIP (MIUI, CyanogenMod, Ports, die meisten Custom-ROMs);\n• Samsung: Odin .tar / .tar.md5 oder ZIP mit AP_*.tar.md5;\n• Google-Factory-Images (.tgz / .zip);\n• system.img (ext4, sparse), TWRP-Backup system.ext4.win;\n• OTA mit system.new.dat(.br) + system.transfer.list.\n\nAm besten enthält das Archiv boot.img – daraus wird die Startreihenfolge der Dienste gelesen.</string>
     <string name="vs_screen">Gastbildschirm</string>
     <string name="vs_fixed_2x">Android 2.x nutzt fest 480×800 bei 240 dpi.</string>
     <string name="vs_screen_hint">Ein kleinerer Bildschirm macht das System schneller.</string>
@@ -99,7 +96,6 @@
     <string name="as_ton">Toncoin (TON)</string>
     <string name="as_copied">Adresse kopiert</string>
     <string name="as_version">Version %1$s</string>
-    <string name="as_about">AEmulator bringt klassische Android-Firmware auf moderne Handys. Kostenlos und quelloffen.</string>
     <string name="log_copy">Copy</string>
     <string name="log_export">Export .log</string>
     <string name="log_copied">Copied to clipboard</string>

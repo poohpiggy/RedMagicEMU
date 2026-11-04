@@ -4,7 +4,6 @@
     <string name="channel_vm">Działający system</string>
     <string name="vm_running">%1$s działa</string>
     <string name="vm_running_hint">Dotknij, aby wrócić do ekranu systemu</string>
-    <string name="lib_subtitle">Klasyczne oprogramowanie Androida na nowoczesnym telefonie</string>
     <string name="help">Obsługiwane pliki</string>
     <string name="add_firmware">Dodaj firmware</string>
     <string name="settings">Ustawienia</string>
@@ -15,10 +14,9 @@
     <string name="name">Nazwa</string>
     <string name="save">Zapisz</string>
     <string name="storage_title">Wspólny folder systemów</string>
-    <string name="storage_text">Zezwól na dostęp do wszystkich plików: karta pamięci każdego systemu będzie w folderze AEmulator w pamięci wewnętrznej — wygodnie na APK, muzykę i zdjęcia.</string>
+    <string name="storage_text">Zezwól na dostęp do wszystkich plików: karta pamięci każdego systemu będzie w folderze RedMagicEMU w pamięci wewnętrznej — wygodnie na APK, muzykę i zdjęcia.</string>
     <string name="allow">Zezwól</string>
     <string name="empty_title">Brak systemów</string>
-    <string name="empty_text">Dodaj firmware ARM dla Androida 2.3–6.0: ZIP do recovery, archiwum Odin (.tar.md5), system.img lub obraz fabryczny.</string>
     <string name="empty_help">Jakie pliki pasują?</string>
     <string name="import_failed">Import nieudany</string>
     <string name="import_running">Importowanie firmware</string>
@@ -30,7 +28,6 @@
     <string name="start">Uruchom</string>
     <string name="rename">Zmień nazwę</string>
     <string name="help_title">Obsługiwane firmware</string>
-    <string name="help_text">• Android 2.3–4.4: 32-bitowe firmware ARM, przez QEMU.\n• Android 5.0–17: firmware arm64 i GSI, natywnie na telefonie.\n\nFormaty:\n• ZIP do recovery CWM/TWRP (MIUI, CyanogenMod, porty, większość custom ROM);\n• Samsung: .tar / .tar.md5 z Odina lub ZIP z AP_*.tar.md5;\n• obrazy fabryczne Google (.tgz / .zip);\n• system.img (ext4, sparse), kopia TWRP system.ext4.win;\n• OTA z system.new.dat(.br) + system.transfer.list.\n\nNajlepiej, gdy archiwum zawiera boot.img — z niego pochodzi kolejność startu usług.</string>
     <string name="vs_screen">Ekran gościa</string>
     <string name="vs_fixed_2x">Android 2.x ma stały ekran 480×800, 240 dpi.</string>
     <string name="vs_screen_hint">Im mniejszy ekran, tym szybszy system.</string>
@@ -99,7 +96,6 @@
     <string name="as_ton">Toncoin (TON)</string>
     <string name="as_copied">Skopiowano adres</string>
     <string name="as_version">Wersja %1$s</string>
-    <string name="as_about">AEmulator uruchamia klasyczne firmware Androida na nowoczesnych telefonach. Za darmo i open source.</string>
     <string name="log_copy">Copy</string>
     <string name="log_export">Export .log</string>
     <string name="log_copied">Copied to clipboard</string>

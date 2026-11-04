@@ -57,7 +57,7 @@ class InputService(private val paths: VmPaths, private val log: (String) -> Unit
         val ins = c.inputStream
         // The guest kernel's first byte names the device it opened: 0 the touch screen (event0), 1 the keys (event1).
         // A kernel that sends nothing gets the whole stream on one device, as before.
-        val dev = runCatching { c.soTimeout = 500; ins.read().also { c.soTimeout = 0 } }.getOrDefault(-1).let { if (it == 0 || it == 1) it else -1 }
+        val dev = readInputDevice({ c.soTimeout = it }, { ins.read() })
         clients.removeAll { old ->
             (old.pid == pid && pid > 0 && old.dev == dev).also { if (it) old.close() }
         }

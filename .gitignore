@@ -17,3 +17,7 @@ keystore.properties
 *.keystore
 release-apks/
 .kotlin/
+
+# 本地固件、诊断资料和生成的日志；已跟踪文件不受忽略规则影响
+/local-data/
+*.log

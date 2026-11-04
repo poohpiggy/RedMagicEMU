@@ -4,7 +4,6 @@
     <string name="channel_vm">実行中のシステム</string>
     <string name="vm_running">%1$s を実行中</string>
     <string name="vm_running_hint">タップしてシステム画面に戻る</string>
-    <string name="lib_subtitle">最新スマホで懐かしの Android ファームウェアを</string>
     <string name="help">対応ファイル</string>
     <string name="add_firmware">ファームウェアを追加</string>
     <string name="settings">設定</string>
@@ -15,10 +14,9 @@
     <string name="name">名前</string>
     <string name="save">保存</string>
     <string name="storage_title">システム用の共有フォルダー</string>
-    <string name="storage_text">すべてのファイルへのアクセスを許可すると、各システムのメモリーカードが内部ストレージの AEmulator フォルダーに置かれ、APK や音楽、写真を入れやすくなります。</string>
+    <string name="storage_text">すべてのファイルへのアクセスを許可すると、各システムのメモリーカードが内部ストレージの RedMagicEMU フォルダーに置かれ、APK や音楽、写真を入れやすくなります。</string>
     <string name="allow">許可</string>
     <string name="empty_title">まだシステムがありません</string>
-    <string name="empty_text">Android 2.3〜6.0 の ARM ファームウェアを追加してください：リカバリー用 ZIP、Odin アーカイブ（.tar.md5）、system.img、またはファクトリーイメージ。</string>
     <string name="empty_help">どのファイルが使えますか？</string>
     <string name="import_failed">インポートに失敗しました</string>
     <string name="import_running">ファームウェアをインポート中</string>
@@ -30,7 +28,6 @@
     <string name="start">起動</string>
     <string name="rename">名前を変更</string>
     <string name="help_title">対応ファームウェア</string>
-    <string name="help_text">• Android 2.3〜4.4：32 ビット ARM ファームウェア、QEMU で動作。\n• Android 5.0〜17：arm64 ファームウェアと GSI、スマホ上でネイティブ動作。\n\n形式：\n• CWM/TWRP リカバリー ZIP（MIUI、CyanogenMod、移植版、多くのカスタム ROM）\n• Samsung：Odin の .tar / .tar.md5、または AP_*.tar.md5 を含む ZIP\n• Google ファクトリーイメージ（.tgz / .zip）\n• system.img（ext4、sparse）、TWRP バックアップ system.ext4.win\n• system.new.dat(.br) + system.transfer.list を含む OTA\n\nアーカイブに boot.img があると最適です。サービスの起動順序はそこから読み取ります。</string>
     <string name="vs_screen">ゲスト画面</string>
     <string name="vs_fixed_2x">Android 2.x は 480×800・240 dpi の固定画面です。</string>
     <string name="vs_screen_hint">画面が小さいほどシステムが速くなります。</string>
@@ -99,7 +96,6 @@
     <string name="as_ton">Toncoin（TON）</string>
     <string name="as_copied">アドレスをコピーしました</string>
     <string name="as_version">バージョン %1$s</string>
-    <string name="as_about">AEmulator は最新のスマホで懐かしの Android ファームウェアを動かします。無料でオープンソースです。</string>
     <string name="log_copy">Copy</string>
     <string name="log_export">Export .log</string>
     <string name="log_copied">Copied to clipboard</string>

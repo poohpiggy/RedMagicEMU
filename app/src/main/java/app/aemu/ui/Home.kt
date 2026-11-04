@@ -193,7 +193,7 @@ fun HomeFab(expanded: Boolean, onToggle: (Boolean) -> Unit, onImport: () -> Unit
 
 /**
  * The firmware library (VMOS-style): every imported firmware with "new machine", plus firmware files waiting in
- * Internal storage/aemulator/firmware and the import button.
+ * Internal storage/RedMagicEMU/firmware and the import button.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

@@ -1,88 +1,21 @@
-<div align="center">
+# RedMagicEMU
 
-<img src="../../docs/assets/logo.png" width="128" alt="AEmulator logo"/>
+RedMagicEMU는 [AEmulator](https://github.com/uxazu/AEmulator)를 기반으로 독립적으로 유지 관리되는 비공식 프로젝트입니다. AEmulator는 원래의 [SENSES 에뮬레이터](https://github.com/Istratii-tech/SENSES)를 기반으로 합니다. REDMAGIC 공식 제품이 아니며 REDMAGIC과 제휴 관계가 없습니다.
 
-# AEmulator
+이 프로젝트는 원본 REDMAGIC NX809J Android 16 / API 36 / ARM64 펌웨어를 게스트로 대상으로 합니다. 이 제한은 게스트 펌웨어에 적용되며 호스트 기기 모델은 제한하지 않습니다. 해당 펌웨어의 지원 및 동작은 아직 실제 기기에서 검증되지 않았습니다. [진행 상황](../PROGRESS.md)과 [기준 기록](../BASELINE.md)을 참조하세요.
 
-*Based on the original [SENSES emulator](https://github.com/Istratii-tech/SENSES)*
+## 빌드
 
-**클래식 Android 펌웨어 — HTC Sense, TouchWiz, MIUI, AOSP — 를 최신 휴대폰에서. 루팅도 PC도 필요 없습니다.**
+Android 프로젝트에는 Android SDK 36과 NDK r28이 필요합니다. 기준 빌드에는 JDK 21을 사용했습니다.
 
-[![Version](https://img.shields.io/badge/version-0.0.0.3-3D5AFE?style=for-the-badge)](https://github.com/uxazu/aemulator/releases) [![License](https://img.shields.io/badge/license-GPL--3.0-3D5AFE?style=for-the-badge)](../../LICENSE) [![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/uxazu/aemulator) [![Forum](https://img.shields.io/badge/Forum-aeforum-FF6D00?style=for-the-badge&logo=discourse&logoColor=white)](https://aeforum.uxazuu.space/) [![Telegram](https://img.shields.io/badge/Telegram-channel-26A5E4?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/aemulatorofficial) [![Website](https://img.shields.io/badge/site-aemulator.gt.tc-111?style=for-the-badge)](https://aemulator.gt.tc)
-
-[🇬🇧 English](../../README.md) · [🇷🇺 Русский](README.ru.md) · [🇺🇦 Українська](README.uk.md) · [🇩🇪 Deutsch](README.de.md) · [🇫🇷 Français](README.fr.md) · [🇪🇸 Español](README.es.md) · [🇧🇷 Português](README.pt-BR.md) · [🇮🇹 Italiano](README.it.md) · [🇵🇱 Polski](README.pl.md) · [🇹🇷 Türkçe](README.tr.md) · [🇸🇦 العربية](README.ar.md) · [🇮🇷 فارسی](README.fa.md) · [🇮🇳 हिन्दी](README.hi.md) · [🇮🇩 Indonesia](README.id.md) · [🇻🇳 Tiếng Việt](README.vi.md) · [🇨🇳 简体中文](README.zh-CN.md) · [🇯🇵 日本語](README.ja.md) · **🇰🇷 한국어**
-
-</div>
-
----
-
-AEmulator는 펌웨어 파일에서 진짜 Android 2.3–17 시스템을 바로 부팅합니다: 리커버리 ZIP, Odin 아카이브, Google 팩토리 이미지, GSI. 오래된 32비트 펌웨어(2.3–4.4)는 수정된 QEMU로 실행하고, Android 5.0–17은 휴대폰의 arm64 코어에서 네이티브로 실행하며, 커널 binder를 에뮬레이션하며, 그래픽은 휴대폰 GPU로, 소리는 Android 오디오로 처리합니다. 모두 평범한 앱 안에서 동작합니다.
-
-## ✨ 기능
-
-- 거의 모든 형식 가져오기: CWM/TWRP ZIP, 삼성 Odin `.tar.md5`, Google 팩토리 `.tgz`, `system.img`, OTA `system.new.dat.br`
-- 제조사 UI가 그대로 동작: HTC Sense, Samsung TouchWiz, MIUI, AOSP
-- GL 브리지 하드웨어 그래픽, 소리, 터치와 멀티터치, 최신 TLS 프록시 네트워크
-- APK·음악·사진을 위한 공유 메모리 카드 폴더
-- 18개 언어의 Material 3 Expressive 인터페이스
-- 무료 오픈 소스(GPL-3.0)
-
-## 📱 펌웨어 목록
-
-검증된 펌웨어 목록(상태, 메모, 다운로드 링크 포함)은 포럼에 있습니다. 결과를 공유하고 질문하고 새 이미지를 찾아보세요.
-
-<div align="center">
-
-<a href="https://aeforum.uxazuu.space/"><img src="https://img.shields.io/badge/%ED%8F%AC%EB%9F%BC%20%EC%97%B4%EA%B8%B0-aeforum.uxazuu.space-FF6D00?style=for-the-badge&logo=discourse&logoColor=white" height="44" alt="포럼"/></a>
-
-</div>
-
-## 🚀 빠른 시작
-
-1. [Releases](https://github.com/uxazu/aemulator/releases)에서 APK를 받아 설치합니다.
-2. [포럼](https://aeforum.uxazuu.space/)에서 펌웨어를 찾아 휴대폰에 내려받으세요.
-3. AEmulator → **펌웨어 추가**에서 파일을 고릅니다. 가져오기는 몇 분 걸립니다.
-4. **시작**을 누릅니다. 첫 부팅은 앱 최적화로 더 오래 걸립니다.
-5. ⋮ 메뉴에서 볼륨·전원 버튼·로그, ⚙️에서 설정과 언어.
-
-## 📋 요구 사항
-
-- 64비트 ARM 휴대폰(arm64-v8a)의 Android 8.0+
-- 펌웨어당 약 1–3GB 여유 공간
-- 최신 Snapdragon / Dimensity / Tensor 권장
-
-## ⚙️ 작동 방식
-
-Android 2.3–4.4에서는 각 게스트 프로세스가 수정된 사용자 모드 QEMU에서 실행되고, 5.0–17에서는 펌웨어 자체의 arm64 프로그램이 네이티브로 실행되며 Android 버전마다 별도의 엔진 커널이 시스템 호출을 처리합니다. binder 데몬이 커널 드라이버를 대신하고, GL 브리지가 OpenGL ES 호출을 GPU로 전달하며, 작은 게스트 라이브러리(오디오 HAL, audio policy 래퍼, LD_PRELOAD 심)가 제조사 코드를 에뮬레이터에 맞춥니다. 가져오기 도구는 펌웨어를 읽고 boot 이미지의 init 스크립트로 서비스 시작 계획을 만듭니다.
-
-## 🛠️ 소스에서 빌드
-
-JDK 17, Android SDK 36, NDK r28이 필요합니다. 게스트 라이브러리는 `native/*/build.sh`로 빌드합니다.
-
-```bash
-git clone https://github.com/uxazu/aemulator.git
-cd aemulator
-./gradlew assembleRelease
+```shell
+./gradlew :app:assembleStandardDebug
 ```
 
-## 🙏 감사의 말
+로컬 개발에는 application ID `app.redmagicemu`를 사용합니다. 업스트림 앱과 별도의 Android 설치이므로 비공개 데이터는 자동으로 이전되지 않습니다. 이전 방법이 검증될 때까지 기존 앱과 데이터를 보관하세요.
 
-AEmulator는 [원작자](https://t.me/istratii_tech1)의 HTC Desire HD·HTC One M7 에뮬레이터에서 시작되었습니다. 그의 엔진이 없었다면 이 프로젝트도 없었습니다.
+## 기여 및 라이선스
 
-## 💙 프로젝트 후원
+RedMagicEMU는 [uxazu](https://github.com/uxazu)의 AEmulator를 기반으로 합니다. AEmulator는 [원작자](https://t.me/istratii_tech1)의 HTC Desire HD 및 HTC One M7 에뮬레이터에서 발전했습니다. 이들의 작업과 기존 저작권 및 라이선스 고지를 존중합니다.
 
-AEmulator로 추억의 휴대폰을 되살렸다면 개발을 후원할 수 있습니다:
-
-- 💳 [dalink.to/uxazu](https://dalink.to/uxazu)
-
-## 🔗 링크
-
-- 🌐 웹사이트: [aemulator.gt.tc](https://aemulator.gt.tc)
-- 💬 포럼: [aeforum.uxazuu.space](https://aeforum.uxazuu.space/)
-- 📣 텔레그램 채널: [@aemulatorofficial](https://t.me/aemulatorofficial)
-- 👤 제작자: [uxazu](https://github.com/uxazu)
-- 🧬 원작자: [t.me/istratii_tech1](https://t.me/istratii_tech1)
-
-## 📄 라이선스
-
-GPL-3.0. Android, 상표, 펌웨어는 각 소유자에게 있습니다.
+이 프로젝트는 [GPL-3.0](../../LICENSE)에 따라 배포됩니다. Android, REDMAGIC, 기타 상표 및 펌웨어는 각 소유자의 자산입니다.

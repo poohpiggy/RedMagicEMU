@@ -4,7 +4,6 @@
     <string name="channel_vm">चल रहा सिस्टम</string>
     <string name="vm_running">%1$s चल रहा है</string>
     <string name="vm_running_hint">सिस्टम स्क्रीन पर लौटने के लिए टैप करें</string>
-    <string name="lib_subtitle">आधुनिक फ़ोन पर पुराने Android फ़र्मवेयर</string>
     <string name="help">समर्थित फ़ाइलें</string>
     <string name="add_firmware">फ़र्मवेयर जोड़ें</string>
     <string name="settings">सेटिंग्स</string>
@@ -15,10 +14,9 @@
     <string name="name">नाम</string>
     <string name="save">सहेजें</string>
     <string name="storage_title">सिस्टम के लिए साझा फ़ोल्डर</string>
-    <string name="storage_text">सभी फ़ाइलों की अनुमति दें: हर सिस्टम का मेमोरी कार्ड आंतरिक स्टोरेज के AEmulator फ़ोल्डर में रहेगा — APK, संगीत और फ़ोटो रखने में आसान।</string>
+    <string name="storage_text">सभी फ़ाइलों की अनुमति दें: हर सिस्टम का मेमोरी कार्ड आंतरिक स्टोरेज के RedMagicEMU फ़ोल्डर में रहेगा — APK, संगीत और फ़ोटो रखने में आसान।</string>
     <string name="allow">अनुमति दें</string>
     <string name="empty_title">अभी कोई सिस्टम नहीं</string>
-    <string name="empty_text">Android 2.3–6.0 का ARM फ़र्मवेयर जोड़ें: रिकवरी ZIP, Odin आर्काइव (.tar.md5), system.img या फ़ैक्टरी इमेज।</string>
     <string name="empty_help">कौन-सी फ़ाइलें चलेंगी?</string>
     <string name="import_failed">आयात विफल</string>
     <string name="import_running">फ़र्मवेयर आयात हो रहा है</string>
@@ -30,7 +28,6 @@
     <string name="start">चलाएँ</string>
     <string name="rename">नाम बदलें</string>
     <string name="help_title">समर्थित फ़र्मवेयर</string>
-    <string name="help_text">• Android 2.3–4.4: 32-बिट ARM फ़र्मवेयर, QEMU के ज़रिए।\n• Android 5.0–17: arm64 फ़र्मवेयर और GSI, सीधे फ़ोन पर।\n\nफ़ॉर्मेट:\n• CWM/TWRP रिकवरी ZIP (MIUI, CyanogenMod, पोर्ट, अधिकांश कस्टम ROM);\n• Samsung: Odin .tar / .tar.md5 या AP_*.tar.md5 वाला ZIP;\n• Google फ़ैक्टरी इमेज (.tgz / .zip);\n• system.img (ext4, sparse), TWRP बैकअप system.ext4.win;\n• system.new.dat(.br) + system.transfer.list वाला OTA।\n\nबेहतर है कि आर्काइव में boot.img हो: सेवाओं का बूट क्रम उसी से लिया जाता है।</string>
     <string name="vs_screen">गेस्ट स्क्रीन</string>
     <string name="vs_fixed_2x">Android 2.x में स्क्रीन तय है: 480×800, 240 dpi।</string>
     <string name="vs_screen_hint">छोटी स्क्रीन पर सिस्टम तेज़ चलता है।</string>
@@ -99,7 +96,6 @@
     <string name="as_ton">Toncoin (TON)</string>
     <string name="as_copied">पता कॉपी हुआ</string>
     <string name="as_version">संस्करण %1$s</string>
-    <string name="as_about">AEmulator आधुनिक फ़ोनों पर पुराने Android फ़र्मवेयर चलाता है। मुफ़्त और ओपन सोर्स।</string>
     <string name="log_copy">Copy</string>
     <string name="log_export">Export .log</string>
     <string name="log_copied">Copied to clipboard</string>

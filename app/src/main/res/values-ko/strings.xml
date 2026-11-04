@@ -4,7 +4,6 @@
     <string name="channel_vm">실행 중인 시스템</string>
     <string name="vm_running">%1$s 실행 중</string>
     <string name="vm_running_hint">탭하여 시스템 화면으로 돌아가기</string>
-    <string name="lib_subtitle">최신 휴대폰에서 즐기는 클래식 Android 펌웨어</string>
     <string name="help">지원 파일</string>
     <string name="add_firmware">펌웨어 추가</string>
     <string name="settings">설정</string>
@@ -15,10 +14,9 @@
     <string name="name">이름</string>
     <string name="save">저장</string>
     <string name="storage_title">시스템 공유 폴더</string>
-    <string name="storage_text">모든 파일 접근을 허용하면 각 시스템의 메모리 카드가 내부 저장소의 AEmulator 폴더에 생겨 APK, 음악, 사진을 넣기 편합니다.</string>
+    <string name="storage_text">모든 파일 접근을 허용하면 각 시스템의 메모리 카드가 내부 저장소의 RedMagicEMU 폴더에 생겨 APK, 음악, 사진을 넣기 편합니다.</string>
     <string name="allow">허용</string>
     <string name="empty_title">아직 시스템이 없습니다</string>
-    <string name="empty_text">Android 2.3–6.0용 ARM 펌웨어를 추가하세요: 리커버리 ZIP, Odin 아카이브(.tar.md5), system.img 또는 팩토리 이미지.</string>
     <string name="empty_help">어떤 파일이 되나요?</string>
     <string name="import_failed">가져오기 실패</string>
     <string name="import_running">펌웨어 가져오는 중</string>
@@ -30,7 +28,6 @@
     <string name="start">시작</string>
     <string name="rename">이름 변경</string>
     <string name="help_title">지원 펌웨어</string>
-    <string name="help_text">• Android 2.3–4.4: 32비트 ARM 펌웨어, QEMU로 실행.\n• Android 5.0–17: arm64 펌웨어와 GSI, 휴대폰에서 네이티브 실행.\n\n형식:\n• CWM/TWRP 리커버리 ZIP(MIUI, CyanogenMod, 포팅, 대부분의 커스텀 롬)\n• 삼성: Odin .tar / .tar.md5 또는 AP_*.tar.md5가 든 ZIP\n• Google 팩토리 이미지(.tgz / .zip)\n• system.img(ext4, sparse), TWRP 백업 system.ext4.win\n• system.new.dat(.br) + system.transfer.list가 있는 OTA\n\n아카이브에 boot.img가 있으면 가장 좋습니다. 서비스 시작 순서를 여기서 읽습니다.</string>
     <string name="vs_screen">게스트 화면</string>
     <string name="vs_fixed_2x">Android 2.x는 480×800, 240 dpi 고정 화면을 씁니다.</string>
     <string name="vs_screen_hint">화면이 작을수록 시스템이 빨라집니다.</string>
@@ -99,7 +96,6 @@
     <string name="as_ton">Toncoin(TON)</string>
     <string name="as_copied">주소가 복사되었습니다</string>
     <string name="as_version">버전 %1$s</string>
-    <string name="as_about">AEmulator는 최신 휴대폰에서 클래식 Android 펌웨어를 실행합니다. 무료 오픈 소스입니다.</string>
     <string name="log_copy">Copy</string>
     <string name="log_export">Export .log</string>
     <string name="log_copied">Copied to clipboard</string>

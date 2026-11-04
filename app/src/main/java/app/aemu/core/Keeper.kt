@@ -31,7 +31,7 @@ class Keeper : Service() {
     companion object {
         private const val CH = "vm"
         private const val ID = 1
-        const val STOP = "app.aemu.KEEPER_STOP"
+        val STOP = app.aemu.BuildConfig.APPLICATION_ID + ".KEEPER_STOP"
 
         fun ensureChannel(ctx: Context) {
             runCatching {

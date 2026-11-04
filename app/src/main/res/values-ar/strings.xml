@@ -4,7 +4,6 @@
     <string name="channel_vm">نظام قيد التشغيل</string>
     <string name="vm_running">%1$s قيد التشغيل</string>
     <string name="vm_running_hint">انقر للعودة إلى شاشة النظام</string>
-    <string name="lib_subtitle">برامج أندرويد الكلاسيكية على هاتف حديث</string>
     <string name="help">الملفات المدعومة</string>
     <string name="add_firmware">إضافة برنامج ثابت</string>
     <string name="settings">الإعدادات</string>
@@ -15,10 +14,9 @@
     <string name="name">الاسم</string>
     <string name="save">حفظ</string>
     <string name="storage_title">مجلد مشترك للأنظمة</string>
-    <string name="storage_text">اسمح بالوصول إلى كل الملفات: ستكون بطاقة ذاكرة كل نظام في مجلد AEmulator بالذاكرة الداخلية، وهو مناسب لملفات APK والموسيقى والصور.</string>
+    <string name="storage_text">اسمح بالوصول إلى كل الملفات: ستكون بطاقة ذاكرة كل نظام في مجلد RedMagicEMU بالذاكرة الداخلية، وهو مناسب لملفات APK والموسيقى والصور.</string>
     <string name="allow">سماح</string>
     <string name="empty_title">لا توجد أنظمة بعد</string>
-    <string name="empty_text">أضف برنامجًا ثابتًا لمعالج ARM لأندرويد 2.3–6.0: ملف ZIP للريكفري، أو أرشيف Odin (.tar.md5)، أو system.img، أو صورة المصنع.</string>
     <string name="empty_help">ما الملفات المناسبة؟</string>
     <string name="import_failed">فشل الاستيراد</string>
     <string name="import_running">جارٍ استيراد البرنامج الثابت</string>
@@ -30,7 +28,6 @@
     <string name="start">تشغيل</string>
     <string name="rename">إعادة تسمية</string>
     <string name="help_title">البرامج الثابتة المدعومة</string>
-    <string name="help_text">• أندرويد 2.3–4.4: برامج ARM ثابتة بمعمارية 32 بت، تعمل عبر QEMU.\n• أندرويد 5.0–17: برامج arm64 الثابتة وصور GSI، تعمل مباشرة على الهاتف.\n\nالصيغ:\n• ملف ZIP للريكفري CWM/TWRP (MIUI وCyanogenMod والمنقولة ومعظم الرومات المعدلة)؛\n• سامسونج: ‎.tar / .tar.md5 من Odin أو ZIP يحوي AP_*.tar.md5؛\n• صور مصنع Google ‏(.tgz / .zip)؛\n• system.img ‏(ext4، sparse)، نسخة TWRP ‏system.ext4.win؛\n• OTA مع system.new.dat(.br) و system.transfer.list.\n\nالأفضل أن يحوي الأرشيف boot.img: منه يُؤخذ ترتيب تشغيل الخدمات.</string>
     <string name="vs_screen">شاشة الضيف</string>
     <string name="vs_fixed_2x">يستخدم أندرويد 2.x شاشة ثابتة 480×800 بدقة 240 dpi.</string>
     <string name="vs_screen_hint">كلما صغرت الشاشة زادت سرعة النظام.</string>
@@ -99,7 +96,6 @@
     <string name="as_ton">Toncoin (TON)</string>
     <string name="as_copied">نُسخ العنوان</string>
     <string name="as_version">الإصدار %1$s</string>
-    <string name="as_about">يشغّل AEmulator برامج أندرويد الكلاسيكية على الهواتف الحديثة. مجاني ومفتوح المصدر.</string>
     <string name="log_copy">Copy</string>
     <string name="log_export">Export .log</string>
     <string name="log_copied">Copied to clipboard</string>

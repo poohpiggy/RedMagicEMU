@@ -12,6 +12,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -74,6 +75,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
@@ -83,16 +85,6 @@ import androidx.compose.ui.unit.dp
 import app.aemu.AppPrefs
 import app.aemu.BuildConfig
 import app.aemu.R
-
-/** Ссылки проекта — одни и те же в приложении, README и на сайте. */
-object Links {
-    const val SITE = "https://aemulator.gt.tc"
-    const val GITHUB = "https://github.com/uxazu/aemulator"
-    const val CHANNEL = "https://t.me/aemulatorofficial"
-    const val AUTHOR = "https://github.com/uxazu"
-    const val ORIGINAL = "https://t.me/istratii_tech1"
-    const val DONATE = "https://dalink.to/uxazu"
-}
 
 class AppSettingsActivity : ComponentActivity() {
     override fun attachBaseContext(base: Context) = super.attachBaseContext(AppPrefs.wrap(base))
@@ -117,56 +109,6 @@ private fun AppSettings(onBack: () -> Unit, onRestyle: () -> Unit) {
     var defaults by remember { mutableStateOf(AppPrefs.defaults(ctx)) }
     var theme by remember { mutableStateOf(AppPrefs.theme(ctx)) }
     var dynamic by remember { mutableStateOf(AppPrefs.dynamicColor(ctx)) }
-    val scope = rememberCoroutineScope()
-    var autoUpdates by remember { mutableStateOf(AppPrefs.autoCheckUpdates(ctx)) }
-    var updateState by remember { mutableStateOf<UpdateState>(UpdateState.Idle) }
-    var downloadJob by remember { mutableStateOf<Job?>(null) }
-
-    fun checkForUpdates() {
-        updateState = UpdateState.Checking
-        scope.launch {
-            val res = AppUpdateManager.checkLatestRelease()
-            res.fold(
-                onSuccess = { rel ->
-                    if (rel != null) {
-                        if (AppUpdateManager.isNewerVersion(rel.versionName, BuildConfig.VERSION_NAME)) {
-                            updateState = UpdateState.Available(rel)
-                        } else {
-                            updateState = UpdateState.UpToDate(BuildConfig.VERSION_NAME, rel.tagName)
-                        }
-                    } else {
-                        updateState = UpdateState.UpToDate(BuildConfig.VERSION_NAME, "")
-                    }
-                },
-                onFailure = { err ->
-                    updateState = UpdateState.Error(err.localizedMessage ?: "Ошибка сети")
-                }
-            )
-        }
-    }
-
-    fun startDownload(rel: ReleaseInfo) {
-        updateState = UpdateState.Downloading(rel, 0f, 0L, rel.sizeBytes)
-        downloadJob = scope.launch {
-            try {
-                val file = AppUpdateManager.downloadApk(ctx, rel) { progress, downloaded, total ->
-                    updateState = UpdateState.Downloading(rel, progress, downloaded, total)
-                }
-                updateState = UpdateState.ReadyToInstall(rel, file)
-                AppUpdateManager.installApk(ctx, file)
-            } catch (e: Exception) {
-                if (e !is kotlinx.coroutines.CancellationException) {
-                    updateState = UpdateState.Error(e.localizedMessage ?: "Ошибка загрузки")
-                }
-            }
-        }
-    }
-
-    fun open(url: String) = runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-    fun copy(text: String) {
-        (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("address", text))
-        Toast.makeText(ctx, ctx.getString(R.string.as_copied), Toast.LENGTH_SHORT).show()
-    }
     val langTag = AppPrefs.language(ctx)
     val langName = AppPrefs.LANGUAGES.firstOrNull { it.first == langTag }?.second?.ifEmpty { null } ?: stringResource(R.string.as_lang_system)
 
@@ -185,26 +127,6 @@ private fun AppSettings(onBack: () -> Unit, onRestyle: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             item { AboutCard() }
-
-            item {
-                Section(stringResource(R.string.as_updates)) {
-                    Toggle(
-                        stringResource(R.string.as_auto_updates),
-                        stringResource(R.string.as_auto_updates_sub),
-                        autoUpdates
-                    ) {
-                        autoUpdates = it
-                        AppPrefs.setAutoCheckUpdates(ctx, it)
-                    }
-                    Row_(
-                        Icons.Rounded.SystemUpdate,
-                        stringResource(R.string.as_check_updates),
-                        stringResource(R.string.as_check_updates_sub, BuildConfig.VERSION_NAME)
-                    ) {
-                        checkForUpdates()
-                    }
-                }
-            }
 
             item {
                 Section(stringResource(R.string.as_appearance)) {
@@ -251,21 +173,7 @@ private fun AppSettings(onBack: () -> Unit, onRestyle: () -> Unit) {
                 }
             }
 
-            item {
-                Section(stringResource(R.string.as_links)) {
-                    Row_(Icons.Rounded.Public, stringResource(R.string.as_site), "aemulator.gt.tc") { open(Links.SITE) }
-                    Row_(Icons.Rounded.Send, stringResource(R.string.as_channel), "@aemulatorofficial") { open(Links.CHANNEL) }
-                    Row_(Icons.Rounded.Person, stringResource(R.string.as_author), "uxazu") { open(Links.AUTHOR) }
-                    Row_(Icons.Rounded.History, stringResource(R.string.as_orig), "t.me/istratii_tech1") { open(Links.ORIGINAL) }
-                    Row_(Icons.Rounded.Code, stringResource(R.string.as_github), "github.com/uxazu/aemulator") { open(Links.GITHUB) }
-                }
-            }
 
-            item {
-                Section(stringResource(R.string.as_support)) {
-                    Row_(Icons.Rounded.Favorite, stringResource(R.string.as_donate), "dalink.to/uxazu") { open(Links.DONATE) }
-                }
-            }
         }
     }
 
@@ -294,27 +202,18 @@ private fun AppSettings(onBack: () -> Unit, onRestyle: () -> Unit) {
         )
     }
 
-    UpdateDialog(
-        state = updateState,
-        onDismiss = { updateState = UpdateState.Idle },
-        onStartDownload = ::startDownload,
-        onCancelDownload = {
-            downloadJob?.cancel()
-            updateState = UpdateState.Idle
-        },
-        onInstall = { file -> AppUpdateManager.installApk(ctx, file) },
-        onOpenUrl = { url -> open(url) }
-    )
+
 }
 
 @Composable
 private fun AboutCard() {
     Card(shape = MaterialTheme.shapes.extraLarge, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
         Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
-            Image(painterResource(R.drawable.logo), null, Modifier.size(64.dp).clip(RoundedCornerShape(20.dp)))
+            Image(painterResource(R.drawable.ic_launcher_placeholder), null,
+                Modifier.size(64.dp).clip(RoundedCornerShape(20.dp)).background(colorResource(R.color.ic_bg)))
             Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f)) {
-                Text("AEmulator", style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                Text(stringResource(R.string.app_name), style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.onPrimaryContainer)
                 Text(stringResource(R.string.as_version, BuildConfig.VERSION_NAME), style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onPrimaryContainer)
                 Spacer(Modifier.height(4.dp))

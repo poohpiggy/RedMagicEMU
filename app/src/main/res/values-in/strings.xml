@@ -4,7 +4,6 @@
     <string name="channel_vm">Sistem berjalan</string>
     <string name="vm_running">%1$s sedang berjalan</string>
     <string name="vm_running_hint">Ketuk untuk kembali ke layar sistem</string>
-    <string name="lib_subtitle">Firmware Android klasik di ponsel modern</string>
     <string name="help">File yang didukung</string>
     <string name="add_firmware">Tambah firmware</string>
     <string name="settings">Setelan</string>
@@ -15,10 +14,9 @@
     <string name="name">Nama</string>
     <string name="save">Simpan</string>
     <string name="storage_title">Folder bersama untuk sistem</string>
-    <string name="storage_text">Izinkan akses ke semua file: kartu memori tiap sistem akan berada di folder AEmulator penyimpanan internal — praktis untuk APK, musik, dan foto.</string>
+    <string name="storage_text">Izinkan akses ke semua file: kartu memori tiap sistem akan berada di folder RedMagicEMU penyimpanan internal — praktis untuk APK, musik, dan foto.</string>
     <string name="allow">Izinkan</string>
     <string name="empty_title">Belum ada sistem</string>
-    <string name="empty_text">Tambahkan firmware ARM Android 2.3–6.0: ZIP recovery, arsip Odin (.tar.md5), system.img, atau factory image.</string>
     <string name="empty_help">File apa yang cocok?</string>
     <string name="import_failed">Impor gagal</string>
     <string name="import_running">Mengimpor firmware</string>
@@ -30,7 +28,6 @@
     <string name="start">Mulai</string>
     <string name="rename">Ganti nama</string>
     <string name="help_title">Firmware yang didukung</string>
-    <string name="help_text">• Android 2.3–4.4: firmware ARM 32-bit, lewat QEMU.\n• Android 5.0–17: firmware arm64 dan GSI, langsung di ponsel.\n\nFormat:\n• ZIP recovery CWM/TWRP (MIUI, CyanogenMod, port, sebagian besar ROM kustom);\n• Samsung: Odin .tar / .tar.md5 atau ZIP berisi AP_*.tar.md5;\n• factory image Google (.tgz / .zip);\n• system.img (ext4, sparse), cadangan TWRP system.ext4.win;\n• OTA dengan system.new.dat(.br) + system.transfer.list.\n\nPaling baik jika arsip berisi boot.img: urutan mulai layanan diambil darinya.</string>
     <string name="vs_screen">Layar tamu</string>
     <string name="vs_fixed_2x">Android 2.x memakai layar tetap 480×800, 240 dpi.</string>
     <string name="vs_screen_hint">Layar lebih kecil membuat sistem lebih cepat.</string>
@@ -99,7 +96,6 @@
     <string name="as_ton">Toncoin (TON)</string>
     <string name="as_copied">Alamat disalin</string>
     <string name="as_version">Versi %1$s</string>
-    <string name="as_about">AEmulator menjalankan firmware Android klasik di ponsel modern. Gratis dan sumber terbuka.</string>
     <string name="log_copy">Copy</string>
     <string name="log_export">Export .log</string>
     <string name="log_copied">Copied to clipboard</string>

@@ -4,7 +4,6 @@
     <string name="channel_vm">Çalışan sistem</string>
     <string name="vm_running">%1$s çalışıyor</string>
     <string name="vm_running_hint">Sistem ekranına dönmek için dokunun</string>
-    <string name="lib_subtitle">Modern telefonda klasik Android yazılımları</string>
     <string name="help">Desteklenen dosyalar</string>
     <string name="add_firmware">Yazılım ekle</string>
     <string name="settings">Ayarlar</string>
@@ -15,10 +14,9 @@
     <string name="name">Ad</string>
     <string name="save">Kaydet</string>
     <string name="storage_title">Sistemler için ortak klasör</string>
-    <string name="storage_text">Tüm dosyalara erişime izin verin: her sistemin hafıza kartı dahili depolamadaki AEmulator klasöründe olur; APK, müzik ve fotoğraflar için kullanışlıdır.</string>
+    <string name="storage_text">Tüm dosyalara erişime izin verin: her sistemin hafıza kartı dahili depolamadaki RedMagicEMU klasöründe olur; APK, müzik ve fotoğraflar için kullanışlıdır.</string>
     <string name="allow">İzin ver</string>
     <string name="empty_title">Henüz sistem yok</string>
-    <string name="empty_text">Android 2.3–6.0 için bir ARM yazılımı ekleyin: recovery ZIP, Odin arşivi (.tar.md5), system.img veya fabrika imajı.</string>
     <string name="empty_help">Hangi dosyalar uygun?</string>
     <string name="import_failed">İçe aktarma başarısız</string>
     <string name="import_running">Yazılım içe aktarılıyor</string>
@@ -30,7 +28,6 @@
     <string name="start">Başlat</string>
     <string name="rename">Yeniden adlandır</string>
     <string name="help_title">Desteklenen yazılımlar</string>
-    <string name="help_text">• Android 2.3–4.4: 32 bit ARM yazılımlar, QEMU üzerinden.\n• Android 5.0–17: arm64 yazılımlar ve GSI’lar, telefonda doğrudan.\n\nBiçimler:\n• CWM/TWRP recovery ZIP (MIUI, CyanogenMod, portlar, çoğu özel ROM);\n• Samsung: Odin .tar / .tar.md5 veya AP_*.tar.md5 içeren ZIP;\n• Google fabrika imajları (.tgz / .zip);\n• system.img (ext4, sparse), TWRP yedeği system.ext4.win;\n• system.new.dat(.br) + system.transfer.list içeren OTA.\n\nArşivde boot.img olması en iyisidir: servislerin başlama sırası buradan alınır.</string>
     <string name="vs_screen">Misafir ekranı</string>
     <string name="vs_fixed_2x">Android 2.x sabit 480×800, 240 dpi ekran kullanır.</string>
     <string name="vs_screen_hint">Ekran küçüldükçe sistem hızlanır.</string>
@@ -99,7 +96,6 @@
     <string name="as_ton">Toncoin (TON)</string>
     <string name="as_copied">Adres kopyalandı</string>
     <string name="as_version">Sürüm %1$s</string>
-    <string name="as_about">AEmulator klasik Android yazılımlarını modern telefonlarda çalıştırır. Ücretsiz ve açık kaynak.</string>
     <string name="log_copy">Copy</string>
     <string name="log_export">Export .log</string>
     <string name="log_copied">Copied to clipboard</string>

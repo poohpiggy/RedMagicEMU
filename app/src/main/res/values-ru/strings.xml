@@ -4,7 +4,6 @@
     <string name="channel_vm">Работающая система</string>
     <string name="vm_running">%1$s работает</string>
     <string name="vm_running_hint">Нажмите, чтобы вернуться к экрану системы</string>
-    <string name="lib_subtitle">Старые прошивки Android на современном телефоне</string>
     <string name="help">Какие файлы подходят</string>
     <string name="add_firmware">Добавить прошивку</string>
     <string name="settings">Настройки</string>
@@ -15,10 +14,9 @@
     <string name="name">Название</string>
     <string name="save">Сохранить</string>
     <string name="storage_title">Общая папка с системами</string>
-    <string name="storage_text">Разрешите доступ ко всем файлам — тогда «карта памяти» каждой системы будет лежать в папке AEmulator внутренней памяти, и туда удобно класть APK, музыку и фото.</string>
+    <string name="storage_text">Разрешите доступ ко всем файлам — тогда «карта памяти» каждой системы будет лежать в папке RedMagicEMU внутренней памяти, и туда удобно класть APK, музыку и фото.</string>
     <string name="allow">Разрешить</string>
     <string name="empty_title">Пока нет ни одной системы</string>
-    <string name="empty_text">Добавьте прошивку Android 2.3–6.0 для ARM: ZIP для рекавери, архив Odin (.tar.md5), system.img или factory-образ.</string>
     <string name="empty_help">Какие файлы подходят?</string>
     <string name="import_failed">Импорт не удался</string>
     <string name="import_running">Импорт прошивки</string>
@@ -30,7 +28,6 @@
     <string name="start">Запустить</string>
     <string name="rename">Переименовать</string>
     <string name="help_title">Какие прошивки подходят</string>
-    <string name="help_text">• Android 2.3–4.4: 32-битные ARM-прошивки, работают через QEMU.\n• Android 5.0–17: arm64-прошивки и GSI, работают нативно на телефоне.\n\nФорматы:\n• ZIP для CWM/TWRP (MIUI, CyanogenMod, порты, большинство кастомных прошивок);\n• Samsung: .tar / .tar.md5 из Odin или ZIP с AP_*.tar.md5;\n• factory-образы Google (.tgz / .zip);\n• system.img (ext4, sparse), TWRP-бэкап system.ext4.win;\n• OTA с system.new.dat(.br) + system.transfer.list.\n\nЛучше всего, если в архиве есть boot.img — из него берётся порядок загрузки служб.</string>
     <string name="vs_screen">Экран гостя</string>
     <string name="vs_fixed_2x">Для Android 2.x экран фиксирован: 480×800, 240 dpi.</string>
     <string name="vs_screen_hint">Чем меньше экран — тем быстрее работает система.</string>
@@ -102,7 +99,6 @@
     <string name="as_ton">Toncoin (TON)</string>
     <string name="as_copied">Адрес скопирован</string>
     <string name="as_version">Версия %1$s</string>
-    <string name="as_about">AEmulator запускает старые прошивки Android на современных телефонах. Бесплатно и с открытым кодом.</string>
     <string name="log_copy">Копировать</string>
     <string name="log_export">Экспорт .log</string>
     <string name="log_copied">Скопировано в буфер обмена</string>

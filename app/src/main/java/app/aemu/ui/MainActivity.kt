@@ -98,7 +98,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.material.icons.rounded.Settings
 import android.content.Context
 
-const val ACTION_BOOT = "app.aemu.BOOT"
+val ACTION_BOOT = BuildConfig.APPLICATION_ID + ".BOOT"
 
 class MainActivity : ComponentActivity() {
     private val model: LibraryModel by viewModels()
@@ -146,7 +146,7 @@ class MainActivity : ComponentActivity() {
         if (importPath != null) {
             model.import(android.net.Uri.fromFile(java.io.File(importPath)))
         }
-        // ярлыки и автоматизация: am start -a app.aemu.BOOT --es id <образ>
+        // Shortcuts and automation: am start -a <applicationId>.BOOT --es id <image>
         if (i?.action == ACTION_BOOT) i.getStringExtra("id")?.let { VmActivity.start(this, it, i.getBooleanExtra("recovery", false)) }
     }
 
@@ -218,47 +218,11 @@ fun Library(model: LibraryModel) {
     var containerFrom by remember { mutableStateOf<GuestImage?>(null) }
     val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
-    val scope = rememberCoroutineScope()
-    var updateState by remember { mutableStateOf<UpdateState>(UpdateState.Idle) }
-    var downloadJob by remember { mutableStateOf<Job?>(null) }
-
-    LaunchedEffect(Unit) {
-        if (app.aemu.AppPrefs.autoCheckUpdates(ctx)) {
-            val now = System.currentTimeMillis()
-            if (now - app.aemu.AppPrefs.lastUpdateCheck(ctx) > 3600_000L) {
-                app.aemu.AppPrefs.setLastUpdateCheck(ctx, now)
-                val res = AppUpdateManager.checkLatestRelease()
-                res.getOrNull()?.let { rel ->
-                    if (AppUpdateManager.isNewerVersion(rel.versionName, BuildConfig.VERSION_NAME)) {
-                        updateState = UpdateState.Available(rel)
-                    }
-                }
-            }
-        }
-    }
-
-    fun startDownload(rel: ReleaseInfo) {
-        updateState = UpdateState.Downloading(rel, 0f, 0L, rel.sizeBytes)
-        downloadJob = scope.launch {
-            try {
-                val file = AppUpdateManager.downloadApk(ctx, rel) { progress, downloaded, total ->
-                    updateState = UpdateState.Downloading(rel, progress, downloaded, total)
-                }
-                updateState = UpdateState.ReadyToInstall(rel, file)
-                AppUpdateManager.installApk(ctx, file)
-            } catch (e: Exception) {
-                if (e !is kotlinx.coroutines.CancellationException) {
-                    updateState = UpdateState.Error(e.localizedMessage ?: "Ошибка загрузки")
-                }
-            }
-        }
-    }
-
     Scaffold(
         modifier = Modifier.nestedScroll(scroll.nestedScrollConnection),
         topBar = {
             LargeFlexibleTopAppBar(
-                title = { Text("AEmulator") },
+                title = { Text(stringResource(R.string.app_name)) },
                 subtitle = { Text(stringResource(R.string.lib_subtitle)) },
                 actions = { IconButton(onClick = { help = true }) { Icon(Icons.Rounded.Info, stringResource(R.string.help)) }
                     IconButton(onClick = { ctx.startActivity(Intent(ctx, AppSettingsActivity::class.java)) }) { Icon(Icons.Rounded.Settings, stringResource(R.string.settings)) } },
@@ -350,17 +314,7 @@ AlertDialog(
     containerFrom?.let { src -> ContainerDialog(src, images, onDismiss = { containerFrom = null },
         onCreate = { from, name, copy, settings -> containerFrom = null; model.clone(from, name, copy, settings) }) }
 
-    UpdateDialog(
-        state = updateState,
-        onDismiss = { updateState = UpdateState.Idle },
-        onStartDownload = ::startDownload,
-        onCancelDownload = {
-            downloadJob?.cancel()
-            updateState = UpdateState.Idle
-        },
-        onInstall = { file -> AppUpdateManager.installApk(ctx, file) },
-        onOpenUrl = { url -> runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))) } }
-    )
+
 }
 
 @Composable

@@ -314,7 +314,7 @@ class VmActivity : ComponentActivity() {
         }
     }
 
-    /** Отладка: adb shell am broadcast -a app.aemu.SHELL --es cmd "dumpsys power" → run/shell.out */
+    /** Debug: adb shell am broadcast -a <applicationId>.SHELL --es cmd "dumpsys power" → run/shell.out */
     private var shellRx: android.content.BroadcastReceiver? = null
     private fun registerShell() {
         if (!app.aemu.BuildConfig.DEBUG) return
@@ -352,7 +352,7 @@ class VmActivity : ComponentActivity() {
             }
         }
         shellRx = rx
-        val f = android.content.IntentFilter("app.aemu.SHELL")
+        val f = android.content.IntentFilter(app.aemu.BuildConfig.APPLICATION_ID + ".SHELL")
         if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(rx, f, Context.RECEIVER_EXPORTED) else registerReceiver(rx, f)
     }
 
@@ -451,8 +451,8 @@ class VmActivity : ComponentActivity() {
         requestedOrientation = if (o == "l") android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
             else android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
     }
-    /** A label over the screen (default "AEmulator <version> beta") so testers can post screenshots; menu → Badge. */
-    private val defaultBadge get() = "AEmulator ${app.aemu.BuildConfig.VERSION_NAME} beta"
+    /** A label over the screen (default "RedMagicEMU <version> beta") so testers can post screenshots; menu → Badge. */
+    private val defaultBadge get() = "RedMagicEMU ${app.aemu.BuildConfig.VERSION_NAME} beta"
     private var badgeOn by mutableStateOf(false)
     private var badgeText by mutableStateOf("")
     private fun loadBadge() { badgeOn = uiPrefs.getBoolean("badge_on", false); badgeText = uiPrefs.getString("badge_text", null) ?: defaultBadge }
@@ -616,7 +616,7 @@ class VmActivity : ComponentActivity() {
      * not exist before 4.0 and cannot read the bridge's frames. The PNG lands in the guest's Pictures folder.
      */
     private fun screenshot() {
-        val name = "aemu-" + java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date()) + ".png"
+        val name = "RedMagicEMU-" + java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date()) + ".png"
         val hostDir = app.aemu.core.Sdcard.hostDir(vm.paths)?.let { java.io.File(it, "Pictures") }
         if (hostDir == null) { toast(getString(R.string.m_failed)); return }
         fun save(b: android.graphics.Bitmap) = thread {
@@ -691,7 +691,7 @@ class VmActivity : ComponentActivity() {
         }
         val dir = app.aemu.core.Sdcard.hostDir(vm.paths)?.let { java.io.File(it, "Movies") }
         if (dir == null || guestW <= 0 || guestH <= 0) { toast(getString(R.string.m_failed)); return }
-        val name = "aemu-" + java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date()) + ".mp4"
+        val name = "RedMagicEMU-" + java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date()) + ".mp4"
         val r = app.aemu.core.ScreenRecorder(java.io.File(dir, name), guestW, guestH, ::grabFrame, vm::log)
         if (!r.start()) { toast(getString(R.string.m_failed)); return }
         recorder = r; recOn.value = true
@@ -728,7 +728,7 @@ class VmActivity : ComponentActivity() {
     @Composable
     private fun SmsDialog(onDone: () -> Unit) {
         var from by remember { mutableStateOf("+10000000000") }
-        var body by remember { mutableStateOf("Hello from AEmulator") }
+        var body by remember { mutableStateOf("Hello from RedMagicEMU") }
         AlertDialog(onDismissRequest = onDone,
             title = { Text(stringResource(R.string.m_sms)) },
             text = {
@@ -1355,7 +1355,7 @@ class VmActivity : ComponentActivity() {
                     Text(stringResource(R.string.log), style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f),
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                     IconButton(onClick = { copyLog(list.toList()) }) { Icon(Icons.Rounded.ContentCopy, stringResource(R.string.log_copy)) }
-                    IconButton(onClick = { pendingExport = list.toList(); exportLog.launch("aemu-${vm.img.id}-${if (guestTab) "logcat" else "host"}.log") }) {
+                    IconButton(onClick = { pendingExport = list.toList(); exportLog.launch("RedMagicEMU-${vm.img.id}-${if (guestTab) "logcat" else "host"}.log") }) {
                         Icon(Icons.Rounded.Download, stringResource(R.string.log_export))
                     }
                     FilledTonalIconButton(onClick = onClose) { Icon(Icons.Rounded.Close, stringResource(R.string.close)) }
@@ -1458,7 +1458,7 @@ class VmActivity : ComponentActivity() {
 
     private fun copyLog(lines: List<String>) {
         val cm = getSystemService(ClipboardManager::class.java)
-        cm.setPrimaryClip(ClipData.newPlainText("AEmulator log", lines.joinToString("\n")))
+        cm.setPrimaryClip(ClipData.newPlainText("RedMagicEMU log", lines.joinToString("\n")))
         Toast.makeText(this, R.string.log_copied, Toast.LENGTH_SHORT).show()
     }
 
