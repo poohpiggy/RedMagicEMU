@@ -20,8 +20,10 @@
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 #include "bproto.h"
+#include "display_trace.h"
 
 typedef uint64_t u64;
 typedef uint32_t u32;
@@ -87,6 +89,7 @@ struct txn {
     struct thread *from, *to_thread; struct proc *to_proc; struct txn *from_parent, *to_parent;
     struct node *target; u32 code, flags; int reply, need_reply, sender_pid; u32 sender_euid;
     u64 data_size, offsets_size, extra_size; char *data; int memfd; int nfds, *fds; int nheld; struct held *held;
+    int display_trace_code;
 };
 struct thread {
     int fd, tid, is_main, waiting, nonblock, looper, woken; u32 read_size;
@@ -104,12 +107,113 @@ static struct node *ctx_mgr;
  * before it can drop the object it has just sent (the driver does the same) */
 static struct thread *cur;
 static int kick_any;
-static int ep, verbose;
+static int ep, verbose, display_trace_enabled;
+static unsigned display_trace_phases;
+static struct display_trace_tracker display_trace_tracker;
 
 static void logf_(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap); fputc('\n', stderr);
 }
 #define V(...) do { if (verbose) logf_(__VA_ARGS__); } while (0)
+
+enum display_phase {
+    PHASE_CANDIDATE, PHASE_UID_MATCH, PHASE_UID_OTHER, PHASE_BIG, PHASE_INLINE_INVALID,
+    PHASE_INTERFACE_MATCH, PHASE_INTERFACE_OTHER,
+    PHASE_SOURCE_MATCH, PHASE_SOURCE_COMM_UNAVAILABLE, PHASE_SOURCE_COMM_OTHER,
+    PHASE_SOURCE_EXE_UNAVAILABLE, PHASE_SOURCE_EXE_OTHER,
+    PHASE_TARGET_MATCH, PHASE_TARGET_COMM_UNAVAILABLE, PHASE_TARGET_COMM_OTHER,
+    PHASE_TARGET_EXE_UNAVAILABLE, PHASE_TARGET_EXE_OTHER, PHASE_MATCH_LIMIT
+};
+
+static void display_trace_phase(enum display_phase phase) {
+    static const char *const names[] = {
+        "candidate", "uid-match", "uid-other", "big-unread", "inline-invalid",
+        "interface-match", "interface-other", "source-match", "source-name-unavailable",
+        "source-name-other", "source-exe-unavailable", "source-exe-other", "target-match",
+        "target-name-unavailable", "target-name-other", "target-exe-unavailable", "target-exe-other", "transition-limit"
+    };
+    if (display_trace_enabled && (unsigned)phase < sizeof names / sizeof names[0] &&
+        display_trace_once(&display_trace_phases, (unsigned)phase))
+        logf_("display-trace: phase=%s", names[phase]);
+}
+
+static void display_trace_identity_phase(int target, enum display_trace_identity_result state) {
+    unsigned index = (unsigned)state - (unsigned)DISPLAY_ID_MATCH;
+    if (index < 5) display_trace_phase((enum display_phase)((target ? PHASE_TARGET_MATCH : PHASE_SOURCE_MATCH) + index));
+}
+
+/* The daemon handles many guests' threads. Never identify one by numeric UID alone. */
+static enum display_trace_identity_result display_trace_process(int pid, int target) {
+    char path[64], comm[64], exe[512], cmdline[512];
+    const char *source_comm = NULL;
+    if (pid <= 0 || snprintf(path, sizeof path, "/proc/%d/exe", pid) >= (int)sizeof path) return DISPLAY_ID_EXE_UNAVAILABLE;
+    ssize_t n = readlink(path, exe, sizeof exe - 1);
+    if (n <= 0 || n >= (ssize_t)sizeof exe - 1) return DISPLAY_ID_EXE_UNAVAILABLE;
+    exe[n] = 0;
+    if (!target && snprintf(path, sizeof path, "/proc/%d/comm", pid) < (int)sizeof path) {
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) {
+            n = read(fd, comm, sizeof comm - 1); close(fd);
+            if (n > 0 && n < (ssize_t)sizeof comm - 1) {
+                if (comm[n - 1] == '\n') n--;
+                comm[n] = 0; source_comm = comm;
+            }
+        }
+    }
+    if (source_comm && !strcmp(source_comm, "system_server"))
+        return display_trace_process_identity(source_comm, exe, NULL, 0, target);
+    if (snprintf(path, sizeof path, "/proc/%d/cmdline", pid) >= (int)sizeof path)
+        return display_trace_process_identity(source_comm, exe, NULL, 0, target);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return display_trace_process_identity(source_comm, exe, NULL, 0, target);
+    n = read(fd, cmdline, sizeof cmdline); close(fd);
+    return display_trace_process_identity(source_comm, exe, n > 0 ? cmdline : NULL,
+                                           n > 0 ? (size_t)n : 0, target);
+}
+
+/* F_BIG is a shared, possibly truncated memfd; never touch it for diagnostics. */
+static int display_trace_data_safe(const struct txn *t, u64 total, size_t received) {
+    if (t->memfd >= 0 || t->data_size > UINT64_MAX - 7) return 0;
+    u64 aligned = (t->data_size + 7) & ~7ULL;
+    if (aligned > total || t->offsets_size > total - aligned) return 0;
+    /* bsend adds alignment padding only when object offsets follow the data. */
+    return (t->offsets_size ? total : t->data_size) <= received;
+}
+
+static int display_trace_decode(const struct txn *request, const struct txn *response,
+                                const char *data, u64 total, size_t received,
+                                struct display_trace_result *r) {
+    u64 aligned;
+    if (!display_trace_data_safe(response, total, received)) return 0;
+    aligned = (response->data_size + 7) & ~7ULL;
+    if (aligned > total || response->offsets_size > total - aligned ||
+        response->data_size > SIZE_MAX || response->offsets_size > SIZE_MAX) return 0;
+    return display_trace_reply(request->display_trace_code, data, (size_t)response->data_size,
+                               data + aligned, (size_t)response->offsets_size, r);
+}
+
+static void display_trace_emit(struct display_trace_event *event) {
+    static const char *const servers[] = {"unknown", "ids", "empty", "present", "null", "exception", "transport"};
+    static const char *const translations[] = {"unknown", "ok", "present-ref", "null", "failed"};
+    if (!display_trace_record(&display_trace_tracker, event)) return;
+    struct timespec now = {0};
+    int have_time = clock_gettime(CLOCK_MONOTONIC, &now) == 0;
+    unsigned long long ms = have_time ? (unsigned long long)now.tv_sec * 1000ULL + (unsigned long long)now.tv_nsec / 1000000ULL : 0;
+    int index = event->code - 12;
+    const char *server = event->server >= 0 && (size_t)event->server < sizeof servers / sizeof servers[0] ? servers[event->server] : "unknown";
+    const char *translated = event->translated >= 0 && (size_t)event->translated < sizeof translations / sizeof translations[0] ? translations[event->translated] : "unknown";
+    if (event->server == DISPLAY_EVENT_IDS)
+        logf_("display-trace: mono_ms=%s%llu code=%d observations=%llu server=%s translated=%s count=%d first_id=%llu",
+            have_time ? "" : "unavailable:", ms, event->code, (unsigned long long)display_trace_tracker.count[index],
+            server, translated, event->count, (unsigned long long)event->first_id);
+    else if (event->server == DISPLAY_EVENT_EXCEPTION || event->server == DISPLAY_EVENT_TRANSPORT)
+        logf_("display-trace: mono_ms=%s%llu code=%d observations=%llu server=%s translated=%s result_code=%d",
+            have_time ? "" : "unavailable:", ms, event->code, (unsigned long long)display_trace_tracker.count[index],
+            server, translated, event->exception);
+    else logf_("display-trace: mono_ms=%s%llu code=%d observations=%llu server=%s translated=%s",
+        have_time ? "" : "unavailable:", ms, event->code, (unsigned long long)display_trace_tracker.count[index], server, translated);
+    if (display_trace_tracker.transition_lines >= 16) display_trace_phase(PHASE_MATCH_LIMIT);
+}
 
 static void *zalloc(size_t n) { void *p = calloc(1, n); if (!p) { logf_("binderd64: out of memory"); exit(1); } return p; }
 
@@ -232,6 +336,11 @@ static void thread_error(struct thread *th, u32 err) {
 
 /* the caller of t will never get an answer */
 static void txn_fail(struct txn *t, u32 err) {
+    if (t->display_trace_code) {
+        struct display_trace_event event = { .code = t->display_trace_code, .server = DISPLAY_EVENT_TRANSPORT,
+            .translated = DISPLAY_TRANSLATED_FAILED, .exception = (int)err };
+        display_trace_emit(&event);
+    }
     struct thread *from = t->from;
     if (from && from->stack == t) { from->stack = t->from_parent; thread_error(from, err); }
     txn_free(t);
@@ -289,6 +398,51 @@ static int translate(struct thread *th, struct proc *to, struct txn *t, char *da
     return 0;
 }
 
+/* This verifies the daemon's translated reference only, not client deserialization. */
+static int display_trace_held_reference(const struct txn *t, struct proc *to,
+                                        const struct display_trace_result *r) {
+    if (!r->binder_present) return 1;
+    if (r->binder_type == T_HANDLE) {
+        if (r->binder_value > UINT32_MAX) return 0;
+        struct ref *ref = ref_get(to, (u32)r->binder_value);
+        if (!ref || !ref->node || !ref->node->owner || ref->strong <= 0) return 0;
+        for (int i = 0; i < t->nheld; i++) if (t->held[i].strong && t->held[i].ref == ref) return 1;
+    } else if (r->binder_type == T_BINDER) {
+        for (int i = 0; i < t->nheld; i++) {
+            struct node *node = t->held[i].node;
+            if (t->held[i].strong && node && node->owner == to && node->ptr == r->binder_value &&
+                node->cookie == r->binder_cookie && node->local_strong > 0) return 1;
+        }
+    }
+    return 0;
+}
+
+static void display_trace_reply_event(const struct txn *request, const struct txn *response, struct proc *to,
+        int translated, int have_before, const struct display_trace_result *before,
+        int have_after, const struct display_trace_result *after) {
+    struct display_trace_event event = { .code = request->display_trace_code,
+        .server = DISPLAY_EVENT_UNKNOWN, .translated = DISPLAY_TRANSLATED_UNKNOWN };
+    if (have_before && before->state == DISPLAY_TRACE_EXCEPTION) {
+        event.server = DISPLAY_EVENT_EXCEPTION; event.exception = before->exception;
+    } else if (have_before && request->display_trace_code == 12) {
+        event.server = before->count ? DISPLAY_EVENT_IDS : DISPLAY_EVENT_EMPTY;
+        event.count = before->count; event.first_id = before->first_id;
+    } else if (have_before) event.server = before->binder_present ? DISPLAY_EVENT_PRESENT : DISPLAY_EVENT_NULL;
+
+    if (translated < 0) event.translated = DISPLAY_TRANSLATED_FAILED;
+    else if (have_before && have_after && before->state == after->state) {
+        if (before->state == DISPLAY_TRACE_EXCEPTION && before->exception == after->exception)
+            event.translated = DISPLAY_TRANSLATED_OK;
+        else if (before->state == DISPLAY_TRACE_OK && request->display_trace_code == 12 &&
+                 before->count == after->count && before->first_id == after->first_id)
+            event.translated = DISPLAY_TRANSLATED_OK;
+        else if (before->state == DISPLAY_TRACE_OK && request->display_trace_code == 13 &&
+                 before->binder_present == after->binder_present && display_trace_held_reference(response, to, after))
+            event.translated = after->binder_present ? DISPLAY_TRANSLATED_PRESENT : DISPLAY_TRANSLATED_NULL;
+    }
+    display_trace_emit(&event);
+}
+
 static struct thread *ready_thread(struct proc *p) {
     for (struct thread *th = p->threads; th; th = th->next)
         if (th->waiting && !th->stack && !th->todo.head) return th;
@@ -307,7 +461,7 @@ static void queue_txn(struct txn *t, struct thread *target) {
     else { wq_push(&t->to_proc->todo, w); kick_proc(t->to_proc); }
 }
 
-static void do_txn(struct thread *th, struct c_txn *m, char *payload, int *fds, int nfds) {
+static void do_txn(struct thread *th, struct c_txn *m, char *payload, size_t payload_len, int *fds, int nfds) {
     struct proc *p = th->proc;
     struct txn *t = zalloc(sizeof *t);
     int reply = m->cmd == BC_REPLY;
@@ -335,7 +489,14 @@ static void do_txn(struct thread *th, struct c_txn *m, char *payload, int *fds, 
         if (!in_reply_to || in_reply_to->to_thread != th) goto fail;
         th->stack = in_reply_to->to_parent;
         target_thread = in_reply_to->from;
-        if (!target_thread) { err = BR_DEAD_REPLY; in_reply_to->from = 0; txn_free(in_reply_to); in_reply_to = 0; goto fail; }
+        if (!target_thread) {
+            if (in_reply_to->display_trace_code) {
+                struct display_trace_event event = { .code = in_reply_to->display_trace_code,
+                    .server = DISPLAY_EVENT_TRANSPORT, .translated = DISPLAY_TRANSLATED_FAILED, .exception = (int)BR_DEAD_REPLY };
+                display_trace_emit(&event);
+            }
+            err = BR_DEAD_REPLY; in_reply_to->from = 0; txn_free(in_reply_to); in_reply_to = 0; goto fail;
+        }
         to = target_thread->proc;
     } else {
         struct node *n;
@@ -350,7 +511,38 @@ static void do_txn(struct thread *th, struct c_txn *m, char *payload, int *fds, 
         }
     }
     t->to_proc = to;
-    if (translate(th, to, t, data) < 0) { if (t->memfd >= 0) munmap(data, total ? total : 1); goto fail; }
+    if (!reply && display_trace_enabled && (t->code == 12 || t->code == 13) && !(t->flags & TF_ONE_WAY)) {
+        display_trace_phase(PHASE_CANDIDATE);
+        if (t->sender_euid != 1000) display_trace_phase(PHASE_UID_OTHER);
+        else {
+            display_trace_phase(PHASE_UID_MATCH);
+            if (t->memfd >= 0) display_trace_phase(PHASE_BIG);
+            else if (!display_trace_data_safe(t, total, payload_len) || t->data_size > SIZE_MAX)
+                display_trace_phase(PHASE_INLINE_INVALID);
+            else if (!display_trace_request(data, (size_t)t->data_size)) display_trace_phase(PHASE_INTERFACE_OTHER);
+            else {
+                display_trace_phase(PHASE_INTERFACE_MATCH);
+                enum display_trace_identity_result source = display_trace_process(p->pid, 0);
+                enum display_trace_identity_result target = display_trace_process(to->pid, 1);
+                display_trace_identity_phase(0, source);
+                display_trace_identity_phase(1, target);
+                if (display_trace_match(1, t->code, t->flags, t->sender_euid,
+                        source == DISPLAY_ID_MATCH, target == DISPLAY_ID_MATCH, data, (size_t)t->data_size)) {
+                    t->display_trace_code = (int)t->code;
+                }
+            }
+        }
+    }
+    int trace_reply = reply && in_reply_to && in_reply_to->display_trace_code;
+    struct display_trace_result before = {0}, after = {0};
+    int have_before = trace_reply && display_trace_decode(in_reply_to, t, data, total, payload_len, &before);
+    int translate_result = translate(th, to, t, data);
+    if (trace_reply) {
+        int have_after = translate_result == 0 && display_trace_decode(in_reply_to, t, data, total, payload_len, &after);
+        display_trace_reply_event(in_reply_to, t, to, translate_result, have_before, &before, have_after, &after);
+        if (translate_result < 0) in_reply_to->display_trace_code = 0; /* already counted above */
+    }
+    if (translate_result < 0) { if (t->memfd >= 0) munmap(data, total ? total : 1); goto fail; }
     if (t->memfd >= 0) munmap(data, total ? total : 1);
     if (t->target) {                        /* the target stays alive until the buffer is freed */
         t->target->local_strong++; node_work(t->target);
@@ -376,6 +568,11 @@ static void do_txn(struct thread *th, struct c_txn *m, char *payload, int *fds, 
     return;
 fail:
     V("txn failed: pid %d handle %u code %u err %x", p->pid, m->handle, m->code, err);
+    if (t->display_trace_code) {
+        struct display_trace_event event = { .code = t->display_trace_code, .server = DISPLAY_EVENT_TRANSPORT,
+            .translated = DISPLAY_TRANSLATED_FAILED, .exception = (int)err };
+        display_trace_emit(&event);
+    }
     txn_free(t);
     if (reply && in_reply_to) { th->stack = in_reply_to->to_parent; txn_fail(in_reply_to, BR_FAILED_REPLY); }
     thread_error(th, err);
@@ -663,7 +860,7 @@ static void on_message(struct thread *th) {
     cur = th;
     V("%d/%d: op %u flags %u len %zd fds %d", th->proc->pid, th->tid, h->op, h->flags, n, nfds);
     if (h->op == OP_BCS) do_bcs(th, (u32 *)(h + 1), (int)((n - sizeof *h) / 4));
-    else if (h->op == OP_TXN && (size_t)n >= sizeof(struct c_txn)) { do_txn(th, (struct c_txn *)buf, buf + sizeof(struct c_txn), fds, nfds); nfds = 0; }
+    else if (h->op == OP_TXN && (size_t)n >= sizeof(struct c_txn)) { do_txn(th, (struct c_txn *)buf, buf + sizeof(struct c_txn), (size_t)n - sizeof(struct c_txn), fds, nfds); nfds = 0; }
     for (int i = 0; i < nfds; i++) close(fds[i]);
     if (h->flags & F_READ) {
         th->woken = 0; th->waiting = 1; th->nonblock = !!(h->flags & F_NONBLOCK); th->read_size = h->read_size;
@@ -677,8 +874,10 @@ static void on_message(struct thread *th) {
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: binderd64 <socket>\n"); return 2; }
     verbose = getenv("AEMU_BINDER_VERBOSE") != 0;
+    display_trace_enabled = getenv("AEMU_BINDER_DISPLAY_TRACE") != 0;
     signal(SIGPIPE, SIG_IGN);
     setvbuf(stderr, 0, _IOLBF, 0);
+    if (display_trace_enabled) logf_("display-trace: enabled; exact process identity required; no matching output means unobserved");
     struct rlimit rl; if (!getrlimit(RLIMIT_NOFILE, &rl)) { rl.rlim_cur = rl.rlim_max; setrlimit(RLIMIT_NOFILE, &rl); }
     int ls = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
     struct sockaddr_un sa = { .sun_family = AF_UNIX };

@@ -14,7 +14,7 @@
 
 RedMagicEMU is an unofficial, independently maintained project based on [AEmulator](https://github.com/uxazu/AEmulator), itself based on the original [SENSES emulator](https://github.com/Istratii-tech/SENSES). It is not an official REDMAGIC product and is not affiliated with REDMAGIC.
 
-The project targets the original REDMAGIC NX809J Android 16 / API 36 / ARM64 firmware as its guest. This restriction applies to guest firmware, not the host device model. Support and operation with this firmware have not yet been verified on a device; see [progress](docs/PROGRESS.md) and [baseline](docs/BASELINE.md).
+The project targets the original REDMAGIC NX809J Android 16 / API 36 / ARM64 firmware as its guest. This restriction applies to guest firmware, not the host device model. The firmware has reached its original desktop on one tested host. The project remains alpha, with known HAL limitations; see [progress](docs/PROGRESS.md) and [baseline](docs/BASELINE.md).
 
 ## Build
 

@@ -6,6 +6,9 @@ object HostNative {
 
     @JvmStatic private external fun relaxFdsan()
     @JvmStatic private external fun limitStack()
+    @JvmStatic external fun pidfdOpen(pid: Int): Int
+    @JvmStatic external fun pidfdSignal(fd: Int, signal: Int): Int
+    @JvmStatic external fun pidfdClose(fd: Int)
 
     /** Закрытый GL-мост делает freopen() поверх fd 2 — без этого fdsan роняет процесс :vm. */
     /** RLIMIT_STACK 8 MB for guest processes (bionic 6.0 derives the main thread's stack bounds from it). */

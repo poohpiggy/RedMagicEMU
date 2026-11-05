@@ -38,14 +38,14 @@ class PropService(private val paths: VmPaths, private val log: (String) -> Unit)
                 return String(ByteArray(n).also { din.readFully(it) }, Charsets.UTF_8).substringBefore('\u0000')
             }
             val name = str()
-            apply(name, str())
+            applyFromClient(name, str(), c)
             c.outputStream.write(ByteArray(4))   // PROP_SUCCESS
             return@UnixServer
         }
         din.readFully(body, 4, 124)
         val name = cstr(body, 4, 32)
         val value = cstr(body, 36, 92)
-        if (cmd == 1) apply(name, value) else log("props: unknown command $cmd")
+        if (cmd == 1) applyFromClient(name, value, c) else log("props: unknown command $cmd")
     }
 
     /**
@@ -75,7 +75,7 @@ class PropService(private val paths: VmPaths, private val log: (String) -> Unit)
                             val body = ByteArray(128)
                             DataInputStream(c.inputStream).readFully(body)
                             val cmd = ByteBuffer.wrap(body).order(ByteOrder.LITTLE_ENDIAN).getInt(0)
-                            if (cmd == 1) apply(cstr(body, 4, 32), cstr(body, 36, 92))
+                            if (cmd == 1) applyFromClient(cstr(body, 4, 32), cstr(body, 36, 92), c)
                         }
                         runCatching { c.close() }
                     }, "props-abstract-client").start()
@@ -127,6 +127,13 @@ class PropService(private val paths: VmPaths, private val log: (String) -> Unit)
     fun get(name: String): String? = area?.get(name)
 
     fun put(name: String, value: String): Boolean = area?.put(name, value) ?: false
+
+    private fun applyFromClient(name: String, value: String, socket: android.net.LocalSocket) {
+        PowerRequestPeer.applyWithDiagnostics(name, value, {
+            val peer = socket.peerCredentials
+            PowerRequestPeer.describe(peer.pid, peer.uid)
+        }, log, ::apply)
+    }
 
     @Synchronized
     private fun apply(name: String, value: String) {

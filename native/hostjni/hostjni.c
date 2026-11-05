@@ -4,6 +4,9 @@
 #include <jni.h>
 #include <dlfcn.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <errno.h>
 
 #ifndef ANDROID_FDSAN_ERROR_LEVEL_DISABLED
 enum android_fdsan_error_level {
@@ -34,6 +37,24 @@ JNIEXPORT void JNICALL Java_app_aemu_core_HostNative_limitStack(JNIEnv *env, jcl
         r.rlim_cur = 8u << 20;
         setrlimit(RLIMIT_STACK, &r);
     }
+}
+
+// pidfds pin a specific process identity, so a delayed stop cannot signal a reused PID.
+JNIEXPORT jint JNICALL Java_app_aemu_core_HostNative_pidfdOpen(JNIEnv *env, jclass cls, jint pid) {
+    (void)env; (void)cls;
+    int fd = (int)syscall(__NR_pidfd_open, pid, 0);
+    return fd < 0 ? -errno : fd;
+}
+
+JNIEXPORT jint JNICALL Java_app_aemu_core_HostNative_pidfdSignal(JNIEnv *env, jclass cls, jint fd, jint sig) {
+    (void)env; (void)cls;
+    int result = (int)syscall(__NR_pidfd_send_signal, fd, sig, NULL, 0);
+    return result < 0 ? -errno : 0;
+}
+
+JNIEXPORT void JNICALL Java_app_aemu_core_HostNative_pidfdClose(JNIEnv *env, jclass cls, jint fd) {
+    (void)env; (void)cls;
+    close(fd);
 }
 
 // AF_UNIX datagram sockets for the emulated wpa_supplicant control interface (WifiStub.kt). The guest's libwpa_client

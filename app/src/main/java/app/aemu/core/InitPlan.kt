@@ -178,6 +178,13 @@ object InitPlan {
         Rule("zygote_secondary", minApi = 21),
     )
 
+    // NX809J init starts this executable only from the off-mode charger trigger.
+    internal fun isZteOffModeCharger(argv: List<String>): Boolean =
+        argv.firstOrNull() == "/system/bin/ztecharger"
+
+    internal fun isIsolatedQtiBluetoothHal(api: Int, argv: List<String>): Boolean =
+        api == 36 && argv.firstOrNull() == "/vendor/bin/hw/android.hardware.bluetooth@aidl-service-qti"
+
     /** Строит план загрузки из разобранных rc-файлов; для отсутствующих служб берёт умолчания. */
     fun plan(rc: Rc, api: Int, root: File): List<GuestService> {
         val out = ArrayList<GuestService>()
@@ -202,7 +209,8 @@ object InitPlan {
             val bin = sv.argv.first()
             val base = bin.substringAfterLast('/')
             // (a HAL marked oneshot is one its client restarts: the audio service)
-            !sv.disabled && (!sv.oneshot || bin.substringBeforeLast('/').endsWith("/bin/hw")) && sv.name !in known && sv.name !in SKIP && base !in SKIP_BIN &&
+            !isZteOffModeCharger(sv.argv) && !isIsolatedQtiBluetoothHal(api, sv.argv) && !sv.disabled &&
+                (!sv.oneshot || bin.substringBeforeLast('/').endsWith("/bin/hw")) && sv.name !in known && sv.name !in SKIP && base !in SKIP_BIN &&
                 // префиксом совпадают только явные «xxx_» и длинные имена: иначе «sh» отсекал бы shelld (MIUI) и т.п.
                 // Samsung's sensorhubservice is a binder service system_server waits for without a timeout (S4/S5 TouchWiz), not a sensor daemon
                 (base == "sensorhubservice" || SKIP_BIN.none { base == it || ((it.endsWith("_") || it.length >= 5) && base.startsWith(it)) }) && !base.endsWith(".sh") &&

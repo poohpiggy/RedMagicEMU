@@ -14,6 +14,8 @@ class CleanupSyncTest {
             .invoke(field.get(null), GuestVm::class.java) as GuestVm
         val tracked = ConcurrentHashMap.newKeySet<Process>()
         GuestVm::class.java.getDeclaredField("externalProcs").apply { isAccessible = true }.set(vm, tracked)
+        GuestVm::class.java.getDeclaredField("guestLauncher\$delegate").apply { isAccessible = true }
+            .set(vm, lazyOf(PidfdGuestLauncher(File("."), {}, { null })))
         val executable = File(System.getProperty("java.home"), "bin/java" + if (System.getProperty("os.name").startsWith("Windows")) ".exe" else "")
         val child = vm.startCleanupSync(ProcessBuilder(executable.absolutePath, "-version").redirectErrorStream(true))
         try {

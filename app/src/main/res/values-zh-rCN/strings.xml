@@ -35,6 +35,7 @@
     <string name="vs_screen">客户机屏幕</string>
     <string name="vs_fixed_2x">Android 2.x 使用固定的 480×800、240 dpi 屏幕。</string>
     <string name="vs_screen_hint">屏幕越小，系统越快。</string>
+    <string name="vs_screen_stock">原厂显示 · %1$d × %2$d · %3$d DPI</string>
     <string name="vs_perf">性能</string>
     <string name="vs_gpu">手机 GPU</string>
     <string name="vs_gpu_sub">通过 GL 桥实现硬件图形。画面异常时请关闭。</string>
@@ -109,8 +110,9 @@
     <string name="vs_width">Width</string>
     <string name="vs_height">Height</string>
     <string name="vs_dpi">DPI</string>
-    <string name="vs_ram">Guest RAM</string>
-    <string name="vs_ram_auto">Automatic</string>
+    <string name="vs_ram">虚拟机内存</string>
+    <string name="vs_ram_auto">自动</string>
+    <string name="vs_disk">内部存储</string>
     <string name="vs_radio_title">Radio</string>
     <string name="vs_radio">Emulate radio module</string>
     <string name="vs_radio_sub">Telephony, IMEI and signal. Off: the firmware behaves like a Wi-Fi tablet</string>

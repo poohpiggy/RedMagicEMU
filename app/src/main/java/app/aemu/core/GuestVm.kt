@@ -172,12 +172,12 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     val net = NetProxy(ctx, paths, img.api, img.abi != "arm64-v8a", ::log)
     private val dns = DnsProxy(paths, img.api, img.engine == Engine.N64 && Kernel64.forApi(img.api).dnsLayoutProbe, ::log)
     val runner by lazy { GuestRunner(paths, img).also { it.processStarter = ::startExternalProcess } }
+    private val guestLauncher by lazy { PidfdGuestLauncher(File(ctx.applicationInfo.nativeLibraryDir), ::log, ::pidOf) }
 
     private val extraStubs = ArrayList<VoldStub>()
     private val procs = LinkedHashMap<String, Process>()
     private val externalProcs = java.util.concurrent.ConcurrentHashMap.newKeySet<Process>()
     private val lazyStarts = HashMap<String, Int>()
-    private val pgids = LinkedHashSet<Int>()
     @Volatile private var stopping = false
     @Volatile var bootStartedElapsed: Long = 0L
         private set
@@ -193,6 +193,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                 stopping = false
                 bootStartedElapsed = SystemClock.elapsedRealtime()
                 failure = null
+                powerHandled.set(false)
                 admissionState.reset()
                 setState(State.PREPARING)
             }) return
@@ -321,7 +322,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         }.start()
         Thread {
             val code = runCatching { p.waitFor() }.getOrDefault(-1)
-            if (stopping || powerHandled) return@Thread
+            if (stopping || powerHandled.get()) return@Thread
             log("recovery exited (code $code), booting the system")
             onPower?.invoke(true, "")
         }.start()
@@ -330,6 +331,9 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     private fun doBoot() {
         paths.bin.mkdirs()
         runCatching { logFile.writeText("") }
+        runCatching { PowerRequestHistory(paths.bin).read() }
+            .onSuccess { request -> if (request != null) log("previous guest power request: $request") }
+            .onFailure { error -> log("cannot read previous guest power request: ${error.message}") }
         log("image \"${img.name}\": ${img.displayVersion}, ${img.skin}, engine ${engine.title}")
         if (!File(paths.root, "system/framework").isDirectory) error("firmware tree missing")
         val qemu = paths.nativeBin(if (engine == Engine.N64) kernel.runner else engine.qemu)
@@ -598,6 +602,9 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             }
         }
         if (!props.prepare(overrides, later, if (engine == Engine.N64) kernel.propAreaSize else PropArea.SIZE)) error("property area not ready")
+        if (img.api == 36 && img.model == "NX809J") {
+            checkNotNull(props.area).applyTargetBootProperties()
+        }
         fixer.skipPreBoot(props)
         fixer.noScreenSleep()
         props.onSet = { k, v -> onProp(k, v) }
@@ -801,7 +808,9 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             Engine.N64 -> {
                 val env = if (File(paths.bin, "binder.verbose").exists()) mapOf("AEMU_BINDER_VERBOSE" to "1") else emptyMap()
                 val bin = paths.nativeBin(kernel.binderd).absolutePath
-                spawn("binderd", listOf(bin, sock), env)
+                val mainEnv = if (img.api == 36 && File(paths.bin, "binder.display.trace").isFile)
+                    env + ("AEMU_BINDER_DISPLAY_TRACE" to "1") else env
+                spawn("binderd", listOf(bin, sock), mainEnv)
                 if (kernel.treble) {
                     spawn("hwbinderd", listOf(bin, paths.hwbinderSock.absolutePath), env)
                     spawn("vndbinderd", listOf(bin, paths.vndbinderSock.absolutePath), env)
@@ -886,6 +895,9 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     val glInApp: Boolean get() = engine == Engine.KK && GlBridge.running()
 
     private fun startService(svc0: GuestService, propsFile: File? = null) {
+        // Older saved plans and explicit service starts also pass through here.
+        if (InitPlan.isZteOffModeCharger(svc0.argv)) return
+        if (InitPlan.isIsolatedQtiBluetoothHal(img.api, svc0.argv)) return
         // The second zygote is of the other word size than the first. A firmware that ships all three zygote rc files
         // and does not name one (GSI 10: no ro.zygote) can leave both 64-bit in the plan - then 32-bit apps have no
         // zygote and system_server dies at boot ("Unsupported zygote ABI: armeabi-v7a").
@@ -946,6 +958,13 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         }
     }.getOrDefault(false)
 
+    private fun trackGuestProcess(name: String, process: Process) {
+        synchronized(procs) {
+            externalProcs.add(process)
+            procs[name] = process
+        }
+    }
+
     private fun spawn(name: String, cmd: List<String>, env: Map<String, String>) = lifecycle.ifRunning {
         val log = paths.log(name)
         val pb = ProcessBuilder(cmd).directory(paths.bin).redirectErrorStream(true)
@@ -958,9 +977,8 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             runCatching { log.appendText("\n=== $name ${stamp()} ===\n") }
             pb.redirectInput(File("/dev/null")).redirectOutput(ProcessBuilder.Redirect.appendTo(log))
         }
-        val p = pb.start()
-        synchronized(procs) { procs[name] = p }
-        pidOf(p)?.let { pgids.add(it) }
+        val p = guestLauncher.start(pb)
+        trackGuestProcess(name, p)
         log("· $name started")
         // init publishes every service's state; the framework waits on it (SystemService.waitForState: the WebView
         // zygote, the boot animation)
@@ -978,6 +996,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                 }
             }
             val code = runCatching { p.waitFor() }.getOrDefault(-1)
+            if (!p.isAlive) externalProcs.remove(p)
             if (!stopping) {
                 log("· $name exited, code $code")
                 // (a process the engine stopped itself - boot animation, planned restart - is not a crash)
@@ -1005,14 +1024,15 @@ class GuestVm(val ctx: Context, image: GuestImage) {
 
     /** Guest asked to reboot / power off ("reboot", "reboot,recovery", "shutdown"); the UI restarts or stops the VM. */
     @Volatile var onPower: ((reboot: Boolean, reason: String) -> Unit)? = null
-    @Volatile private var powerHandled = false
+    private val powerHandled = java.util.concurrent.atomic.AtomicBoolean(false)
 
     private fun powerRequest(v: String) {
-        if (powerHandled || v.isEmpty()) return
-        powerHandled = true
+        if (v.isEmpty() || !powerHandled.compareAndSet(false, true)) return
         val reboot = v.startsWith("reboot")
         val reason = v.substringAfter(',', "")
         log("guest requested ${if (reboot) "reboot" else "power off"}${if (reason.isNotEmpty()) " ($reason)" else ""}")
+        runCatching { PowerRequestHistory(paths.bin).record(v) }
+            .onFailure { error -> log("cannot save guest power request: ${error.message}") }
         if (reason == "recovery" && !RecoveryImage.installed(paths)) log("no recovery installed, booting the system again")
         onPower?.invoke(reboot, reason)
     }
@@ -1408,7 +1428,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     private fun killOurs(p: Process?) { if (p != null) { ourKills.add(p); runCatching { p.destroyForcibly() } } }
 
     private fun killZygoteOurs() {
-        synchronized(procs) { procs["zygote"] }?.let { z -> ourKills.add(z); pidOf(z)?.let { runCatching { AProcess.sendSignal(it, 9) } } }
+        killOurs(synchronized(procs) { procs["zygote"] })
     }
 
     /**
@@ -1535,22 +1555,28 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     }
 
     /** The stop-time sync bypasses the closed start gate, but must still be reaped by killAll. */
-    internal fun startCleanupSync(builder: ProcessBuilder): Process = builder.start().also { externalProcs.add(it) }
+    internal fun startCleanupSync(builder: ProcessBuilder): Process = guestLauncher.start(builder).also { externalProcs.add(it) }
 
     private fun killAll() {
-        val list = (synchronized(procs) { procs.values.toList() } + externalProcs.toList()).distinct()
-        for (g in pgids) runCatching { android.system.Os.kill(-g, android.system.OsConstants.SIGKILL) }
+        val named = synchronized(procs) { procs.toMap() }
+        val list = (named.values.toList() + externalProcs.toList()).distinct()
         list.forEach { it.destroyForcibly() }
         val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
         list.forEach { process ->
             val remaining = deadline - System.nanoTime()
-            check(remaining > 0 && process.waitFor(remaining, java.util.concurrent.TimeUnit.NANOSECONDS)) {
-                "Guest process did not exit after termination"
+            val exited = if (remaining > 0) process.waitFor(remaining, java.util.concurrent.TimeUnit.NANOSECONDS) else !process.isAlive
+            if (!exited) {
+                val alive = list.filter { it.isAlive }.joinToString { p ->
+                    val name = named.entries.firstOrNull { it.value === p }?.key ?: "external"
+                    val pid = runCatching { pidOf(p) }.getOrNull()
+                    "$name (pid ${pid ?: "unknown"})"
+                }
+                log("stop: processes still alive after termination: $alive")
+                error("Guest process did not exit after termination")
             }
         }
         externalProcs.clear()
         synchronized(procs) { procs.clear() }
-        pgids.clear()
         killLeftovers()
     }
 
@@ -1603,7 +1629,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     }
 
     internal fun startExternalProcess(builder: ProcessBuilder): Process = lifecycle.create {
-        val process = builder.start()
+        val process = guestLauncher.start(builder)
         externalProcs.add(process)
         Thread({ try { process.waitFor() } finally { externalProcs.remove(process) } }, "vm-external-process").apply { isDaemon = true; start() }
         process

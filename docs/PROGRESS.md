@@ -235,3 +235,113 @@
 - 独立 clone 调试包经 root 覆盖安装，设备 APK 摘要与本地一致；在 `Checking firmware package` 阶段结束 clone 主进程并重新打开，界面显示“上次固件导入中断，请检查导入状态”，待处理目录只剩管理锁，`xf2niq` 元数据摘要与测试前相同。未确认提示时再次结束进程并重开，提示仍显示；确认后重开不再显示。原始固件、原实例保留，私有测试副本已删除；未启动 Guest。
 - JDK 21 联合执行 `:app:testStandardDebugUnitTest :app:assembleStandardDebug :app:assembleCloneDebug` 成功：187 项中 155 项通过、32 项跳过、0 失败。`git diff --check` 通过。定向测试覆盖恢复、确认代次和错误状态；进程恰在正常关闭标记写入后结束的边界为避免误报取消/失败，不提示中断，但仍尝试安全清理，未做设备故障注入。
 - 按用户最终确认范围，单系统界面、指定固件准入与导入、取消、非 Guest 的就绪与导入中断恢复已完成当前阶段检查；准备期停止和所有 Guest 运行问题留待后续版本，真实设备空间耗尽、重复点击和历史多实例整理不再作为 1C 阻碍。此收口不代表 Guest 能启动、不代表所有进程结束时序均已设备验证；备份恢复尚未实现且无可用入口。没有创建 release、推送、合并或打标签。回滚本次提示功能时逐项恢复本次相关源码、字符串和测试，保留其余未提交工作及设备数据。
+
+### 0.2.0 启动修复：正常启动误拉起 ztecharger（2026-11-05）
+
+- 沿用 1C 最终确认范围。同一 NX809J clone 实例在修复前 12:21 使用 Native arm64 / kernel 36，启动 ztecharger 当秒收到 unplug 关机。旧 APK 的附加跟踪改变了时序，仍复现 unplug，未捕获 socket 写入进程。
+- 固件 argv 为 /system/bin/ztecharger，无额外参数。class ztecharger 由 on charger 启动，sys.boot_from_charger_mode=1 停止该 class 并触发 late-init。反汇编确认该程序的 unplug 分支调用生成 sys.powerctl 请求的函数。模拟器此前把它作为正常开机服务启动。修复后读取 ro.bootmode=unknown，虚拟 AC 在线、USB 离线、电池存在且满电 100%。普通 vendor.health-default 启动，实际 Binder HealthInfo 尚未确认。相同 Health 二进制的 vendor.charger --charger（class charger）仍启动，本次单独保留以隔离变量。
+- 正常计划排除 /system/bin/ztecharger，服务启动入口同时覆盖保存的旧计划、显式启动与重启路径。回滚仅撤销这两处判断及对应测试，无需恢复固件文件。关机请求、原因记录和宿主停止仍走原处理路径。定向测试修改前因多出 ztecharger 失败，修改后通过；JDK 21 标准单测及标准/clone 调试构建通过，188 项中 156 项通过、32 项跳过、0 失败。
+- 经 root 覆盖安装独立 clone，设备与本地 APK 摘要一致。13:12 新启动越过原关机点，未启动 ztecharger，普通 Health 与 vendor.charger 仍启动。到 13:15 仍在启动供应商服务，未见自发 unplug；未见 zygote 启动，Guest sys.boot_completed 读取为空，未确认 system_server、SystemUI 或原厂桌面。通过 Guest 运行器发出的受控 shutdown,userrequested 在观察窗口内未返回，已结束诊断命令。宿主菜单停止未取得成功回执，两项均未通过实机验收。
+- VINTF 与启动计划部分不一致。运行树保留 Health 片段；QTI display allocator/composer 与 thermal 片段已隔离，但对应 vendor rc 服务仍开机启动。按需 AIDL 扫描不直接读取 vendor rc，按名称的 ctl.start/ctl.restart 可从启动计划取服务；崩溃重启查保存的服务列表及部分重算计划，未按 VINTF 统一过滤。未观察到上述三个服务被按需或自动重启。本轮只修复 ztecharger 启动，原始日志和固件诊断副本未纳入 Git。
+
+### 0.2.0 手机重连复查（2026-11-05）
+
+- 无线 ADB 重连后复查同一 clone APK（SHA-256 与上次构建一致）及同一次启动。13:20:55 zygote 启动，13:21:55 退出 137。该次运行未见 ztecharger 或 unplug，Guest sys.boot_completed 仍为空，未取得 SystemUI 持续运行或原厂桌面证据。
+- Guest DropBox 在 13:21:55.135 写入 system_server_crash。Nubia Cube DataCenter 初始化抛出 ExceptionInInitializerError，底层为 cn.nubia.server.cube.cpuperf.T.<clinit> 对 null 数组取长度。该记录确认 system_server 实际崩溃，不能单凭退出码认定宿主内存不足。尚未追踪数组来源。
+- 停止日志在 13:24:07 和 13:24:14 出现，最终快照未见 clone VM 或匹配的 Guest 进程。此次复查未执行停止点击，不能凭日志确认操作来源。未重启、安装或修改启动代码，原始设备日志未加入仓库。
+
+### 0.2.0 原厂显示设置设备复测（2026-11-05）
+
+- 独立 clone 实例保存 1216×2688、520 DPI，另存内存 12288 MB、存储 131072 MB。本次未修改上述设置。13:32 的上一轮启动日志记录 framebuffer 1216×2688；13:42 新一轮启动使用该配置，运行中的 Guest 属性 ro.sf.lcd_density 与 qemu.sf.lcd_density 均为 520。实际桌面显示尚未验证。
+- 新一轮 13:45:04 启动 zygote，13:45:17.921 的 Guest DropBox 记录 system_server 因 Nubia Cube cpuperf 初始化对 null 数组取长度而崩溃，13:45:18 zygote 退出 137。未观察到 sys.boot_completed=1、SystemUI 或原厂桌面，未发现 ztecharger 或 unplug 记录。具体数组来源尚未定位。
+- 在启动失败界面选择关闭，应用报告 Guest process did not exit after termination，重试后同样失败。快照仍有 clone VM 进程及其 battery_record_daemon、trusteduilistener 子进程。没有强制结束这些进程或更改宿主策略，停止功能本次未通过。原始日志未加入仓库。
+
+### 0.2.0 Cube SoC 属性与停止诊断（2026-11-05）
+
+- 对指定固件 cubeserver.jar 字节码检查，cpuperf.T 静态初始化按 SOC_VENDOR 和 ro.soc.model 查找数组；Guest 的 ro.soc.model 为空，固件映射含 qcom/SM8850，system_ext 配置含 SM8850。临时只补 SM8850 后 system_server 越过先前 CPU 空数组崩溃，日志出现 SystemUI 和原厂启动器进程，尚未确认桌面可见及持续运行。
+- 启动准备在已准入 NX809J/API 36 上为缺失或空的 ro.soc.model 补 SM8850，保留已有非空值。未修改原始固件，回滚只需移除 GuestVm 调用、TargetSocProperty.kt 和对应测试。真实属性区的缺失、空值及已有值测试通过；设备安装构建后读取 SM8850 成功，但尚未取得该构建到桌面的验证。
+- 临时 CPU 属性实验之后，com.android.phone 因 telephony provider 未被包扫描加载而崩溃并触发 RescueParty。原厂 qspa_default.rc 在 init 设定 ro.boot.vendor.qspa.modem=enabled，而当前 Guest 未加载该导入。临时设置该属性的试验因启动缓慢、手机明显卡顿而中止，未到 zygote，不能断言该属性解决问题或造成卡顿；临时 props.extra 已删除。
+- 手动关闭方面，本机构建将所有已启动的服务进程登记并在停止时强制终止，修复总等待限时耗尽后对已退出进程误报的问题；定向测试通过。该构建设备尝试关闭仍报告 Guest process did not exit after termination，两个 Guest 服务残留。使用 clone UID 的 SIGKILL 可清理这两个明确进程，尚未确认自动终止失败根因；之后添加失败时存活进程名和 PID 诊断，尚未设备验证。用户已强制停止应用，观察不到 clone VM 和匹配 Guest 引擎进程。
+- 停止前宿主 uptime 报告负载均值异常高，可用内存约 7.8 GB、/data 约剩 88 GB，无法仅凭这些指标确定卡顿原因。用户关切手机稳定性，未继续启动 Guest。JDK 21 标准单测与标准/clone 构建通过，193 项中 161 项通过、32 项跳过、0 失败；最终诊断构建未安装。未验证启动完成、桌面、强制停止完整路径或原厂 modem 属性效果。
+
+### 0.2.0 低内存模式运行检查（2026-11-05）
+
+- 用户要求开启低内存模式，独立 clone 设置已保存 lowRam=true，原有 12288 MB 内存、131072 MB 存储及 1216×2688/520 DPI 保留。14:15 启动后 Guest 读取到 ro.config.low_ram=true、ro.soc.model=SM8850。
+- 启动约一分钟时手机 1 分钟负载均值由约 26 升至 1229，可用内存约 6.7 GB。界面未能可靠打开关闭菜单，为保护设备执行系统强制停止独立 clone，随后未见该 VM 及其已观察到的直属 Guest 进程。不能据单次采样判断负载根因或认定 ROM 容量导致卡顿。
+- 本轮原厂 vendor.bluetooth-aidl-qti 启动后日志连续出现 shadow stack 分配失败、内存映射失败及 fatal signal 6，其 VINTF bluetooth_hci 片段此前已隔离。该现象与负载上升的因果关系尚未通过隔离试验确认。zygote 尚未启动，低内存模式未使本次 Guest 进入桌面。手动停止的失败诊断因菜单未能打开而未获得结果。
+
+### 0.2.0 隔离 QTI 蓝牙 HAL 与低内存设备复测（2026-11-05）
+
+- 上一轮低内存启动中，Guest 蓝牙服务 PID 8110 在宿主日志里由数百线程增至最多 11188，服务日志连续出现 shadow stack 分配失败。该固件的 bluetooth_hci VINTF 片段已隔离，但 vendor.bluetooth-aidl-qti 仍在启动计划中。线程暴增与此前手机负载异常同时出现，不能从单次对照证明全部负载来源。
+- 对 API 36 的 /vendor/bin/hw/android.hardware.bluetooth@aidl-service-qti 同时过滤常规计划和统一启动入口，覆盖旧计划、按需和重启调用。其他服务继续按原计划处理。回滚仅撤销两处判断、InitPlan 对应谓词与新增测试。定向测试修复前因蓝牙服务仍被加入计划而失败，修复后通过；JDK 21 标准单测与标准/clone 调试构建成功，194 项中 162 项通过、32 项跳过。
+- 独立 clone APK 摘要与构建一致。手机设置保存 lowRam=true，启动中 Guest 属性 ro.config.low_ram=true；14:20:21 启动、14:20:58 报告启动完成，实际读取 sys.boot_completed=1。新运行未见 QTI 蓝牙 HAL 启动日志，普通 Health 和 aemu 蓝牙替身启动。启动前 1 分钟负载均值约 45.88，14:23:24 为 7.93；这只是单次观察。
+- 14:23:24 的宿主进程快照，clone Guest zygote、system_server、SystemUI 和原厂 launcher 均存活，与 14:21 附近日志中 SystemUI/launcher 进程一致；该窗口未见 zygote 退出或 Guest 关机重启。截图曾显示原厂首次开机欢迎页，点击开始后后续画面仅显示局部内容，不能确认桌面可见或触摸引导成功。vendor audio、sensor HAL 仍有崩溃/重启日志，阶段整体未验收。系统此时仍在运行；未进行停止操作或验证强制退出。测试屏幕临时文件已删除。
+
+### 0.2.0 关闭低内存后的启动对照及验收核对（2026-11-05）
+
+- 独立 clone 设置 lowRam=false，保留 12288 MB 内存、131072 MB 存储及 1216×2688/520 DPI。14:26:39 启动，14:27:14 报告启动完成；Guest 读取 ro.config.low_ram 为空、sys.boot_completed=1。用户亲自处理首次引导的协议与隐私选项，测试时跳过账号、设备安全配置和数据迁移，并关闭引导页中自动下载和夜间安装更新的选项。
+- 实际画面显示原厂桌面，Guest activity 查询的前台为 com.zte.mifavor.launcher 的 QuickstepLauncher。14:39:45 同一 Guest 的 zygote、system_server、SystemUI、launcher 仍存活，Guest 再读 sys.boot_completed=1，启动日志未见 zygote 退出或 Guest 关机重启。手机 1 分钟负载均值约 3.61；这是一台设备、一次启动的观察。
+- 14:25 应用内停止上一轮 Guest 仍失败，诊断列出 brd_normal 和 vendor.trusteduilistener 存活；以 clone UID 向确认属于该 Guest 的两个 PID 发 SIGKILL 后重试停止才成功。源码审查发现 Android 16 UNIXProcess 的 destroyForcibly 走 SIGTERM，现有清理不足以保证结束忽略该信号的服务；可靠强制停止尚未修复和设备验收，合法 Guest 关机与退出原因仍缺修改后设备验证。
+- VINTF 被隔离的 QTI display allocator/composer、thermal 服务此前仍在启动，QTI 蓝牙 HAL 已针对性阻止，尚未完成统一启动/按需/重启路径的一致性修复。关机时 unplug 请求的实际写入进程未被跟踪捕获，ztecharger 反汇编有对应请求路径，修改后这一观察窗口未再发生 unplug。按用户决定壁纸与主题问题不纳入 0.2.0；原始日志和截图未纳入 Git。Guest 在核对结束时继续运行。
+
+### 0.2.0 宿主 VM 进程异常记录（2026-11-05）
+
+- 14:43:54 宿主 clone :vm 进程因 Compose ScrollableTabRow IndexOutOfBoundsException 退出，结束了 14:26 的 Guest 运行。用户说明这是主动调用 Camera 导致，并决定留待后续处理；该次运行在此之前观察到桌面和核心进程持续运行约 16 分钟，不能称为无限期稳定。Camera 问题不纳入本轮修复。
+
+### 0.2.0 强制停止与重启设备复测（2026-11-05）
+
+- 为受管直属 Guest 进程增加 pidfd 强制终止和独立能力探测；不支持时退回原有终止方式。隔离探针、握手及信号的本地测试通过，JDK 21 标准单测与标准/clone 调试构建成功：209 项中 176 项通过、33 项跳过。pidfd 只覆盖受管直属进程；旧的残留及 zygote 后代清理仍有宽泛扫描、裸 PID 和遗漏后代的限制，尚不能证明完整清理。握手身份校验存在极窄的 PID 复用及同 UID 冒充窗口，私有 PID 字段在其他宿主的可用性也未验证。回滚时只撤销本次 pidfd 启动器、进程封装、JNI 和相关测试改动，保留其他未提交工作。
+- 已安装独立 clone 调试包并核对 APK SHA-256；15:17 启动过程观察到受管 pidfd，15:19 报告启动完成。但 Guest 随后请求 `reboot,RescueParty`，重启后可从持久记录读取该原因，进一步出现重复崩溃和重启。为终止循环，15:20 系统强制停止独立测试包；当时未见 clone VM 与匹配的引擎进程，不能由此证明所有 Guest 后代均已清理。未完成应用内停止或受控 Guest 关机设备回归。
+- 15:18、15:19、15:20 的 Guest DropBox 均记录 system_server 处理 BOOT_COMPLETED 时在 SingleHandAdapter 调用 SurfaceControl.setZswSingleDimenInfo，因 displayToken 为空而崩溃；同一时段电话进程也反复崩溃，缺少 telephony provider。Guest 持久设置显示单手模式未开启。尚未确定显示 token 为空的来源，也不能仅凭共时崩溃确定 RescueParty 的具体触发者；阶段验收未通过。原始日志、ROM 和个人数据未加入 Git。
+- 15:25 的单次诊断启动中，SurfaceFlinger dump 显示内部物理 Display 0（HWC display 1），没有显示识别数据；模拟器 composer@2.1 默认服务已注册。采集时 display 服务尚未就绪，dump 不能证明 system_server 查询时的 ID 或 token 值。15:26:09 的 sys.powerctl socket 同行凭据记录写入方为 system_server，内容为 `reboot,RescueParty`；这证明本次请求来源，不证明究竟哪个崩溃触发 RescueParty。收到重启后再次强制停止测试包，避免循环。物理显示 ID 为 0 是否与空 token 相关尚未确认。
+- 为缩小显示查询范围，新增仅 API 36 主 binder 进程可用、默认关闭的诊断，检查指定进程的显示 ID/token 请求及回复，不记录原始 Parcel；删除运行目录 `binder.display.trace` 即关闭。解析及真实事务配对的本机测试通过，ARM64 构建与标准单测、标准/clone 调试包构建通过。大块共享内存请求不读取、不视为命中，回复保守记 unknown；身份匹配和记录可能改变时序。回滚仅移除诊断开关、binderd 诊断与测试并重建该二进制。
+- 15:43 单次设备采集确认诊断开关生效，15:43:56 system_server 发出 `reboot,RescueParty` 后自动停止测试包；诊断未命中目标请求，不能据此认定没有查询或辨别空 ID 与空 token。此前一轮保护计时器过早到期，启动未完成便停止。诊断标记与临时保护脚本已删除，未完成最终启动和停止验收。
+- 15:49 观察到测试实例再次启动，在其运行时只读检查 `/proc`：system_server 和 surfaceflinger 的 comm 都是 `libaemu64_36.so`，对应 cmdline 第二项分别为 `system_server` 和 `/system/bin/surfaceflinger`。此前只按 comm 精确匹配的诊断无法命中这些进程。该轮发生重启后强制停止测试包，以避免继续循环；此观察没有确定显示 token 的根因。
+- 修正诊断身份匹配并增加固定上限的阶段标记后，本机解析与转发对照测试及两种调试包构建通过。15:54 设备新运行中仅观察到其他候选事务、UID 分类、inline 长度未确认和接口不匹配，未命中目标接口；15:54:57 Guest 再次请求 `reboot,RescueParty` 后保护程序自动停止测试包。仍不能确定显示查询的实际返回值；测试标记与临时保护脚本已删除。
+- 对照 bclient 的发送格式发现，无 offsets 的 inline 数据没有尾部对齐填充，诊断误要求接收填充字节，导致合法请求被判不可读；该边界先复现失败再修正，本机测试、ARM64 重建和两种调试包构建通过，实际 Binder 转发未改。15:59 设备诊断已识别 system_server 到 SurfaceFlinger 的请求：多次 ID 查询返回一个 ID 0，两次服务端 token 回复含非空 Binder 对象。详细记录达到八笔上限后仍发生 `reboot,RescueParty`，不能推断崩溃时的查询结果或客户端收到的 token。保护程序停止测试包，诊断标记和临时脚本已清理。
+- 时序复核：15:59 轮的 `com.android.phone` 连续崩溃发生在 15:59:40–44，`reboot,RescueParty` 请求在 15:59:46，而 SingleHandAdapter 的 system_server 空 token 崩溃记录为 15:59:47，晚于重启请求。该轮不能把空 token 崩溃当成重启请求的已证实触发原因；电话进程或其他包是否触发仍需 PackageWatchdog 证据。
+- 按用户要求，实例设置隐藏单点触控开关及搜索至轨迹球的导航选择，保留返回、主页、最近任务、菜单，以及内存、存储、低内存、自定义分辨率。旧的导航及触控配置值未自动改写。当前设备实例保存 GPU、JIT、网络代理、HWUI 开启，完整 dex 优化关闭，额外 QEMU 参数为空；这些配置值不单独证明具体运行路径。
+- 覆盖安装后在设备设置页实查，返回、主页、最近和菜单四个导航选择可见，单点触控和搜索至轨迹球选项未显示；原厂与自定义分辨率输入、内存和存储滑块、低内存开关仍可见。未更改或保存实例设置。
+- 用户要求重置并重新走首次引导。现有 resetData 因未完成 VM 跨进程协调而安全拒绝，尚不能将删除数据的入口标为可用。设备确认 `app.redmagicemu.v0003` 没有已安装包或保留私有数据后，构建并安装该独立测试包、核对 APK 摘要，从 MiShare 中原始指定 ZIP 发起导入；不移动或清空现有 clone 的 `xf2niq`。用户要求切后台使用手机；独立测试包主进程仍存在，但 cgroup.events 显示 frozen=1，暂存 12 GB、提取约 664 MB，提取体积未继续增长。该导入目前在 Activity 的 ViewModel 协程内，没有导入专用前台服务；需用户方便时返回 App 继续，后台持续运行未验证。未修改宿主冻结、温控或安全策略。
+- 随后观测同一独立导入进程 frozen=0，提取与实例目录继续增长；未切换手机界面。用户将重置按钮及其专门进程清理工作延后，继续优先启动修复；本轮为重置准备的未完成新文件已移除。
+
+### 0.2.0 电话数据库 provider 启动条件（2026-11-05）
+
+- 15:59 Guest 日志记录 `com.android.phone` 数秒内反复崩溃，RescueParty 对其执行 WARM_REBOOT。包扫描日志显示原厂 `TelephonyProvider_MFV.apk` 因缺少 `ro.boot.vendor.qspa.modem=enabled` 被跳过；APK 清单同时声明该条件及 `telephony` provider。固件 `qspa_system.rc` 通过 `ro.boot.vendor.qspa` 选择配置，默认配置的 `on init` 写入该属性；当前 init 解析器不跟随该导入，实例 `props.base` 也不含该键。
+- 在已准入 NX809J/API 36 的启动属性准备中，仅当 QSPA 选择器缺失、为空或为 `default` 且 modem 属性缺失时补 `enabled`；保留已有值（包括空值）及其他变体。未改原厂 ROM；回滚只需移除该属性补值和对应测试，保留已有 SoC 补值。真实属性区缺失条件的测试先失败后通过，非默认变体测试先失败后通过；JDK 21 全量单测及标准/clone/v0003 调试构建通过，214 项中 181 项通过、33 项跳过。
+- 用户允许手机复测后，独立 v0003 的首次导入实例覆盖安装修复包，设备 APK 与构建摘要一致，实例 metadata 摘要不变。启动后 Guest 读取 modem 属性为 `enabled`，`pm path` 识别原厂包，`dumpsys package` 列出 TelephonyProvider；对 `content://telephony/carriers` 以空结果条件查询得到 `No result found`，说明该 authority 可访问。此前 `dumpsys activity provider telephony` 未匹配到运行中的 provider，不单独代表包未注册。
+- 本次尚未到 `sys.boot_completed=1`，16:31:56–59 另有高通电话组件共用的 `com.qti.phone` 进程反复崩溃，栈为 `QtiRadioFactory.initQtiRadioAidl` 对空数组取长度；16:32:03 再次发出 `reboot,RescueParty`，保护程序停止独立测试包以防循环。Guest system 日志记录多个同进程 QTI 包的 RescueParty；不能认为本修复已解决整个启动循环。未验证桌面、持久运行、应用内停止或原有 clone 实例在该构建下的重启。
+
+### 0.2.0 QTI 组件隔离诊断与宿主停止（2026-11-05）
+
+- 在独立 v0003 实例下一次启动时，临时对用户 0 禁用 `com.qti.phone/.ExtTelephonyService`，未改产品启动代码或原始固件。16:46:15 实际读取 `sys.boot_completed=1`；16:46 至 17:02 的观察中 zygote、system_server、SystemUI、电话进程和原厂启动器存活，未见该轮 RescueParty 重启。完成首次引导后，原厂魔姬引导画面为黑色，用户手动切入原厂桌面；用户将魔姬显示问题延后。该结果依赖临时禁用组件，不能当作正常配置下的启动验收，也不能证明高通扩展电话功能可用。
+- 测试后以 `pm default-state --user 0` 恢复该服务默认状态，并通过用户包限制文件确认不再含该组件的禁用记录；未覆盖用户引导期间产生的数据。恢复后短暂观察桌面和核心进程仍存活，但未重新启动验证默认配置。服务隔离不是已交付的正式修复；不能仅恢复 QTI Radio VINTF 声明或用对未实现事务返回成功的替身冒充正常服务。
+- 17:05 从 App 菜单执行“关闭系统”，日志记录 `stopping system` 和清理 147 个进程；随后设备进程快照中该测试包 UID 只剩 App 主进程。该观察验证一次正常运行时的宿主菜单停止，不证明死机场景或全部后代清理，也未验证合法 Guest 主动关机及退出原因。日志仍出现音频及传感器 HAL 退出、重启；VINTF 和各启动路径一致性尚未完成，0.2.0 整体未验收。原始设备日志和截图未加入 Git。
+
+### 0.2.0 QTI 组件默认状态对照（2026-11-05）
+
+- 用户完成引导、服务恢复默认状态后，17:08 新启动于 `sys.boot_completed=1` 后不久收到 `reboot,RescueParty`；保护程序停止独立 v0003 测试包，确认在现有实例仍可复现，不是仅首次引导时的问题。
+- 在该实例的运行树临时添加 Android `component-override` 配置，只改变 `com.qti.phone/.ExtTelephonyService` 的解析默认状态，不修改 APK、原始固件或用户组件状态。17:13 再次启动，实际读取 `sys.boot_completed=1`、前台为原厂 QuickstepLauncher，zygote、system_server、SystemUI 和 launcher 持续至 17:16；显式启动目标服务返回 `Not found; no service started`，`telephony` provider 仍可查询。本次仅覆盖已设置完的实例和约三分钟观察，不能证明首次导入实例或 QTI 扩展电话功能可用。临时配置已在 Guest 停止后删除。
+- 17:16 从 Guest 属性服务发送受控 `shutdown,rme-test`，日志记录 `guest requested power off (rme-test)`，原因文件保留完整请求，随后记录停止及清理进程。这验证一次 Guest 属性请求路径，不等同原厂关机界面的端到端验证。产品修复、构建及安装后设备复测仍待完成。
+- 同一实例随后以符号链接形式临时提供相同配置，Guest 实际排除目标服务并达到 `sys.boot_completed=1`。17:26 通过原厂 Guest 电源菜单两次确认关机，日志记录 `guest requested power off (userrequested)`，持久原因文件为 `shutdown,userrequested`，并记录进程清理；下次启动日志读回该原因。临时实验链接与数据文件均已删除。该关机发生在临时配置实验中，正式构建还需复测。
+
+### 0.2.0 QTI 单组件启动修复（2026-11-05）
+
+- 在 `TreeFixer.fixup` 为已准入 NX809J/API 36/Native arm64 的运行副本生成 Android `component-override`，仅默认关闭依赖已隔离 QTI Radio HAL 的 `com.qti.phone/.ExtTelephonyService`，不改原 APK、原厂固件包、用户组件状态或关机处理。显式用户启用状态可能覆盖此默认值；QTI 扩展电话功能未实现，不能宣称可用。
+- 配置先在同目录独占写入、同步并校验完整内容，再用相对符号链接以不覆盖方式发布。既有不同内容或不安全路径拒绝覆盖；进程在发布前中断可能留下未引用的 `.tmp` 文件，突然断电后的目录持久性未验证。Windows 的符号链接权限限制使对应单元测试跳过；手机 `run-as` 可建立同目录符号链接，原厂系统也已在临时设备对照中读取该形式。手机 `run-as` 硬链接被拒绝，产品未依赖硬链接。
+- 回滚需移除本次 `TreeFixer.fixup` 调用及 `TargetQtiComponent` 代码和测试，并在 Guest 停止后检查运行树 `system/etc/sysconfig/aemu-nx809j-qti.xml`；仅当它是指向本机制单级 `.aemu-nx809j-qti-*.tmp` 且内容完全匹配的链接时，移除该链接和对应数据文件。无法确认来源的同名普通文件或其他数据应保留。原始刷机包无需恢复。
+- JDK 21 全量单测与标准、clone、v0003 调试包构建成功，222 项中 186 项通过、36 项跳过、0 失败。独立 v0003 设备覆盖安装包的摘要与构建一致，安装前后实例 metadata 摘要一致；17:28 新启动由程序生成配置，17:29 Guest 实际读取 `sys.boot_completed=1`，显式启动该服务得到 `Not found`，原厂桌面可见。至 17:34 观察中 zygote、system_server、SystemUI 和 launcher 保持相同 PID，未见自发关机或重启；电话 provider 仍可查询。该次覆盖已完成首次引导的独立实例，不代表全新导入实例或其他设备均已通过。
+- 17:34 用原厂 Guest 电源菜单主动重启，日志记录 `reboot,userrequested`，下一轮启动读回该原因，复用同一配置并再次达到 `sys.boot_completed=1` 和原厂桌面；至 17:38 未见自发关机或重启。随后对同属测试包 UID、直属 Guest 的 `trusteduilistener` 人为发送 SIGSTOP，并确认其处于停止状态；点击 App 菜单“关闭系统”后日志记录停止及清理，测试包 UID 的进程快照仅剩 App 主进程。此测试覆盖一个暂停的受管服务，不证明整个 VM 死机或全部后代均可可靠清理。
+- 17:39 再次启动正式构建的同一实例并读取 `sys.boot_completed=1`，17:40 通过 Guest 原厂电源菜单关机，日志记录 `guest requested power off (userrequested)`，持久原因文件为 `shutdown,userrequested`，随后记录停止和清理。诊断保护脚本、临时截图和命令输出已删除，正式生成的配置及用户数据保留。该设备、该实例在上述观察窗口达到了本阶段列出的桌面、启动完成、核心进程持续与无自发重启/关机条件；全新导入实例使用最终构建的首次开机、其他宿主、长时间运行和完整硬件 HAL 未验证。
+- 本次 Guest `dumpsys battery` 显示 AC 在线、USB 离线、电池存在、满电 100%，`ro.bootmode=unknown`；它证明系统拿到这些电池状态，不单独证明 Health Binder 回复的具体来源。`dumpsys thermalservice` 显示 `HAL Ready: false`。已隔离 VINTF 的 QTI display composer 等仍存在开机启动记录，音频与传感器供应商 HAL 有退出重启记录；这些服务与 HAL 的按需及重启路径只按代码条件核对，不能一概认定已被拉起。未写宿主温控或真实硬件节点。
+
+### 0.2.0 全新导入准备（2026-11-05）
+
+- 用户要求完成全新导入验证后将版本名改为 `0.2.0-alpha`，并明确要求卸载重装既有 clone 而不增加包名。已确认 clone 和其 Guest 进程未运行；卸载 `app.redmagicemu.clone` 成功，其原私有实例 `xf2niq` 随卸载清除，随后重装当前 clone 调试包，设备 APK 摘要与构建一致。原始 ZIP、标准应用及 `v0003` 独立实例保留；未安装新包名。
+- 手机正在使用其他应用，已停止屏幕操作；全新导入尚未开始，版本名尚未更改，尚未提交或推送。GitHub 的 `fork/main` 已更新至 0.1.0 提交，整理 0.2.0 时须以该提交为基准并保留本地未提交改动。
+
+### 0.2.0 全新导入及 alpha 构建复测（2026-11-05）
+
+- 用户允许使用手机后，通过系统文件选择器重新导入原始 NX809J 固件 ZIP，完成准备；导入元数据为 Android 16/API 36、ARM64、1216×2688、520 DPI，低内存模式关闭。原始 ZIP 未修改。首次启动自动生成 QTI 单组件配置，实际读取 `sys.boot_completed=1`。完成原厂引导后魔姬页面黑屏，按 Guest 桌面键可进入原厂桌面；魔姬显示按用户要求留待后续处理。首次启动中 zygote、system_server、SystemUI 和原厂 launcher 从 18:15 持续至 18:21，日志未见 Guest 主动关机或重启请求。
+- 导入验证后按用户要求将版本名改为 `0.2.0-alpha`、versionCode 改为 6，保留标准、clone 和 v0003 的既有包名。JDK 21 单测及三个调试构建通过：222 项中 186 项通过、36 项跳过、0 失败。退出首次启动实例后覆盖安装 clone，安装前后实例 metadata 的 SHA-256 一致；设备包管理器报告 versionCode 6 和版本名 `0.2.0-alpha`。
+- 覆盖安装后的同一实例重新启动，18:26 读取 `sys.boot_completed=1`，18:27 解锁后实际显示原厂桌面；至 18:30，zygote、system_server、SystemUI 和 launcher 保持相同 PID，日志未见 Guest 关机或重启请求。18:30 从 App 菜单关闭，日志记录停止及清理，进程快照未见上述核心进程或 clone VM。宿主显示调试应用的 16 KB ELF 对齐兼容性提示，部分 vendor 音频与传感器 HAL 仍崩溃或重启；这不代表这些硬件功能已实现，也不证明其他宿主或长时间稳定性。未解决旧 unplug 请求的实际写入者，未改变原厂关机请求处理，原始日志与截图未提交。

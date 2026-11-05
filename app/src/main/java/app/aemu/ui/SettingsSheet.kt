@@ -86,7 +86,10 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings) -
                         ) { Text(r.label) }
                     }
                 }
-                Spacer(Modifier.height(8.dp))
+                val stockDisplay = s.withNx809jDisplay()
+                TextButton(onClick = { s = stockDisplay }, enabled = s != stockDisplay) {
+                    Text(stringResource(R.string.vs_screen_stock, stockDisplay.width, stockDisplay.height, stockDisplay.density))
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     NumField(stringResource(R.string.vs_width), s.width, Modifier.weight(1f)) { s = s.copy(width = it.coerceIn(240, 2160) and 0x7ffffffe) }
                     NumField(stringResource(R.string.vs_height), s.height, Modifier.weight(1f)) { s = s.copy(height = it.coerceIn(320, 3840) and 0x7ffffffe) }
@@ -97,13 +100,40 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings) -
             }
             Spacer(Modifier.height(16.dp))
 
+            Text(stringResource(R.string.vs_perf), style = MaterialTheme.typography.titleMedium)
+            val ramIdx = RAM_STEPS.indexOf(s.ramMb).coerceAtLeast(0)
+            ListItem(
+                headlineContent = { Text(stringResource(R.string.vs_ram)) },
+                supportingContent = {
+                    Column {
+                        Text(if (s.ramMb == 0) stringResource(R.string.vs_ram_auto) else if (s.ramMb >= 1024 && s.ramMb % 1024 == 0) "${s.ramMb / 1024} GB" else "${s.ramMb} MB")
+                        Slider(value = ramIdx.toFloat(), onValueChange = { s = s.copy(ramMb = RAM_STEPS[it.toInt()]) },
+                            valueRange = 0f..RAM_STEPS.lastIndex.toFloat(), steps = RAM_STEPS.size - 2)
+                    }
+                },
+                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            )
+            val diskIdx = DISK_STEPS.indexOf(s.diskMb).coerceAtLeast(0)
+            ListItem(
+                headlineContent = { Text(stringResource(R.string.vs_disk)) },
+                supportingContent = {
+                    Column {
+                        Text(if (s.diskMb == 0) stringResource(R.string.vs_ram_auto) else "${s.diskMb / 1024} GB")
+                        Slider(value = diskIdx.toFloat(), onValueChange = { s = s.copy(diskMb = DISK_STEPS[it.toInt()]) },
+                            valueRange = 0f..DISK_STEPS.lastIndex.toFloat(), steps = DISK_STEPS.size - 2)
+                    }
+                },
+                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            )
+            Toggle(stringResource(R.string.vs_lowram), stringResource(R.string.vs_lowram_sub), s.lowRam) { s = s.copy(lowRam = it) }
+            Spacer(Modifier.height(8.dp))
+
             Text(stringResource(R.string.vs_controls), style = MaterialTheme.typography.titleMedium)
             Toggle(stringResource(R.string.vs_nav), stringResource(R.string.vs_nav_sub), s.showNavBar) { s = s.copy(showNavBar = it) }
             if (s.showNavBar) NavBarSetup(s) { s = it }
             Toggle(stringResource(R.string.vs_awake), stringResource(R.string.vs_awake_sub), s.keepScreenOn) { s = s.copy(keepScreenOn = it) }
             Toggle(stringResource(R.string.vs_vsync), stringResource(R.string.vs_vsync_sub), s.vsync) { s = s.copy(vsync = it) }
             Toggle(stringResource(R.string.as_led), stringResource(R.string.as_led_sub), s.showLed) { s = s.copy(showLed = it) }
-            Toggle(stringResource(R.string.vs_single), stringResource(R.string.vs_single_sub), s.mtMode == 4) { s = s.copy(mtMode = if (it) 4 else 0) }
 
             Spacer(Modifier.height(16.dp))
             Button(onClick = { onSave(s) }, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text(stringResource(R.string.save)) }
@@ -117,9 +147,10 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings) -
 @Composable
 internal fun NavBarSetup(s: VmSettings, set: (VmSettings) -> Unit) {
     val keys = s.navKeys.split(',').filter { it in VmSettings.NAV_ALL }
+    val visibleKeys = listOf("back", "home", "recents", "menu")
     androidx.compose.foundation.layout.FlowRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        for (k in keys + VmSettings.NAV_ALL.filter { it !in keys }) {
+        for (k in keys.filter { it in visibleKeys } + visibleKeys.filter { it !in keys }) {
             val on = k in keys
             androidx.compose.material3.FilterChip(selected = on, label = { Text(navKeyLabel(k)) },
                 onClick = { set(s.copy(navKeys = (if (on) keys - k else keys + k).joinToString(","))) })

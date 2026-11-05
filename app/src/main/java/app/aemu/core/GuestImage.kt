@@ -60,6 +60,8 @@ data class VmSettings(
         .put("keepScreenOn", keepScreenOn).put("vsync", vsync).put("showLed", showLed).put("mtMode", mtMode).put("legacyEngine", legacyEngine).put("open32", open32)
         .put("ramMb", ramMb).put("diskMb", diskMb).put("radio", radio).put("native32", native32).put("imei", imei).put("qemuArgs", qemuArgs)
 
+    internal fun withNx809jDisplay(): VmSettings = copy(width = 1216, height = 2688, density = 520)
+
     companion object {
         const val NAV_DEFAULT = "back,home,recents,menu"
         val NAV_ALL = listOf("back", "home", "recents", "menu", "search", "voldown", "volup", "power", "dpad")

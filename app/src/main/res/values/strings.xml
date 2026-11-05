@@ -36,6 +36,7 @@
     <string name="vs_screen">Guest screen</string>
     <string name="vs_fixed_2x">Android 2.x uses a fixed 480×800 screen at 240 dpi.</string>
     <string name="vs_screen_hint">A smaller screen makes the system faster.</string>
+    <string name="vs_screen_stock">Stock display · %1$d × %2$d · %3$d DPI</string>
     <string name="vs_perf">Performance</string>
     <string name="vs_gpu">Phone GPU</string>
     <string name="vs_gpu_sub">Hardware graphics through the GL bridge. Turn off if the picture breaks.</string>

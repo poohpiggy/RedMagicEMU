@@ -160,6 +160,7 @@ class TreeFixer(
 
     fun fixup(owners: Boolean = true) {
         if (owners) seedOwners()
+        if (TargetQtiComponent.prepare(root, img.api, img.model, engine)) log("QTI radio extension default-disabled: unavailable HAL")
         installEngineFiles()
         HcHwRender.install(ctx, root, img.api, log)
         protectOat()
