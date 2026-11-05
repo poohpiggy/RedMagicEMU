@@ -4,30 +4,30 @@
 
 <h1 align="center">RedMagicEMU</h1>
 
-<p align="center"><strong>Unofficial, independently maintained Android firmware emulator</strong></p>
+<p align="center"><strong>非官方、独立维护的 Android 固件模拟器</strong></p>
 
 <p align="center" dir="ltr">
-  <strong>English</strong> · <a href="docs/i18n/README.zh-CN.md">简体中文</a> · <a href="docs/i18n/README.ja.md">日本語</a> · <a href="docs/i18n/README.ko.md">한국어</a> · <a href="docs/i18n/README.vi.md">Tiếng Việt</a> · <a href="docs/i18n/README.id.md">Bahasa Indonesia</a><br>
+  <strong>简体中文</strong> · <a href="docs/i18n/README.en.md">English</a> · <a href="docs/i18n/README.ja.md">日本語</a> · <a href="docs/i18n/README.ko.md">한국어</a> · <a href="docs/i18n/README.vi.md">Tiếng Việt</a> · <a href="docs/i18n/README.id.md">Bahasa Indonesia</a><br>
   <a href="docs/i18n/README.de.md">Deutsch</a> · <a href="docs/i18n/README.fr.md">Français</a> · <a href="docs/i18n/README.es.md">Español</a> · <a href="docs/i18n/README.pt-BR.md">Português (Brasil)</a> · <a href="docs/i18n/README.it.md">Italiano</a> · <a href="docs/i18n/README.pl.md">Polski</a><br>
   <a href="docs/i18n/README.ru.md">Русский</a> · <a href="docs/i18n/README.uk.md">Українська</a> · <a href="docs/i18n/README.tr.md">Türkçe</a> · <a href="docs/i18n/README.hi.md">हिन्दी</a> · <a href="docs/i18n/README.ar.md">&#x2068;العربية&#x2069;</a> · <a href="docs/i18n/README.fa.md">&#x2068;فارسی&#x2069;</a>
 </p>
 
-RedMagicEMU is an unofficial, independently maintained project based on [AEmulator](https://github.com/uxazu/AEmulator), itself based on the original [SENSES emulator](https://github.com/Istratii-tech/SENSES). It is not an official REDMAGIC product and is not affiliated with REDMAGIC.
+RedMagicEMU 是基于 [AEmulator](https://github.com/uxazu/AEmulator) 独立维护的非官方项目；AEmulator 又基于原始 [SENSES 模拟器](https://github.com/Istratii-tech/SENSES)。本项目不是红魔官方产品，也与红魔无关联。
 
-The project targets the original REDMAGIC NX809J Android 16 / API 36 / ARM64 firmware as its guest. This restriction applies to guest firmware, not the host device model. The firmware has reached its original desktop on one tested host. The project remains alpha, with known HAL limitations; see [progress](docs/PROGRESS.md) and [baseline](docs/BASELINE.md).
+项目以 REDMAGIC NX809J 原厂 Android 16 / API 36 / ARM64 固件作为 Guest 目标。此限制适用于 Guest 固件，不限制宿主设备型号。该固件已在一台宿主设备上进入原厂桌面。项目仍处于 alpha 阶段，存在已知 HAL 局限；参阅[进度](docs/PROGRESS.md)和[基线](docs/BASELINE.md)。
 
-## Build
+## 构建
 
-The Android project requires Android SDK 36 and NDK r28. The baseline build used JDK 21:
+Android 项目需要 Android SDK 36 和 NDK r28。基线构建使用 JDK 21：
 
 ```shell
 ./gradlew :app:assembleStandardDebug
 ```
 
-Local development uses application ID `app.redmagicemu`. It is a separate Android installation from the upstream app: its private data is not migrated automatically. Keep the old app and its data until a migration method has been verified.
+本地开发使用应用 ID `app.redmagicemu`。Android 将其视为独立于上游应用的安装，私有数据不会自动迁移。在迁移方法经过验证之前，请保留旧应用及其数据。
 
-## Credits and license
+## 致谢与许可证
 
-RedMagicEMU builds on AEmulator by [uxazu](https://github.com/uxazu), which grew out of the HTC Desire HD and HTC One M7 emulators by [the original author](https://t.me/istratii_tech1). Their work and the existing copyright and license notices remain acknowledged.
+RedMagicEMU 基于 [uxazu](https://github.com/uxazu) 的 AEmulator；后者源于[原作者](https://t.me/istratii_tech1)的 HTC Desire HD 和 HTC One M7 模拟器。我们保留并感谢他们的贡献及现有版权和许可证声明。
 
-The project is distributed under [GPL-3.0](LICENSE). Android, REDMAGIC, other trademarks and firmware belong to their respective owners.
+本项目按 [GPL-3.0](LICENSE) 发布。Android、REDMAGIC、其他商标及固件归各自所有者所有。
