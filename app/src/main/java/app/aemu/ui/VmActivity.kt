@@ -143,6 +143,8 @@ import kotlin.concurrent.thread
 /** Процесс :vm держит ровно одну машину. */
 object VmHost {
     @Volatile var vm: GuestVm? = null
+    @Volatile internal var historyRecorder: BootHistoryRecorder? = null
+    @Volatile var poweredOff = false
 }
 
 class VmActivity : ComponentActivity() {
@@ -162,6 +164,14 @@ class VmActivity : ComponentActivity() {
     private var state by mutableStateOf(GuestVm.State.STOPPED)
     /** the guest shut itself down: the screen stays with its log until the user closes it */
     private var poweredOff by mutableStateOf(false)
+    private var unsubscribeState: (() -> Unit)? = null
+    private var unsubscribeLog: (() -> Unit)? = null
+    private lateinit var bootHistory: BootHistory
+    private var previousBootMessage by mutableStateOf<String?>(null)
+    private var recorderErrorShown = false
+    private var retryPending by mutableStateOf(false)
+    private var stopPending by mutableStateOf(false)
+    private var stopError by mutableStateOf<String?>(null)
     private var openLog by mutableStateOf(false)
     /** the guest's notification LED and where the guest screen starts (the LED sits just above it) */
     private var led by mutableStateOf<app.aemu.core.Lights.Led?>(null)
@@ -207,18 +217,41 @@ class VmActivity : ComponentActivity() {
         loadHud()
         val id = intent.getStringExtra(EXTRA_ID)
         val cur = VmHost.vm
-        val img = ((if (id != null) ImageStore.get(this, id) else null) ?: cur?.img)
-            ?.let { if (cur?.img?.id == it.id) it else app.aemu.importer.Analyzer.refresh(this, it).effective() }
+        // Do not refresh or modify a historical image before its firmware baseline is verified.
+        val img = if (id != null) ImageStore.get(this, id) else cur?.img
         if (img == null) { finish(); return }
-        if (cur != null && cur.img.id != img.id && cur.state != GuestVm.State.STOPPED) {
-            // в процессе уже живёт другая машина — её надо сначала остановить
-            cur.stop()
-            restartProcess(img.id)
+        if (cur != null && rejectDifferentRunningVm(cur.img.id, img.id, cur.state)) {
+            android.widget.Toast.makeText(this, R.string.single_conflict, android.widget.Toast.LENGTH_LONG).show()
+            finish()
             return
         }
         vm = if (cur != null && cur.img.id == img.id) cur
-            else GuestVm(applicationContext, img).also { it.recoveryMode = intent.getBooleanExtra(EXTRA_RECOVERY, false); VmHost.vm = it }
-        vm.onPower = { reboot, reason -> runOnUiThread { if (reboot) rebootVm(reason == "recovery") else { poweredOff = true; thread { vm.stop() } } } }
+            else GuestVm(applicationContext, img).also {
+                it.recoveryMode = intent.getBooleanExtra(EXTRA_RECOVERY, false)
+                val recorder = BootHistoryRecorder(BootHistory(filesDir), img.id)
+                it.onState(recorder::onState)
+                VmHost.poweredOff = false
+                VmHost.historyRecorder = recorder
+                VmHost.vm = it
+            }
+        bootHistory = BootHistory(filesDir)
+        if (cur == null) {
+            previousBootMessage = try {
+                when (bootHistory.previous(img.id)) {
+                    BootHistory.Status.FAILED -> getString(R.string.previous_boot_failed)
+                    BootHistory.Status.STARTING -> getString(R.string.previous_boot_interrupted)
+                    else -> null
+                }
+            } catch (e: Exception) {
+                getString(R.string.boot_history_error)
+            }
+        }
+        if (showHistoryWriteErrorOnAttach(VmHost.historyRecorder)) {
+            previousBootMessage = getString(R.string.boot_history_error)
+            recorderErrorShown = true
+        }
+        poweredOff = VmHost.poweredOff
+        vm.onPower = { reboot, reason -> if (!reboot) VmHost.poweredOff = true; runOnUiThread { if (reboot) rebootVm(reason == "recovery") else { poweredOff = true; requestStop { } } } }
         val s = vm.settings
         showLed = s.showLed
         if (s.keepScreenOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -236,7 +269,8 @@ class VmActivity : ComponentActivity() {
         guestW = gw; guestH = gh
         guest = GuestScreen(this, gw, gh).apply {
             input = vm.input
-            fb = if (vm.recoveryMode) app.aemu.core.RecoveryImage.fb(vm.paths) else vm.paths.fb
+            withAdmittedFramebuffer = vm::withAdmittedFramebuffer
+            openFramebuffer = { app.aemu.core.SafeFramebuffer.open(applicationContext.filesDir, vm.img.id, vm.recoveryMode) }
             if (vm.recoveryMode) pages = 2
         }
         // 5.0+ renders through the standalone glserverd into fb0 (see GuestVm.glUp), shown like the software path
@@ -293,14 +327,25 @@ class VmActivity : ComponentActivity() {
         }
 
         vm.onFrame = { guest.rings++; guest.poke() }
-        state = vm.state
         logLines.addAll(vm.lines().takeLast(200))
-        vm.onState { st -> runOnUiThread { state = st } }
+        unsubscribeState = vm.observeState { st ->
+            runOnUiThread {
+                state = st
+                if (st == GuestVm.State.PREPARING || st == GuestVm.State.FAILED) retryPending = false
+                if (VmHost.historyRecorder?.error != null) {
+                    previousBootMessage = getString(R.string.boot_history_error)
+                    recorderErrorShown = true
+                } else if (recorderErrorShown) {
+                    previousBootMessage = null
+                    recorderErrorShown = false
+                }
+            }
+        }
         vm.mic.onPermissionNeeded = { runOnUiThread { askMic.launch(android.Manifest.permission.RECORD_AUDIO) } }
         vm.camera.onPermissionNeeded = { runOnUiThread { askCamera.launch(android.Manifest.permission.CAMERA) } }
         led = vm.lights.current
         vm.lights.onChange { l -> runOnUiThread { led = l } }
-        vm.onLog { line -> runOnUiThread { logLines.add(line); if (logLines.size > 400) logLines.removeRange(0, logLines.size - 400) } }
+        unsubscribeLog = vm.onLog { line -> runOnUiThread { logLines.add(line); if (logLines.size > 400) logLines.removeRange(0, logLines.size - 400) } }
         guest.start()
         loadMenuOffset()
 
@@ -309,9 +354,18 @@ class VmActivity : ComponentActivity() {
         })
 
         registerShell()
-        if (vm.state == GuestVm.State.STOPPED || vm.state == GuestVm.State.FAILED) {
-            thread(name = "vm-boot") { vm.boot() }
+        if (shouldBootOnAttach(vm.state, previousBootMessage != null, VmHost.poweredOff)) startBoot()
+    }
+
+    private fun startBoot() {
+        try {
+            bootHistory.starting(vm.img.id)
+        } catch (e: Exception) {
+            runOnUiThread { previousBootMessage = getString(R.string.boot_history_error); retryPending = false }
+            return
         }
+        runOnUiThread { previousBootMessage = null }
+        vm.bootAsync()
     }
 
     /** Debug: adb shell am broadcast -a <applicationId>.SHELL --es cmd "dumpsys power" → run/shell.out */
@@ -340,7 +394,7 @@ class VmActivity : ComponentActivity() {
                     java.io.File(vm.paths.bin, name).writeText("shown=${guest.shown} direct=${guest.passthrough} ms=${android.os.SystemClock.uptimeMillis()} rings=${guest.rings} ${guest.paceReport()}\n")
                     return
                 }
-                if (i.hasExtra("adb")) { if (i.getBooleanExtra("adb", false)) vm.adb.start() else vm.adb.stop(); return }
+                if (i.hasExtra("adb")) { val enabled = i.getBooleanExtra("adb", false); thread { try { if (enabled) vm.adb.start() else vm.adb.stop() } catch (e: Exception) { android.util.Log.e("aemu-adb", "ADB operation failed", e) } }; return }
                 val cmd = i.getStringExtra("cmd") ?: return
                 // своё имя файла на каждую команду: медленная предыдущая команда не затрёт ответ
                 val name = i.getStringExtra("out")?.takeIf { it.matches(Regex("[A-Za-z0-9_.-]+")) } ?: "shell.out"
@@ -414,6 +468,10 @@ class VmActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        unsubscribeState?.invoke()
+        unsubscribeState = null
+        unsubscribeLog?.invoke()
+        unsubscribeLog = null
         vnc?.stop(); vnc = null
         recorder?.let { r -> thread { r.stop() } }; recorder = null
         if (::guest.isInitialized) guest.stop()
@@ -421,17 +479,33 @@ class VmActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private fun stopVm() {
+    private fun requestStop(onSuccess: () -> Unit) {
+        if (stopPending) return
+        stopPending = true
+        stopError = null
         thread {
-            vm.stop()
-            VmHost.vm = null
-            runOnUiThread { finishAndRemoveTask() }
-            Thread.sleep(300)
-            // GL-мост нельзя поднять повторно в том же процессе — процесс :vm уходит вместе с машиной
-            android.os.Process.killProcess(android.os.Process.myPid())
+            stopForUi({ vm.stop() }, {
+                runOnUiThread { stopPending = false; onSuccess() }
+            }, { error ->
+                runOnUiThread {
+                    stopPending = false
+                    stopError = error.message ?: error.javaClass.simpleName
+                }
+            })
         }
     }
 
+    private fun stopVm() {
+        requestStop {
+            VmHost.vm = null
+            VmHost.historyRecorder = null
+            finishAndRemoveTask()
+            thread {
+                Thread.sleep(300)
+                android.os.Process.killProcess(android.os.Process.myPid())
+            }
+        }
+    }
     private enum class Dlg { NONE, SMS, CALL, BATTERY, ADB, DEVICE, APPS, BADGE, HUD, CAMERA }
 
     // position of the floating menu button, kept across launches
@@ -803,14 +877,24 @@ class VmActivity : ComponentActivity() {
     @Composable
     private fun AdbDialog(onDone: () -> Unit) {
         var on by remember { mutableStateOf(vm.adb.running) }
+        var busy by remember { mutableStateOf(false) }
+        var error by remember { mutableStateOf<String?>(null) }
         AlertDialog(onDismissRequest = onDone,
             title = { Text(stringResource(R.string.m_adb)) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(stringResource(R.string.m_adb_enable), Modifier.weight(1f))
-                        Switch(on, { v -> if (v) vm.adb.start() else vm.adb.stop(); on = vm.adb.running })
+                        Switch(on, { v ->
+                            busy = true
+                            error = null
+                            thread {
+                                val failure = try { if (v) vm.adb.start() else vm.adb.stop(); null } catch (e: Exception) { e.message ?: e.javaClass.simpleName }
+                                runOnUiThread { on = vm.adb.running; busy = false; error = failure }
+                            }
+                        }, enabled = !busy)
                     }
+                    error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                     if (on) {
                         val ips = app.aemu.core.AdbServer.addresses()
                         for (ip in ips.ifEmpty { listOf("127.0.0.1") })
@@ -888,14 +972,13 @@ class VmActivity : ComponentActivity() {
 
     private fun rebootVm(recovery: Boolean = false) {
         val id = vm.img.id
-        thread {
-            vm.stop()
+        requestStop {
             VmHost.vm = null
-            // the GL bridge cannot come up twice in one process, so a reboot restarts the :vm process
-            runOnUiThread { restartProcess(id, recovery) }
+            VmHost.historyRecorder = null
+            // The GL bridge requires a fresh :vm process for a reboot.
+            restartProcess(id, recovery)
         }
     }
-
     private fun restartProcess(id: String, recovery: Boolean = false) {
         val i = Intent(this, VmActivity::class.java).putExtra(EXTRA_ID, id).putExtra(EXTRA_RECOVERY, recovery)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -917,11 +1000,14 @@ class VmActivity : ComponentActivity() {
         // recovery is "running" too, but has no Android behind am/pm/settings
         val running = state == GuestVm.State.RUNNING && !vm.recoveryMode
         var seconds by remember { mutableStateOf(0L) }
+        var bootElapsedMs by remember { mutableStateOf(0L) }
+        var waitDismissedFor by remember { mutableStateOf(-1L) }
         var frames by remember { mutableStateOf(0L) }
-        LaunchedEffect(Unit) { while (true) { if (vm.recoveryMode) guest.format = vm.recoveryFormat else if (vm.engine == app.aemu.core.Engine.N64) { guest.format = if (vm.fb565 || vm.fbLegacy565) 0 else 1; guest.onePage = vm.fb565 && !vm.fbLegacy565 }; seconds = vm.bootSeconds(); frames = if (vm.glInApp) dev.lk.m7sense.GlBridge.frames() else maxOf(guest.rings, guest.shown); delay(500) } }
+        LaunchedEffect(Unit) { while (true) { if (vm.recoveryMode) guest.format = vm.recoveryFormat else if (vm.engine == app.aemu.core.Engine.N64) { guest.format = if (vm.fb565 || vm.fbLegacy565) 0 else 1; guest.onePage = vm.fb565 && !vm.fbLegacy565 }; seconds = vm.bootSeconds(); bootElapsedMs = if (vm.bootStartedElapsed > 0L) (android.os.SystemClock.elapsedRealtime() - vm.bootStartedElapsed).coerceAtLeast(0L) else 0L; frames = if (vm.glInApp) dev.lk.m7sense.GlBridge.frames() else maxOf(guest.rings, guest.shown); delay(500) } }
         // как только гость начал рисовать — карточку убираем, остаётся маленький индикатор
         // (frames shown on the GPU path of the arm64 kernels never ring onFrame: the card hid their boot animation)
         val drawing = frames > 30
+        val unconfirmed = bootWarningVisible(state, bootElapsedMs, waitDismissedFor == vm.bootStartedElapsed)
         androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
             // the menu button stays on screen: 40 dp button + 8 dp padding, anchored at the top end
             val keep = with(androidx.compose.ui.platform.LocalDensity.current) { 56.dp.toPx() }
@@ -933,10 +1019,10 @@ class VmActivity : ComponentActivity() {
             led?.takeIf { it.lit && showLed }?.let { LedIndicator(it, Modifier.align(Alignment.TopCenter)) }
             // карточка загрузки
             AnimatedVisibility(
-                visible = state != GuestVm.State.RUNNING && !showLog && !(drawing && state == GuestVm.State.BOOTING),
+                visible = state != GuestVm.State.RUNNING && !showLog && (!(drawing && state == GuestVm.State.BOOTING) || unconfirmed),
                 enter = fadeIn(), exit = fadeOut(),
                 modifier = Modifier.align(Alignment.Center),
-            ) { BootCard(seconds) }
+            ) { BootCard(seconds, unconfirmed) { waitDismissedFor = vm.bootStartedElapsed } }
 
             if (hudOn && !showLog && !showTerm) {
                 val a = when (hudCorner) { 1 -> Alignment.TopEnd; 2 -> Alignment.BottomStart; 3 -> Alignment.BottomEnd; else -> Alignment.TopStart }
@@ -953,13 +1039,17 @@ class VmActivity : ComponentActivity() {
                         maxLines = 1, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp))
                 }
             }
-            if (drawing && state == GuestVm.State.BOOTING && !showLog && vm.screenUpAt == 0L) {
+            if (shouldShowBootNotice(state) && (drawing || state == GuestVm.State.RUNNING) && !showLog) {
                 Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.9f),
                     modifier = Modifier.align(Alignment.TopStart).displayCutoutPadding().statusBarsPadding().padding(8.dp)) {
                     Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        LoadingIndicator(Modifier.size(24.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(stringResource(R.string.vm_booting_short, seconds.toInt()), style = MaterialTheme.typography.labelMedium)
+                        if (state == GuestVm.State.BOOTING) {
+                            LoadingIndicator(Modifier.size(24.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(stringResource(R.string.vm_booting_short, seconds.toInt()), style = MaterialTheme.typography.labelMedium)
+                        } else {
+                            Text(stringResource(R.string.desktop_not_confirmed), style = MaterialTheme.typography.labelMedium)
+                        }
                     }
                 }
             }
@@ -1048,10 +1138,6 @@ class VmActivity : ComponentActivity() {
                     HorizontalDivider()
                     DropdownMenuItem(text = { Text(stringResource(R.string.m_reboot)) }, leadingIcon = { Icon(Icons.Rounded.RestartAlt, null) },
                         onClick = { menu = false; rebootVm() })
-                    DropdownMenuItem(text = { Text(stringResource(if (vm.recoveryMode) R.string.m_reboot_system else R.string.m_reboot_recovery)) },
-                        leadingIcon = { Icon(Icons.Rounded.RestartAlt, null) },
-                        enabled = vm.recoveryMode || app.aemu.core.RecoveryImage.installed(vm.paths),
-                        onClick = { menu = false; rebootVm(!vm.recoveryMode) })
                     DropdownMenuItem(text = { Text(stringResource(R.string.shutdown)) }, leadingIcon = { Icon(Icons.Rounded.Close, null) },
                         onClick = { menu = false; stopVm() })
                 }
@@ -1285,7 +1371,7 @@ class VmActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun BootCard(seconds: Long) {
+    private fun BootCard(seconds: Long, unconfirmed: Boolean, onContinueWaiting: () -> Unit) {
         Card(
             modifier = Modifier.widthIn(max = 360.dp).padding(24.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.94f),
@@ -1293,23 +1379,61 @@ class VmActivity : ComponentActivity() {
             shape = MaterialTheme.shapes.extraLarge,
         ) {
             Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                if (poweredOff) {
+                if (stopError != null) {
+                    Text(stringResource(R.string.stop_failed), style = MaterialTheme.typography.headlineSmall)
+                    Spacer(Modifier.height(8.dp))
+                    Text(stopError ?: "", color = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.height(16.dp))
+                    Button(enabled = !stopPending, onClick = { stopVm() }) { Text(stringResource(R.string.retry)) }
+                } else if (poweredOff) {
                     Text(stringResource(R.string.powered_off), style = MaterialTheme.typography.headlineSmall)
                     Spacer(Modifier.height(16.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = { stopVm() }) { Text(stringResource(R.string.close)) }
                         OutlinedButton(onClick = { openLog = true }) { Text(stringResource(R.string.log)) }
-                        Button(onClick = { restartProcess(vm.img.id) }) { Text(stringResource(R.string.retry)) }
+                        Button(enabled = allowPowerOffRetry(stopPending), onClick = { rebootVm() }) { Text(stringResource(R.string.retry)) }
                     }
-                } else if (state == GuestVm.State.FAILED) {
+                } else if (state == GuestVm.State.FAILED || previousBootMessage != null) {
                     Text(stringResource(R.string.failed_start), style = MaterialTheme.typography.headlineSmall)
                     Spacer(Modifier.height(8.dp))
-                    Text(vm.failure ?: "", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+                    Text(previousBootMessage ?: vm.failure ?: "", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
                     Spacer(Modifier.height(16.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = { stopVm() }) { Text(stringResource(R.string.close)) }
                         OutlinedButton(onClick = { openLog = true }) { Text(stringResource(R.string.log)) }
-                        Button(onClick = { thread { vm.stop(); vm.boot() } }) { Text(stringResource(R.string.retry)) }
+                        Button(enabled = !retryPending, onClick = {
+                            retryPending = true
+                            thread {
+                                try { vm.stop(); startBoot() }
+                                catch (e: Exception) {
+                                    runOnUiThread {
+                                        previousBootMessage = e.message ?: getString(R.string.failed_start)
+                                        retryPending = false
+                                    }
+                                }
+                            }
+                        }) { Text(stringResource(R.string.retry)) }
+                    }
+                } else if (unconfirmed) {
+                    Text(stringResource(R.string.boot_unconfirmed_title), style = MaterialTheme.typography.headlineSmall)
+                    Spacer(Modifier.height(8.dp))
+                    Text(stringResource(R.string.boot_unconfirmed_message), style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(16.dp))
+                    Button(onClick = onContinueWaiting) { Text(stringResource(R.string.boot_continue_waiting)) }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { stopVm() }) { Text(stringResource(R.string.boot_stop)) }
+                        OutlinedButton(enabled = !retryPending, onClick = {
+                            retryPending = true
+                            thread {
+                                try { vm.stop(); startBoot() }
+                                catch (e: Exception) {
+                                    runOnUiThread {
+                                        previousBootMessage = e.message ?: getString(R.string.failed_start)
+                                        retryPending = false
+                                    }
+                                }
+                            }
+                        }) { Text(stringResource(R.string.retry)) }
                     }
                 } else {
                     LoadingIndicator(Modifier.size(64.dp))
@@ -1472,3 +1596,9 @@ class VmActivity : ComponentActivity() {
         }
     }
 }
+
+internal fun shouldBootOnAttach(state: GuestVm.State, previousFailure: Boolean = false, poweredOff: Boolean = false): Boolean =
+    state == GuestVm.State.STOPPED && !previousFailure && !poweredOff
+
+internal fun shouldShowBootNotice(state: GuestVm.State): Boolean =
+    state == GuestVm.State.BOOTING || state == GuestVm.State.RUNNING

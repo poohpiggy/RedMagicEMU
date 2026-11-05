@@ -21,6 +21,7 @@
     <string name="empty_title">No systems yet</string>
     <string name="empty_text">Add REDMAGIC NX809J stock Android 16 / API 36 / ARM64 firmware.</string>
     <string name="empty_help">Which files work?</string>
+    <string name="import_cancelled">Import cancelled</string>
     <string name="import_failed">Import failed</string>
     <string name="import_running">Importing firmware</string>
     <string name="import_done">Firmware added</string>
@@ -261,4 +262,21 @@
     <string name="cam_value">Value</string>
     <string name="cam_add">Add</string>
     <string name="cam_save">Save</string>
+    <string name="single_not_imported">Not imported</string>
+    <string name="single_target">REDMAGIC NX809J · Android 16 · API 36 · ARM64</string>
+    <string name="single_choose">Choose firmware</string>
+    <string name="single_ready">Ready to start</string>
+    <string name="single_conflict">Multiple existing instances were found. Resolve them before starting.</string>
+    <string name="vm_process_active">VM process active</string>
+    <string name="previous_boot_failed">The previous start failed. You can retry.</string>
+    <string name="previous_boot_interrupted">The previous run was interrupted. You can retry.</string>
+    <string name="boot_history_error">Unable to read or save the previous run state. Check storage before retrying.</string>
+    <string name="desktop_not_confirmed">System reported boot complete; desktop not confirmed</string>
+    <string name="boot_unconfirmed_title">Startup not confirmed</string>
+    <string name="boot_unconfirmed_message">The system has not confirmed startup after five minutes. It may need more time.</string>
+    <string name="boot_continue_waiting">Continue waiting</string>
+    <string name="boot_stop">Stop</string>
+    <string name="stop_failed">Could not stop the system</string>
+    <string name="import_interrupted">The previous firmware import was interrupted. Please check the import status.</string>
+    <string name="import_recovery_error">Could not check unfinished import data</string>
 </resources>

@@ -8,6 +8,7 @@ import app.aemu.core.ImageStore
 import app.aemu.core.TreeFixer
 import app.aemu.core.VmPaths
 import app.aemu.core.RecoveryImage
+import app.aemu.core.InstanceAdmission
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
@@ -52,7 +53,10 @@ class Importer(
     private var files = 0
     private var bytes = 0L
     private var gotSystem = false
-    @Volatile var cancelled = false
+    private val publicationGate = PublicationGate()
+    var cancelled: Boolean
+        get() = publicationGate.cancelled
+        set(value) { publicationGate.setCancelled(value) }
     /** a path another process can open for the file being imported (payload-dumper-go reads it), null if none */
     private var topInput: String? = null
 
@@ -62,41 +66,67 @@ class Importer(
     }.getOrNull()
 
     fun import(uri: Uri, name: String): GuestImage {
-        val id = ImageStore.newId(ctx)
-        paths = VmPaths(ctx, id)
-        root = paths.root
-        root.mkdirs()
+        val images = ImageStore.imagesDir(ctx)
+        PendingImports.cleanAbandoned(images)
+        val required = 512L * 1024 * 1024
+        if (images.usableSpace < required) throw IOException("Not enough free space to stage the target firmware")
+        val lease = PendingImports.begin(images)
+        var published = false
         try {
-            onProgress("Opening $name", 0f)
-            val pfd = ctx.contentResolver.openFileDescriptor(uri, "r") ?: throw IOException("file failed to open")
-            pfd.use {
-                val ch = FileInputStream(pfd.fileDescriptor).channel
-                val seekable = runCatching { ch.position(0); ch.size() > 0 }.getOrDefault(false)
-                topInput = if (seekable) inputPath(pfd.fd) else null
-                if (seekable) handle(ChannelSource(ch), ch, name, 0)
-                else {
-                    val t = spill(FileInputStream(pfd.fileDescriptor), "whole")
-                    FileChannel.open(t.toPath(), StandardOpenOption.READ).use { c -> handle(ChannelSource(c), c, name, 0) }
-                    t.delete()
+            onProgress("Staging firmware", 0f)
+            val input = ctx.contentResolver.openInputStream(uri) ?: throw IOException("file failed to open")
+            val result = input.use { source ->
+                StagedInput.use(lease.dir, source, { cancelled }, maxBytes = TargetArchive.MAX_PACKAGE_SIZE) { staged ->
+                    onProgress("Checking firmware package", -1f)
+                    TargetArchive.validate(staged)
+                    importVerifiedSnapshot(staged, name, lease.dir)
                 }
             }
-            // build.prop is optional: some dumps/ports lack it, Analyzer infers the version from the tree
-            if (!File(root, "system/framework").isDirectory && !File(root, "system/build.prop").isFile)
-                throw IOException("no Android system partition found in file")
-            finishTree()
-            recovery?.let { runCatching { RecoveryImage.install(paths, it, log) } }
-            onProgress("Analyzing firmware", 0.97f)
-            val img = Analyzer(ctx, paths, ramdisk).analyze(id, name)
-            TreeFixer(ctx, paths, img, log).sanitize()
-            ImageStore.save(ctx, img.copy(sizeBytes = ImageStore.du(paths.dir)))
+            if (cancelled) throw ImportCancelledException()
+            lease.commit(result.id, publish = publicationGate::publish)
+            published = true
+            var finalResult = result
+            try { lease.close() } catch (cleanup: Throwable) {
+                val warning = "Firmware imported, but temporary control directory could not be removed: ${cleanup.message}"
+                log(warning)
+                finalResult = result.copy(warnings = result.warnings + warning)
+            }
             onProgress("Done", 1f)
-            log("import: $files files, ${bytes shr 20} MB")
-            return ImageStore.get(ctx, id)!!
+            return finalResult
         } catch (t: Throwable) {
-            ImageStore.delete(ctx, id)
+            if (!published) try { lease.close() }
+            catch (cleanup: Throwable) { throw IOException("Import failed and incomplete instance cleanup failed: ${cleanup.message}", t).apply { addSuppressed(cleanup) } }
+            if (t.suppressed.isNotEmpty()) throw IOException("Import failed; temporary data cleanup also failed: ${t.suppressed.first().message}", t)
             throw t
-        } finally {
-            tmp.listFiles()?.forEach { it.delete() }
+        }
+    }
+
+    /** Parse and verify the same private snapshot that is used for extraction. */
+    private fun importVerifiedSnapshot(staged: File, name: String, pending: File): GuestImage {
+        return TargetArchive.withExtracted(staged, pending, names = setOf("super.img", "ramdisk.img"), cancelled = { cancelled }) { extracted ->
+            if (cancelled) throw ImportCancelledException()
+            val id = ImageStore.newId(ctx)
+            paths = VmPaths(ctx, id, File(pending, id))
+            if (!paths.dir.mkdir()) throw IOException("Cannot create a private instance")
+            root = paths.root
+            if (!root.mkdir()) throw IOException("Cannot create the firmware tree")
+            onProgress("Extracting firmware", -1f)
+            ramdisk = TargetPackageTree.extract(extracted.getValue("super.img"), extracted.getValue("ramdisk.img"), root) { cancelled }
+            if (cancelled) throw ImportCancelledException()
+            val bootFingerprint = TargetMetadata.readFingerprint(ramdisk.orEmpty())
+            log("Firmware bootimage fingerprint: ${bootFingerprint ?: "unavailable"}; target system fingerprint: ${TargetMetadata.HISTORY_FINGERPRINT}")
+            onProgress("Checking firmware fingerprint", -1f)
+            val fingerprint = InstanceAdmission.readFingerprint(paths.dir, listOfNotNull(bootFingerprint))
+            InstanceAdmission.requireFingerprint(fingerprint)
+            if (cancelled) throw ImportCancelledException()
+            onProgress("Analyzing firmware", -1f)
+            val img = Analyzer(ctx, paths, ramdisk).analyze(id, name).copy(fingerprint = fingerprint)
+            TreeFixer(ctx, paths, img, log).sanitize()
+            if (cancelled) throw ImportCancelledException()
+            val result = img.copy(sizeBytes = ImageStore.du(paths.dir))
+            if (cancelled) throw ImportCancelledException()
+            ImageStore.saveAt(paths.dir, result)
+            result
         }
     }
 
@@ -176,7 +206,7 @@ class Importer(
             com.github.junrar.Archive(whole).use { a ->
                 val nested = ArrayList<Pair<File, String>>()
                 for (fh in a.fileHeaders) {
-                    if (cancelled) throw IOException("cancelled")
+                    if (cancelled) throw ImportCancelledException()
                     if (fh.isDirectory) continue
                     val n = fh.fileName.replace('\\', '/')
                     val base = n.substringAfterLast('/')
@@ -247,7 +277,7 @@ class Importer(
         val datBr = entries.firstOrNull { it.name.matches(Regex("(.*/)?system\\.new\\.dat(\\.br)?")) }
         val sparseChunks = entries.filter { it.name.matches(Regex("(.*/)?system\\.img_sparsechunk\\.\\d+")) }.sortedBy { it.name.substringAfterLast('.').toInt() }
         for (e in entries) {
-            if (cancelled) throw IOException("cancelled")
+            if (cancelled) throw ImportCancelledException()
             val n = e.name.replace('\\', '/').removePrefix(wrap)
             val base = n.substringAfterLast('/')
             when {
@@ -365,7 +395,7 @@ class Importer(
     private fun importExtracted(dir: File, name: String, depth: Int) {
         val nested = ArrayList<Pair<File, String>>()
         dir.walkTopDown().filter { it.isFile }.forEach { f ->
-            if (cancelled) throw IOException("cancelled")
+            if (cancelled) throw ImportCancelledException()
             val n = f.relativeTo(dir).invariantSeparatorsPath
             val base = f.name
             when {
@@ -406,7 +436,7 @@ class Importer(
             onLine(chunk)
         }
         val code = p.waitFor()
-        if (cancelled) throw IOException("cancelled")
+        if (cancelled) throw ImportCancelledException()
         return code
     }
 
@@ -416,7 +446,7 @@ class Importer(
         SevenZFile.builder().setSeekableByteChannel(ch).get().use { z ->
             val nested = ArrayList<Pair<File, String>>()
             while (true) {
-                if (cancelled) throw IOException("cancelled")
+                if (cancelled) throw ImportCancelledException()
                 val e = z.nextEntry ?: break
                 if (e.isDirectory) continue
                 val n = e.name.replace('\\', '/')
@@ -496,7 +526,7 @@ class Importer(
         val tar = TarArchiveInputStream(s, "UTF-8")
         var fullRoot: Boolean? = null
         while (true) {
-            if (cancelled) throw IOException("cancelled")
+            if (cancelled) throw ImportCancelledException()
             val e: TarArchiveEntry = tar.nextEntry ?: break
             var n = e.name.removePrefix("./").trimStart('/')
             if (n.isEmpty()) continue
@@ -608,7 +638,7 @@ class Importer(
         onProgress("Reading image $mount ($kind)", -1f)
         var n = 0
         tree.walk { path, isDir, link, mode, size, data ->
-            if (cancelled) throw IOException("cancelled")
+            if (cancelled) throw ImportCancelledException()
             val rel = "$mount/$path"
             val f = File(root, rel)
             if (!f.canonicalPath.startsWith(root.canonicalPath)) return@walk
@@ -637,16 +667,16 @@ class Importer(
             // unpacked partition); the layouts that cannot be read in place are unpacked as before
             if (base.startsWith("system", true)) {
                 s.use { i -> raw.outputStream().use { o -> i.copyTo(o, 1 shl 20) } }
-                if (cancelled) throw IOException("cancelled")
+                if (cancelled) throw ImportCancelledException()
                 val inPlace = FileChannel.open(raw.toPath(), StandardOpenOption.READ).use { c ->
                     SinImage.source(c)?.also { importImage(it, "system") } != null
                 }
                 if (inPlace) return
                 val sin = File(tmp, "${System.nanoTime()}-$base")
                 if (!raw.renameTo(sin)) throw IOException("cannot move $raw")
-                try { sin.inputStream().use { SinImage.unpack(it, raw) { if (cancelled) throw IOException("cancelled") } } } finally { sin.delete() }
+                try { sin.inputStream().use { SinImage.unpack(it, raw) { if (cancelled) throw ImportCancelledException() } } } finally { sin.delete() }
             } else
-            SinImage.unpack(s, raw) { if (cancelled) throw IOException("cancelled") }
+            SinImage.unpack(s, raw) { if (cancelled) throw ImportCancelledException() }
             if (base.startsWith("kernel", true) || base.startsWith("boot", true)) { takeBoot(raw.readBytes()); return }
             if (base.startsWith("recovery", true) || base.startsWith("fotakernel", true)) return
             FileChannel.open(raw.toPath(), StandardOpenOption.READ).use { c -> importImage(ChannelSource(c), base.substringBefore('.').lowercase()) }
@@ -682,7 +712,7 @@ class Importer(
         var sys: Pair<Long, Long>? = null
         var big: Pair<Long, Long>? = null
         while (pos < src.size) {
-            if (cancelled) throw IOException("cancelled")
+            if (cancelled) throw ImportCancelledException()
             win.clear(); src.read(pos, win); win.flip()
             val b = win.array(); val n = minOf(win.limit().toLong(), src.size - pos).toInt()
             var hit = -1
@@ -803,7 +833,7 @@ class Importer(
             tail.addLast(l.take(200)); if (tail.size > 6) tail.removeFirst()
         }
         val code = p.waitFor()
-        if (cancelled) { out.deleteRecursively(); throw IOException("cancelled") }
+        if (cancelled) { out.deleteRecursively(); throw ImportCancelledException() }
         if (code != 0 || !File(out, "system.img").isFile) {
             out.deleteRecursively()
             throw IOException("exit $code: ${tail.joinToString(" | ")}")
@@ -817,7 +847,7 @@ class Importer(
         onProgress("Reading image $mount (ext4, block ${fs.blockSize})", -1f)
         var n = 0
         fs.walk { path, node ->
-            if (cancelled) throw IOException("cancelled")
+            if (cancelled) throw ImportCancelledException()
             val rel = "$mount/$path"
             val f = File(root, rel)
             when {

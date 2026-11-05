@@ -25,38 +25,69 @@ import kotlin.concurrent.thread
 class AdbServer(private val vm: GuestVm) {
     @Volatile var port = 0
         private set
-    private var server: ServerSocket? = null
-    private val conns = ConcurrentHashMap.newKeySet<Socket>()
+    @Volatile private var server: ServerSocket? = null
+    private val lock = Any()
+    private val conns = ConcurrentHashMap.newKeySet<Conn>()
+    private val workers = ConcurrentHashMap.newKeySet<Thread>()
+    private var closing = false
 
     val running get() = server != null
 
-    fun start(): Boolean {
+    fun start(): Boolean = vm.startAdbServer { startWhileRunning() }
+
+    private fun startWhileRunning(): Boolean = synchronized(lock) {
+        if (closing) return false
         if (server != null) return true
         for (p in 5555..5585 step 2) {
             val s = runCatching { ServerSocket(p, 4, InetAddress.getByName("0.0.0.0")).apply { reuseAddress = true } }.getOrNull() ?: continue
             server = s; port = p
             vm.log("adb: listening on ${addresses().joinToString { "$it:$p" }.ifEmpty { "port $p" }}")
-            thread(name = "adb-accept", isDaemon = true) {
+            startWorker("adb-accept") {
                 while (!s.isClosed) {
                     val c = runCatching { s.accept() }.getOrNull() ?: break
-                    conns.add(c)
-                    thread(name = "adb-conn", isDaemon = true) {
-                        runCatching { Conn(c).run() }.onFailure { if (!s.isClosed) vm.log("adb: ${it.message}") }
-                        conns.remove(c); runCatching { c.close() }
+                    synchronized(lock) {
+                        if (closing) { c.close(); return@synchronized }
+                        val conn = Conn(c)
+                        conns.add(conn)
+                        startWorker("adb-conn") {
+                            try { runCatching { conn.run() }.onFailure { if (!s.isClosed) vm.log("adb: ${it.message}") } }
+                            finally { conn.close(); conns.remove(conn) }
+                        }
                     }
                 }
             }
             return true
         }
         vm.log("adb: no free port")
-        return false
+        false
+    }
+
+    private fun startWorker(name: String, action: () -> Unit) {
+        synchronized(lock) {
+            if (closing) return
+            val worker = Thread({ try { action() } finally { workers.remove(Thread.currentThread()) } }, name).apply { isDaemon = true }
+            workers.add(worker)
+            try { worker.start() } catch (t: Throwable) { workers.remove(worker); throw t }
+        }
+    }
+
+    /** Stop accepting work and unblock streams before VM lifecycle waits for workers. */
+    fun requestStop() {
+        val socket = synchronized(lock) { closing = true; server.also { server = null; port = 0 } }
+        socket?.close()
+        conns.forEach { it.close() }
     }
 
     fun stop() {
-        val s = server ?: return
-        server = null; port = 0
-        runCatching { s.close() }
-        conns.forEach { runCatching { it.close() } }
+        requestStop()
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        for (worker in workers.toList()) {
+            check(worker !== Thread.currentThread()) { "Cannot stop ADB from its own worker" }
+            val left = deadline - System.nanoTime()
+            if (left > 0) worker.join(maxOf(1, TimeUnit.NANOSECONDS.toMillis(left)))
+        }
+        check(workers.isEmpty()) { "ADB workers did not stop" }
+        synchronized(lock) { closing = false }
         vm.log("adb: stopped")
     }
 
@@ -96,6 +127,11 @@ class AdbServer(private val vm: GuestVm) {
             streams.values.forEach { it.closedByPeer() }
         }
 
+        fun close() {
+            streams.values.forEach { it.closedByPeer() }
+            runCatching { sock.close() }
+        }
+
         @Synchronized fun send(cmd: Int, a0: Int, a1: Int, data: ByteArray = EMPTY, off: Int = 0, len: Int = data.size) {
             val h = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN)
             var sum = 0
@@ -108,9 +144,9 @@ class AdbServer(private val vm: GuestVm) {
             val s = Stream(this, nextId++, remote)
             streams[s.local] = s
             send(OKAY, s.local, remote)
-            thread(name = "adb-$service".take(40), isDaemon = true) {
-                runCatching { serve(s, service) }.onFailure { vm.log("adb: $service: ${it.message}") }
-                s.close()
+            startWorker("adb-$service".take(40)) {
+                try { runCatching { serve(s, service) }.onFailure { vm.log("adb: $service: ${it.message}") } }
+                finally { s.close() }
             }
         }
 
@@ -198,7 +234,7 @@ class AdbServer(private val vm: GuestVm) {
         val pb = ProcessBuilder(r.cmdline(argv)).directory(vm.paths.bin).redirectErrorStream(true)
         pb.environment().clear()
         pb.environment().putAll(r.env(mapOf("HOME" to "/data/local/tmp", "TERM" to "dumb")))
-        val p = pb.start()
+        val p = vm.startExternalProcess(pb)
         // the same PATH order and tool wrappers as for a one-shot command
         if (interactive) runCatching { p.outputStream.write((vm.shellPrefix + "\n").toByteArray()); p.outputStream.flush() }
         val pump = thread(isDaemon = true) {

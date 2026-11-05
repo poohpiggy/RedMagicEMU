@@ -10,8 +10,6 @@ import android.graphics.Rect
 import android.view.MotionEvent
 import android.view.View
 import app.aemu.core.InputService
-import java.io.File
-import java.io.RandomAccessFile
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 
@@ -23,7 +21,9 @@ import java.nio.channels.FileChannel
  */
 class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(ctx) {
     var input: InputService? = null
-    var fb: File? = null
+    internal var openFramebuffer: (() -> app.aemu.core.SafeFramebuffer.Opened)? = null
+    /** Reads from the guest framebuffer are permitted only inside the VM's admission gate. */
+    internal var withAdmittedFramebuffer: ((() -> Unit) -> Unit)? = null
     @Volatile var passthrough = false
         set(v) { field = v; postInvalidate() }
     @Volatile var fps = 0f
@@ -70,7 +70,8 @@ class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(c
 
     private var bmp: Bitmap? = null
     private var buf: MappedByteBuffer? = null
-    private var raf: RandomAccessFile? = null
+    private var framebuffer: app.aemu.core.SafeFramebuffer.Opened? = null
+    private var mappedDev = 0L
     private var mappedIno = 0L
     private var lastHash = 0L
     private var ringSeen = 0L
@@ -89,11 +90,12 @@ class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(c
         app.aemu.core.OverlayFeed.onChange = { postInvalidate() }
         Thread({
             while (live) {
-                runCatching { tick() }
+                runCatching { withAdmittedFramebuffer?.invoke { tick() } }
                 // a guest that rings on every page flip (FrameBell) is copied on the ring: polling on our own 5 ms
                 // clock showed frames at uneven intervals and could catch a page half written
                 synchronized(gate) { runCatching { gate.wait(if (rings > 0 && !passthrough) 50L else if (quiet > 30 || (passthrough && direct != null)) 16L else 5L) } }
             }
+            runCatching { framebuffer?.close() }; framebuffer = null; buf = null
         }, "guest-fb").apply { isDaemon = true; start() }
     }
 
@@ -125,21 +127,24 @@ class GuestScreen(ctx: Context, private val w: Int, private val h: Int) : View(c
             }
         }
         if (passthrough) return
-        val f = fb ?: return
+        val open = openFramebuffer ?: return
         val pixels = w.toLong() * h * (if (format == 0) 2 else 4)
-        if (buf != null) {
-            val ino = runCatching { android.system.Os.stat(f.absolutePath).st_ino }.getOrDefault(0L)
-            if (ino != mappedIno || mappedIno == -1L) { runCatching { raf?.close() }; raf = null; buf = null; bmp = null; lastHash = 0 }
-        }
-        if (buf == null) {
-            if (!f.isFile || f.length() < pixels) return
-            raf = RandomAccessFile(f, "r")
-            // (the engine's hwcomposer counts its frames in the first word after the page)
-            val span = if (pages == 2 && f.length() >= pixels * 2) pixels * 2 else if (f.length() >= pixels + 8) pixels + 8 else pixels
-            buf = raf!!.channel.map(FileChannel.MapMode.READ_ONLY, 0, span)
-            mappedIno = runCatching { android.system.Os.stat(f.absolutePath).st_ino }.getOrDefault(0L)
-            bmp = Bitmap.createBitmap(w, h, if (format == 0) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888)
-        }
+        val candidate = open()
+        var kept = false
+        try {
+            if (buf != null && (candidate.device != mappedDev || candidate.inode != mappedIno || mappedIno == -1L || candidate.size < buf!!.capacity())) {
+                runCatching { framebuffer?.close() }; framebuffer = null; buf = null; bmp = null; lastHash = 0
+            }
+            if (buf == null) {
+                if (candidate.size < pixels) return
+                // (the engine's hwcomposer counts its frames in the first word after the page)
+                val span = if (pages == 2 && candidate.size >= pixels * 2) pixels * 2 else if (candidate.size >= pixels + 8) pixels + 8 else pixels
+                val mapping = candidate.stream.channel.map(FileChannel.MapMode.READ_ONLY, 0, span)
+                val bitmap = Bitmap.createBitmap(w, h, if (format == 0) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888)
+                framebuffer = candidate; kept = true; buf = mapping
+                mappedDev = candidate.device; mappedIno = candidate.inode; bmp = bitmap
+            }
+        } finally { if (!kept) candidate.close() }
         val b = buf ?: return
         val bitmap = bmp ?: return
         val two = !onePage && b.capacity() >= pixels * 2     // (open32: the GL server's one RGB565 page with its frame counter)

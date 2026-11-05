@@ -32,14 +32,18 @@ class TreeFixer(
     // ---------------------------------------------------------------- однократно после импорта
 
     fun sanitize() {
-        val parked = File(root, "system/.aemu-parked").apply { mkdirs() }
+        val parked = File(root, "system/.aemu-parked")
+        if (java.nio.file.Files.isSymbolicLink(parked.toPath())) throw java.io.IOException("Unsafe firmware quarantine directory")
+        if (!parked.isDirectory && !parked.mkdirs()) throw java.io.IOException("Cannot create firmware quarantine directory")
         var n = 0
+        fun children(path: String): Array<File> {
+            val dir = File(root, path)
+            if (!dir.exists()) return emptyArray()
+            if (!dir.isDirectory) throw java.io.IOException("Invalid firmware directory: $path")
+            return dir.listFiles() ?: throw java.io.IOException("Cannot read firmware directory: $path")
+        }
         fun park(f: File) {
-            if (!f.exists() && !isLink(f)) return
-            val rel = f.relativeTo(root).path.replace('/', '#')
-            val dst = File(parked, rel)
-            dst.delete()
-            if (f.renameTo(dst)) n++
+            if (SanitizeMove.park(root, parked, f)) n++
         }
         // 1. HAL-модули: оставляем только нейтральные *.default.so и безвредные классы
         val keepClasses = setOf("audio_policy", "local_time", "power", "keystore", "consumerir", "vibrator", "memtrack")
@@ -48,7 +52,7 @@ class TreeFixer(
             "lights", "audio", "fm", "bluetooth", "hdmi", "tv", "display", "ir", "wlan", "gpu", "fingerprint",
         )
         for (dir in listOf("system/lib/hw", "vendor/lib/hw", "system/vendor/lib/hw")) {
-            File(root, dir).listFiles()?.forEach { f ->
+            children(dir).forEach { f ->
                 val name = f.name
                 if (!name.endsWith(".so")) return@forEach
                 val cls = name.substringBefore('.')
@@ -73,7 +77,7 @@ class TreeFixer(
         }
         // 2. вендорские драйверы OpenGL: их место займёт GL-мост
         for (dir in listOf("system/lib/egl", "vendor/lib/egl", "system/vendor/lib/egl")) {
-            File(root, dir).listFiles()?.forEach { f ->
+            children(dir).forEach { f ->
                 val nm = f.name
                 val vendorGl = (nm.startsWith("libEGL_") || nm.startsWith("libGLESv1_CM_") || nm.startsWith("libGLESv2_") ||
                     nm.startsWith("libGLESv3_") || (nm.startsWith("libGLES_") && nm != "libGLES_android.so") ||
@@ -1680,7 +1684,6 @@ class TreeFixer(
         var moved = 0
         var unpacked = 0
         for (dir in sources) {
-            val up = "../".repeat(dir.relativeTo(root).path.count { it == '/' } + 1)
             // 11+: packages as files, each a zip with a file system image (see ApexUnpacker)
             if (dir.listFiles()?.any { it.isFile && (it.name.endsWith(".apex") || it.name.endsWith(".capex")) } == true) unpacked += ApexUnpacker.unpackAll(root, dir, log)
             dir.listFiles()?.filter { it.isDirectory && !isLink(it) }?.forEach { pkg ->
@@ -1689,7 +1692,7 @@ class TreeFixer(
                 runCatching {
                     if (home.exists() || isLink(home)) return@forEach      // a second package of the same module: the first one stays
                     if (!pkg.renameTo(home)) error("cannot move")
-                    Os.symlink("${up}apex/$name", pkg.path); moved++
+                    Os.symlink(ApexLink.relativeTarget(root, dir, name), pkg.path); moved++
                 }.onFailure { log("apex $name: ${it.message}") }
             }
         }
@@ -1750,11 +1753,7 @@ class TreeFixer(
         for (n in listOf("product", "system_ext")) {
             val link = File(root, n)
             if (engine == Engine.N64 && kernel.partitionsAtRoot) {
-                val inSystem = File(root, "system/$n")
-                if (isLink(inSystem) || !inSystem.isDirectory) continue
-                if (isLink(link) || link.isDirectory && link.list().isNullOrEmpty()) link.delete()
-                if (link.exists() || !inSystem.renameTo(link)) continue
-                runCatching { Os.symlink("../$n", inSystem.path); log("/$n is a directory of the root, /system/$n links to it") }
+                if (PartitionLinkMove.move(root, n)) log("/$n is a directory of the root, /system/$n links to it")
                 continue
             }
             if (!File(root, "system/$n").isDirectory || isLink(link)) continue

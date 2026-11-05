@@ -27,7 +27,10 @@ private val N64_SKIP = setOf("audiod", "ATFWD-daemon", "imsqmidaemon", "loc_laun
  * поднять дважды), заменяет собой init: готовит дерево, поднимает службы хоста (свойства, ввод,
  * звук, заглушки радио и накопителя), binderd, GL-мост и службы гостя в порядке загрузки Android.
  */
-class GuestVm(val ctx: Context, val img: GuestImage) {
+class GuestVm(val ctx: Context, image: GuestImage) {
+    // Select the same runtime engine for every entry point without modifying stored metadata.
+    val img = image.effective()
+
     companion object {
         /** A 32-bit firmware (open32) draws through our open GPU bridge (libGLES_aemu) rather than the 4.4 engine's
          *  closed one: 2.x-5.x by default; 6.0+ behind the test file "glopen" until checked by screenshot (PLAN 3.1.1);
@@ -58,6 +61,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
 
     @Volatile var state = State.STOPPED
         private set
+    private val admissionState = AdmissionState()
     @Volatile var bootAt = 0L
         private set
     @Volatile var bootDoneAt = 0L
@@ -97,30 +101,53 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     private val lines = CopyOnWriteArrayList<String>()
     private val listeners = CopyOnWriteArrayList<(String) -> Unit>()
     private val stateListeners = CopyOnWriteArrayList<(State) -> Unit>()
+    private val stateLock = Any()
     private val logFile = File(paths.bin, "aemu.log")
 
     fun log(s: String) {
         val line = "${stamp()} $s"
         lines.add(line)
         while (lines.size > 2000) lines.removeAt(0)
-        runCatching {
-            if (engine == Engine.N64 && kernel.syncLog) FileOutputStream(logFile, true).use { it.write((line + "\n").toByteArray()); it.fd.sync() }
-            else logFile.appendText(line + "\n")
+        admissionState.ifAdmitted {
+            runCatching {
+                if (engine == Engine.N64 && kernel.syncLog) FileOutputStream(logFile, true).use { it.write((line + "\n").toByteArray()); it.fd.sync() }
+                else logFile.appendText(line + "\n")
+            }
         }
         listeners.forEach { runCatching { it(line) } }
     }
     fun lines(): List<String> = lines.toList()
-    fun onLog(l: (String) -> Unit) { listeners.add(l) }
-    fun onState(l: (State) -> Unit) { stateListeners.add(l) }
-    private fun setState(s: State) { state = s; stateListeners.forEach { runCatching { it(s) } } }
+    fun onLog(l: (String) -> Unit): () -> Unit {
+        listeners.add(l)
+        return { listeners.remove(l); Unit }
+    }
+    fun onState(l: (State) -> Unit): () -> Unit {
+        synchronized(stateLock) { stateListeners.add(l) }
+        return { synchronized(stateLock) { stateListeners.remove(l); Unit } }
+    }
+    fun observeState(l: (State) -> Unit): () -> Unit {
+        synchronized(stateLock) {
+            stateListeners.add(l)
+            runCatching { l(state) }
+        }
+        return { synchronized(stateLock) { stateListeners.remove(l); Unit } }
+    }
+    private fun setState(s: State) {
+        fun publish() = synchronized(stateLock) { state = s; stateListeners.forEach { runCatching { it(s) } } }
+        if (s == State.STOPPING || s == State.STOPPED) publish() else lifecycle.ifRunning { publish() }
+    }
 
     val props = PropService(paths, ::log)
     /** ADB over the LAN, switched on from the VM menu */
     val adb = AdbServer(this)
     val input = InputService(paths, ::log)
     // 2.x пишет в /dev/eac через AudioHardwareGeneric на 44,1 кГц, HAL 4.x движка — на 48 кГц
-    val audio = AudioOut(paths, ::log, if (img.api < 14) 44100 else AudioOut.RATE,
-        if (TreeFixer.isMtkAudio(paths.root)) "dev/aemu_pcm" else "dev/eac")
+    // Do not inspect the firmware tree during VM construction, before admission.
+    private val audioDelegate = lazy {
+        AudioOut(paths, ::log, if (img.api < 14) 44100 else AudioOut.RATE,
+            if (TreeFixer.isMtkAudio(paths.root)) "dev/aemu_pcm" else "dev/eac")
+    }
+    val audio by audioDelegate
     val ril = RilStub(paths, ::log, img.settings.imei.ifBlank { VmSettings.DEFAULT_IMEI }, img.api)
     // 2.x-3.x: wifi.c / dhcp_utils.c era; 4.0+ talks to p2p_supplicant and netd differently (not emulated yet)
     val wifi = if (img.api in 5..13) WifiStub(paths, img.api, props, "8.8.8.8" to "1.1.1.1", ::log) else null
@@ -144,27 +171,58 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     @Volatile private var lmk: GuestLmk? = null
     val net = NetProxy(ctx, paths, img.api, img.abi != "arm64-v8a", ::log)
     private val dns = DnsProxy(paths, img.api, img.engine == Engine.N64 && Kernel64.forApi(img.api).dnsLayoutProbe, ::log)
-    val runner by lazy { GuestRunner(paths, img) }
+    val runner by lazy { GuestRunner(paths, img).also { it.processStarter = ::startExternalProcess } }
 
     private val extraStubs = ArrayList<VoldStub>()
     private val procs = LinkedHashMap<String, Process>()
+    private val externalProcs = java.util.concurrent.ConcurrentHashMap.newKeySet<Process>()
     private val lazyStarts = HashMap<String, Int>()
     private val pgids = LinkedHashSet<Int>()
     @Volatile private var stopping = false
+    @Volatile var bootStartedElapsed: Long = 0L
+        private set
+    private val lifecycle = VmLifecycle()
+    internal fun withAdmittedFramebuffer(action: () -> Unit) = admissionState.ifAdmitted {
+        if (state == State.PREPARING || state == State.BOOTING || state == State.RUNNING) action()
+    }
 
     // ------------------------------------------------------------------ загрузка
 
-    fun boot() {
-        if (state == State.BOOTING || state == State.RUNNING || state == State.PREPARING) return
-        stopping = false
-        failure = null
-        setState(State.PREPARING)
+    fun bootAsync() {
+        if (!lifecycle.begin {
+                stopping = false
+                bootStartedElapsed = SystemClock.elapsedRealtime()
+                failure = null
+                admissionState.reset()
+                setState(State.PREPARING)
+            }) return
         try {
-            if (recoveryMode) doRecovery() else doBoot()
+            Thread({
+                try {
+                    requireSystemBoot(recoveryMode)
+                    admissionState.verify {
+                        InstanceAdmission.requireVerified(paths.dir, img.fingerprint)
+                        GuestWritePaths.requireSafe(paths.root, img.dirs)
+                    }
+                    if (!stopping) {
+                        audioDelegate.value // Probe before fixup, as in the original boot sequence.
+                        if (!stopping) { if (recoveryMode) doRecovery() else doBoot() }
+                    }
+                } catch (t: Throwable) {
+                    if (!stopping) {
+                        failure = t.message ?: t.toString()
+                        log("✖ boot aborted: $failure")
+                        setState(State.FAILED)
+                    }
+                } finally {
+                    lifecycle.endBoot()
+                }
+            }, "vm-boot").start()
         } catch (t: Throwable) {
+            lifecycle.endBoot()
             failure = t.message ?: t.toString()
-            log("✖ boot aborted: $failure")
             setState(State.FAILED)
+            throw t
         }
     }
 
@@ -606,6 +664,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         val netCfg = if (s.netProxy) net.start() else GuestRunner.NetConfig()
         runner.sdcardHost = sd
         val r = GuestRunner(paths, img, netCfg.copy(glPath = if (s.gpu) "/dev/socket/gl" else null)).also {
+            it.processStarter = ::startExternalProcess
             it.sdcardHost = sd
             // отладка: файл run/binder.verbose включает полную трассировку binder в binder-warn.log
             it.binderVerbose = File(paths.bin, "binder.verbose").exists()
@@ -887,7 +946,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         }
     }.getOrDefault(false)
 
-    private fun spawn(name: String, cmd: List<String>, env: Map<String, String>) {
+    private fun spawn(name: String, cmd: List<String>, env: Map<String, String>) = lifecycle.ifRunning {
         val log = paths.log(name)
         val pb = ProcessBuilder(cmd).directory(paths.bin).redirectErrorStream(true)
         pb.environment().clear()
@@ -992,25 +1051,25 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         if (k == "sys.powerctl") { powerRequest(v); return }
         // SurfaceFlinger has just come up (it resets this before starting the boot animation)
         if (k == "service.bootanim.exit" && v == "0" && engine == Engine.N64 && kernel.clientComposition)
-            Thread { clientComposition() }.start()
+            lifecycle.launch("vm-composition") { clientComposition() }
         if (k == "service.bootanim.exit" && v == "1" && screenUpAt == 0L) screenUpAt = System.currentTimeMillis()
         // The animation notices the request late or never (open32, and the N64 kernels too: 7.1 on kernel 25), and
         // 7.x WindowManager keeps the screen off and input frozen until init.svc.bootanim is "stopped" (BOOT_TIMEOUT,
         // 30 s): the "frozen" half minute at the end of boot. It gets 1.5 s.
-        if (k == "service.bootanim.exit" && v == "1") Thread {
+        if (k == "service.bootanim.exit" && v == "1") lifecycle.launch("vm-stop-bootanim") {
             Thread.sleep(1500)
             killOurs(synchronized(procs) { procs["bootanim"]?.takeIf { it.isAlive }?.let { procs.remove("bootanim") } })
-        }.start()
+        }
         if ((k == "sys.boot_completed" || k == "dev.bootcomplete") && v == "1") booted()
     }
 
-    @Synchronized private fun booted() {
+    private fun booted() = lifecycle.ifRunning {
         if (bootDoneAt == 0L) {
             bootDoneAt = System.currentTimeMillis()
             everBooted = true
-            log("★ system booted in ${(bootDoneAt - bootAt) / 1000} s")
+            log("★ guest reported boot completed in ${(bootDoneAt - bootAt) / 1000} s")
             setState(State.RUNNING)
-            Thread { afterBoot() }.start()
+            lifecycle.launch("vm-after-boot") { afterBoot() }
         }
     }
 
@@ -1049,7 +1108,9 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         log("apex stand-in: ${seen.size} modules")
     }.onFailure { log("apex stand-in: ${it.message}") }
 
-    private fun onCtl(start: Boolean, svc: String) {
+    private fun onCtl(start: Boolean, svc: String) = lifecycle.ifRunning { onCtlWhileRunning(start, svc) }
+
+    private fun onCtlWhileRunning(start: Boolean, svc: String) {
         if (svc.startsWith("aidl/")) {
             // a lazy AIDL service (artd of 14+, a skin's daemon): started when servicemanager is asked for it, and
             // a few times at most, as the question comes every second for as long as the client waits
@@ -1063,7 +1124,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
                 lazyStarts[def.name] = n + 1
             }
             log("lazy service ${def.name} asked for ($svc)")
-            Thread { runCatching { startService(def) } }.start()
+            lifecycle.launch("vm-start-service") { runCatching { startService(def) } }
             return
         }
         if (wifi?.onCtl(start, svc) == true) return
@@ -1073,16 +1134,16 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
                 // 4.x sets service.bootanim.exit first and the animation quits on its own, closing its audio.
                 // Killing it outright left Samsung's boot sound track half-open: mediaserver hung and every
                 // app creating a sound (the phone process, ToneGenerator) got an ANR.
-                val p = synchronized(procs) { procs.remove("bootanim") } ?: return
-                Thread {
+                val p = synchronized(procs) { procs["bootanim"] } ?: return
+                lifecycle.launch("vm-stop-service") {
                     runCatching { if (!p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) killOurs(p) }
-                }.start()
+                }
                 return
             }
             // below 4.1 (2.3, MIUI ICS) the animation does not quit by itself: killed, it leaves the GL bridge on its last frame
             if (img.api < 16 || bootDoneAt != 0L || synchronized(procs) { procs.containsKey("bootanim") }) return
             InitPlan.optional("bootanim", img, paths.root)?.let { def ->
-                Thread { runCatching { startService(def) } }.start()
+                lifecycle.launch("vm-start-service") { runCatching { startService(def) } }
                 log("boot animation started")
             }
             return
@@ -1090,7 +1151,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         val def = plan.firstOrNull { it.name == svc } ?: InitPlan.optional(svc, img, paths.root)
         if (def == null) { log("ctl.${if (start) "start" else "stop"} $svc: no such service"); return }
         killOurs(synchronized(procs) { procs.remove(svc) })
-        if (start) Thread { runCatching { startService(def) } }.start()
+        if (start) lifecycle.launch("vm-start-service") { runCatching { startService(def) } }
     }
 
     private fun afterBoot() {
@@ -1102,21 +1163,28 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         // 2.x-4.x: vendor launchers keep providers in processes of their own (TouchWiz BadgeProvider); with two slots AMS
         // exits that "empty" process and kills TwLauncher with it ("provider in dying process", forum: TwLauncher crashes)
         if (open32) runCatching { guestShell("service call activity 51 i32 ${if (img.api < 21) 6 else 2}", 15_000) }
-        if (open32 && img.api >= 24) Thread { compileVisibleApps() }.start()   // "cmd package compile" is 7.0+
+        if (open32 && img.api >= 24) lifecycle.launch("vm-compile") { compileVisibleApps() }   // "cmd package compile" is 7.0+
         // (again: something in the first seconds after the boot completes turns it back off, and it is not known what;
         // a call made half a minute later stays)
-        if (engine == Engine.N64 && kernel.clientComposition) Thread {
+        if (engine == Engine.N64 && kernel.clientComposition) lifecycle.launch("vm-composition-delay") {
             for (wait in longArrayOf(0, 10_000, 20_000)) {
-                Thread.sleep(wait)
-                if (state != State.RUNNING) return@Thread
+                var remaining = wait
+                while (remaining > 0 && !stopping) {
+                    val step = minOf(remaining, 200L)
+                    Thread.sleep(step); remaining -= step
+                }
+                if (state != State.RUNNING || stopping) return@launch
                 clientComposition()
             }
-        }.start()
+        }
+        if (stopping) return
         r.run(listOf("/system/bin/sh", "-c", "export PATH=/system/bin:/system/xbin:\$PATH; svc power stayon true"), 60_000)
+        if (stopping) return
         if (engine == Engine.N64 && kernel.webViewSingleProcess)
             runCatching { guestShell("cmd webviewupdate disable-multiprocess", 30_000) }
         TreeFixer(ctx, paths, img, ::log).noScreenSleep()
         disableBrokenComponents()
+        if (stopping) return
         if (img.api >= 24) runCatching { enableHome() }.onFailure { log("home screen check failed: $it") }
         val img2 =img.copy(lastBootMs = bootDoneAt - bootAt, bootCount = img.bootCount + 1)
         ImageStore.save(ctx, img2)
@@ -1200,7 +1268,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             "com.google.android.apps.maps/com.google.android.location.NetworkLocationService",
         )
         // PATH of 2.3–4.x starts with /sbin: the pm script's "app_process" is then looked up there and qemu gives up
-        for (c in list) runCatching { guestRunner.run(listOf("/system/bin/sh", "-c", "export PATH=/system/bin:/system/xbin:\$PATH; pm disable $c"), 120_000) }
+        for (c in list) { if (stopping) return; runCatching { guestRunner.run(listOf("/system/bin/sh", "-c", "export PATH=/system/bin:/system/xbin:\$PATH; pm disable $c"), 120_000) } }
         runCatching { marker.writeText("1") }
     }
 
@@ -1209,10 +1277,11 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
 
     private fun watchdog() {
         runCatching { power.writeText(""); power.setWritable(true, false) }
-        Thread({
+        lifecycle.launch("vm-watchdog") {
             var restarts = HashMap<String, Int>()
             while (!stopping) {
                 Thread.sleep(3000)
+                if (stopping) break
                 if (power.length() > 0) { val v = runCatching { power.readText().trim() }.getOrDefault("reboot"); power.writeText(""); powerRequest(v) }
                 if (img.api >= 14) runCatching { dns.ensure() }
                 val dead = synchronized(procs) { procs.filter { !it.value.isAlive }.keys.toList() }
@@ -1275,7 +1344,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
                     } else synchronized(procs) { procs.remove(name) }
                 }
             }
-        }, "vm-watchdog").apply { isDaemon = true; start() }
+        }
     }
 
     /**
@@ -1445,23 +1514,41 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     // ------------------------------------------------------------------ остановка
 
     fun stop() {
-        if (state == State.STOPPED) return
-        stopping = true
-        setState(State.STOPPING)
-        log("stopping system")
-        runCatching { guestRunner.run(listOf("/system/bin/sync"), 5_000) }
-        killAll()
-        adb.stop(); props.stop(); props.stopAbstract();input.stop(); frames.stop(); ril.stop(); wifi?.stop(); vold.stop(); audio.stop(); net.stop(); dns.stop(); events.stop(); logd.stop(); lights.stop(); sensors.stop(); mic.stop(); camera.stop(); venc.stop(); overlays.stop(); GlHost.stop()
-        extraStubs.forEach { it.stop() }; extraStubs.clear()
-        lmk?.stop(); lmk = null
-        Keeper.release(ctx)
-        setState(State.STOPPED)
+        lifecycle.stop(onRequest = {
+            stopping = true
+            setState(State.STOPPING)
+            adb.requestStop()
+            externalProcs.forEach { runCatching { it.destroyForcibly() } }
+        }) {
+            adb.stop()
+            if (admissionState.admitted) {
+                log("stopping system")
+                runCatching { guestRunner.run(listOf("/system/bin/sync"), 5_000, start = ::startCleanupSync) }
+                killAll()
+                props.stop(); props.stopAbstract();input.stop(); frames.stop(); ril.stop(); wifi?.stop(); vold.stop(); if (audioDelegate.isInitialized()) audio.stop(); net.stop(); dns.stop(); events.stop(); logd.stop(); lights.stop(); sensors.stop(); mic.stop(); camera.stop(); venc.stop(); overlays.stop(); GlHost.stop()
+                extraStubs.forEach { it.stop() }; extraStubs.clear()
+                lmk?.stop(); lmk = null
+                Keeper.release(ctx)
+            }
+            setState(State.STOPPED)
+        }
     }
 
+    /** The stop-time sync bypasses the closed start gate, but must still be reaped by killAll. */
+    internal fun startCleanupSync(builder: ProcessBuilder): Process = builder.start().also { externalProcs.add(it) }
+
     private fun killAll() {
-        val list = synchronized(procs) { procs.values.toList() }
+        val list = (synchronized(procs) { procs.values.toList() } + externalProcs.toList()).distinct()
         for (g in pgids) runCatching { android.system.Os.kill(-g, android.system.OsConstants.SIGKILL) }
-        list.forEach { runCatching { it.destroyForcibly() } }
+        list.forEach { it.destroyForcibly() }
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+        list.forEach { process ->
+            val remaining = deadline - System.nanoTime()
+            check(remaining > 0 && process.waitFor(remaining, java.util.concurrent.TimeUnit.NANOSECONDS)) {
+                "Guest process did not exit after termination"
+            }
+        }
+        externalProcs.clear()
         synchronized(procs) { procs.clear() }
         pgids.clear()
         killLeftovers()
@@ -1497,7 +1584,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     private fun compileVisibleApps() = runCatching {
         val mark = File(paths.bin, "compiled.speed")
         if (mark.isFile) return@runCatching
-        Thread.sleep(20_000)            // the first minute is busy enough (media scan, Google services)
+        repeat(100) { if (stopping) return@runCatching; Thread.sleep(200) } // the first minute is busy enough
         val home = guestShell("cmd package resolve-activity --brief -c android.intent.category.HOME -a android.intent.action.MAIN | tail -1", 30_000)
             .trim().substringBefore('/').takeIf { it.isNotEmpty() && ' ' !in it }
         val pkgs = listOfNotNull(home, "com.android.systemui", "com.android.settings").distinct()
@@ -1511,8 +1598,22 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         if (ok > 0) mark.writeText(pkgs.joinToString(" "))
     }
 
-    fun guestShell(cmd: String, timeoutMs: Long = 60_000): String =
+    fun guestShell(cmd: String, timeoutMs: Long = 60_000): String = lifecycle.run {
         guestRunner.run(listOf("/system/bin/sh", "-c", shellPrefix + cmd), timeoutMs).second
+    }
+
+    internal fun startExternalProcess(builder: ProcessBuilder): Process = lifecycle.create {
+        val process = builder.start()
+        externalProcs.add(process)
+        Thread({ try { process.waitFor() } finally { externalProcs.remove(process) } }, "vm-external-process").apply { isDaemon = true; start() }
+        process
+    }
+
+    internal fun startAdbServer(action: () -> Boolean): Boolean {
+        var started = false
+        lifecycle.ifRunning { if (state == State.RUNNING) started = action() }
+        return started
+    }
 
     /** Put in front of every guest shell command (menu, adb, terminal): PATH order and the tool wrappers. */
     val shellPrefix: String get() = "export PATH=/system/bin:/system/xbin:\$PATH; $toolWrappers"

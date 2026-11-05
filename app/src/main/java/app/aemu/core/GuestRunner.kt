@@ -26,6 +26,7 @@ class GuestRunner(
     var sdcardHost: File? = null
     /** user's extra qemu options from firmware settings: KEY=VALUE tokens become env vars, the rest go to qemu */
     var userQemuArgs: String = ""
+    var processStarter: (ProcessBuilder) -> Process = { it.start() }
 
     private val userTokens: List<String> get() = Regex("""("[^"]*"|\S+)""").findAll(userQemuArgs).map { it.value.trim('"') }.toList()
     private fun isEnvToken(t: String) = !t.startsWith("-") && Regex("^[A-Z_][A-Z0-9_]*=").containsMatchIn(t)
@@ -234,12 +235,13 @@ class GuestRunner(
     }
 
     /** Одноразовый запуск гостевой команды (am, pm, settings, sh -c …) с ожиданием вывода. */
-    fun run(argv: List<String>, timeoutMs: Long = 120_000, extra: Map<String, String> = emptyMap()): Pair<Int, String> {
+    fun run(argv: List<String>, timeoutMs: Long = 120_000, extra: Map<String, String> = emptyMap(),
+            start: (ProcessBuilder) -> Process = processStarter): Pair<Int, String> {
         if (!qemu.canExecute()) return -1 to "no qemu"
         val pb = ProcessBuilder(cmdline(argv)).directory(paths.bin).redirectErrorStream(true)
         pb.environment().clear()
         pb.environment().putAll(env(extra))
-        val p = pb.start()
+        val p = start(pb)
         val sb = StringBuilder()
         val t = Thread {
             runCatching { p.inputStream.bufferedReader().forEachLine { if (sb.length < 256_000) sb.append(it).append('\n') } }

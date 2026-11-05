@@ -519,48 +519,91 @@ object SuperImage {
         return b.int == GEOMETRY_MAGIC
     }
 
-    /** name → list of (offset in super, length) */
+    /** Strictly validate LP geometry, metadata and extents before exposing image ranges. */
     fun partitions(src: RandomSource): Map<String, List<Pair<Long, Long>>> {
-        val g = ByteBuffer.allocate(4096).order(ByteOrder.LITTLE_ENDIAN)
-        src.read(4096, g); g.flip()
-        if (g.getInt(0) != GEOMETRY_MAGIC) throw IOException("super: no LP geometry")
-        val metaMax = g.getInt(40).toLong()
-        // primary metadata slot 0 sits after the reserved area (4096) and both geometry copies (2 × 4096)
-        val hdrOff = 4096L + 2 * 4096
-        val h = ByteBuffer.allocate(256).order(ByteOrder.LITTLE_ENDIAN)
-        src.read(hdrOff, h); h.flip()
-        if (h.getInt(0) != HEADER_MAGIC) throw IOException("super: no LP header")
-        val headerSize = h.getInt(8)
-        val tablesSize = h.getInt(44)
-        fun desc(at: Int) = Triple(h.getInt(at), h.getInt(at + 4), h.getInt(at + 8))   // offset, count, entry size
-        val parts = desc(80)
-        val extents = desc(92)
-        val t = ByteBuffer.allocate(tablesSize).order(ByteOrder.LITTLE_ENDIAN)
-        src.read(hdrOff + headerSize, t); t.flip()
+        fun readAt(offset: Long, size: Int): ByteArray {
+            if (offset < 0 || size < 0 || offset > src.size || size.toLong() > src.size - offset)
+                throw IOException("super: truncated metadata")
+            val b = ByteBuffer.allocate(size)
+            src.read(offset, b)
+            if (b.hasRemaining()) throw IOException("super: short metadata read")
+            return b.array()
+        }
+        fun buf(bytes: ByteArray) = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        fun checksum(bytes: ByteArray, at: Int, len: Int = bytes.size): Boolean {
+            if (at < 0 || at + 32 > len || len > bytes.size) return false
+            val expected = bytes.copyOfRange(at, at + 32)
+            val copy = bytes.copyOf(len)
+            java.util.Arrays.fill(copy, at, at + 32, 0.toByte())
+            return java.security.MessageDigest.isEqual(expected, java.security.MessageDigest.getInstance("SHA-256").digest(copy))
+        }
+        val geometry = readAt(4096, 52)
+        val g = buf(geometry)
+        if (g.getInt(0) != GEOMETRY_MAGIC || g.getInt(4) != 52 || !checksum(geometry, 8))
+            throw IOException("super: invalid LP geometry")
+        val metaMax = g.getInt(40)
+        if (metaMax !in 128..(16 * 1024 * 1024) || g.getInt(44) <= 0 || g.getInt(48) <= 0)
+            throw IOException("super: bad geometry")
+        val hdrOff = 12288L
+        val prefix = buf(readAt(hdrOff, 128))
+        if (prefix.getInt(0) != HEADER_MAGIC || prefix.getShort(4).toInt() != 10)
+            throw IOException("super: invalid LP header")
+        val headerSize = prefix.getInt(8)
+        val tablesSize = prefix.getInt(44)
+        if (headerSize !in 128..4096 || tablesSize < 0 || headerSize.toLong() + tablesSize > metaMax)
+            throw IOException("super: invalid metadata size")
+        val header = readAt(hdrOff, headerSize)
+        if (!checksum(header, 12)) throw IOException("super: LP header checksum mismatch")
+        val h = buf(header)
+        val tableBytes = readAt(hdrOff + headerSize, tablesSize)
+        if (!java.security.MessageDigest.isEqual(header.copyOfRange(48, 80), java.security.MessageDigest.getInstance("SHA-256").digest(tableBytes)))
+            throw IOException("super: LP table checksum mismatch")
+        val t = buf(tableBytes)
+        fun desc(at: Int, minimumSize: Int): Triple<Int, Int, Int> {
+            val offset = h.getInt(at); val count = h.getInt(at + 4); val entrySize = h.getInt(at + 8)
+            if (offset < 0 || count < 0 || entrySize < 0 || (count > 0 && entrySize < minimumSize) ||
+                offset.toLong() + count.toLong() * entrySize > tablesSize)
+                throw IOException("super: invalid table descriptor")
+            return Triple(offset, count, entrySize)
+        }
+        val parts = desc(80, 48)
+        val extents = desc(92, 24)
+        desc(104, 48)
+        desc(116, 64)
         val ext = (0 until extents.second).map { i ->
             val o = extents.first + i * extents.third
-            Triple(t.getLong(o), t.getInt(o + 8), t.getLong(o + 12))   // sectors, target type (0 = linear), target data
+            val sectors = t.getLong(o); val type = t.getInt(o + 8); val start = t.getLong(o + 12); val device = t.getInt(o + 20)
+            if (sectors <= 0 || start < 0 || type != 0 || device != 0 || start > Long.MAX_VALUE / 512 || sectors > Long.MAX_VALUE / 512)
+                throw IOException("super: unsupported or invalid extent")
+            val offset = start * 512; val length = sectors * 512
+            if (offset > src.size || length > src.size - offset) throw IOException("super: extent outside image")
+            offset to length
         }
         val out = LinkedHashMap<String, List<Pair<Long, Long>>>()
         for (i in 0 until parts.second) {
             val o = parts.first + i * parts.third
             val nb = ByteArray(36); t.position(o); t.get(nb)
             val name = String(nb, 0, nb.indexOf(0).let { if (it < 0) 36 else it }, Charsets.US_ASCII)
-            val first = t.getInt(o + 40)
-            val num = t.getInt(o + 44)
-            out[name] = (first until first + num).mapNotNull { e ->
-                ext.getOrNull(e)?.takeIf { it.second == 0 }?.let { (sectors, _, start) -> start * 512 to sectors * 512 }
-            }
+            val first = t.getInt(o + 40); val num = t.getInt(o + 44)
+            if (!name.matches(Regex("[A-Za-z0-9_.-]+")) || out.containsKey(name) || first < 0 || num < 0 ||
+                first.toLong() + num > ext.size) throw IOException("super: invalid partition")
+            out[name] = ext.subList(first, first + num).toList()
         }
-        if (metaMax <= 0) throw IOException("super: bad geometry")
         return out
     }
+
 }
 
 /** A partition assembled from extents of another source (super.img). */
-class ExtentSource(private val src: RandomSource, private val extents: List<Pair<Long, Long>>) : RandomSource {
-    override val size: Long = extents.sumOf { it.second }
+class ExtentSource(private val src: RandomSource, private val extents: List<Pair<Long, Long>>, private val strict: Boolean = false) : RandomSource {
+    override val size: Long = extents.fold(0L) { sum, (offset, length) ->
+        if (offset < 0 || length < 0 || sum > Long.MAX_VALUE - length ||
+            (strict && (offset > src.size || length > src.size - offset))) throw IOException("invalid extent")
+        sum + length
+    }
     override fun read(pos: Long, dst: ByteBuffer) {
+        if (pos < 0 || (strict && (pos > size || dst.remaining().toLong() > size - pos)))
+            throw IOException("extent read outside partition")
         var p = pos
         while (dst.hasRemaining()) {
             if (p >= size) { while (dst.hasRemaining()) dst.put(0); return }
@@ -570,8 +613,11 @@ class ExtentSource(private val src: RandomSource, private val extents: List<Pair
             val n = minOf(dst.remaining().toLong(), len - inExt).toInt()
             val lim = dst.limit()
             dst.limit(dst.position() + n)
-            src.read(off + inExt, dst)
-            dst.limit(lim)
+            try {
+                val expectedPosition = dst.position() + n
+                src.read(off + inExt, dst)
+                if (strict && dst.position() != expectedPosition) throw IOException("short extent read")
+            } finally { dst.limit(lim) }
             p += n
         }
     }

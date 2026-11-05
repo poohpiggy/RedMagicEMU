@@ -21,7 +21,8 @@ import java.nio.ByteOrder
  * Compressed data is LZ4 (what Android's build uses); with the zero padding feature it is right aligned in its
  * blocks. Directories are blocks of 12-byte entries with the names behind them.
  */
-class ErofsImage(private val src: RandomSource) : TreeSource {
+class ErofsImage(private val src: RandomSource, private val cancelled: () -> Boolean = { false }) : TreeSource {
+    private fun checkCancelled() { if (cancelled()) throw ImportCancelledException(); if (Thread.currentThread().isInterrupted) throw IOException("EROFS: cancelled") }
     private val blkBits: Int
     private val blk: Int
     private val metaBase: Long
@@ -29,6 +30,7 @@ class ErofsImage(private val src: RandomSource) : TreeSource {
     private val packedNid: Long
     private val zeroPadding: Boolean
     private var packed: ByteArray? = null
+    private var loadingPacked = false
 
     private class Inode(val mode: Int, val size: Long, val layout: Int, val u: Int, val body: Long)
     private class Extent(val lofs: Long, val type: Int, var pa: Long, var plen: Int) {
@@ -51,13 +53,17 @@ class ErofsImage(private val src: RandomSource) : TreeSource {
     }
 
     private fun bytes(pos: Long, n: Int): ByteArray {
+        if (pos < 0 || n < 0 || pos > src.size || n.toLong() > src.size - pos)
+            throw IOException("EROFS: read outside image")
         val b = ByteBuffer.allocate(n)
         src.read(pos, b)
+        if (b.hasRemaining()) throw IOException("EROFS: truncated image")
         return b.array()
     }
     private fun le(pos: Long, n: Int): ByteBuffer = ByteBuffer.wrap(bytes(pos, n)).order(ByteOrder.LITTLE_ENDIAN)
 
     private fun inode(nid: Long): Inode {
+        if (nid < 0 || nid > (Long.MAX_VALUE - metaBase) / 32) throw IOException("EROFS: invalid inode")
         val pos = metaBase + nid * 32
         val b = le(pos, 64)
         val format = b.getShort(0).toInt() and 0xffff
@@ -65,39 +71,58 @@ class ErofsImage(private val src: RandomSource) : TreeSource {
         val xattrCount = b.getShort(2).toInt() and 0xffff
         val xattrSize = if (xattrCount == 0) 0 else 12 + (xattrCount - 1) * 4
         val size = if (extended) b.getLong(8) else b.getInt(8).toLong() and 0xffffffffL
+        if (size < 0) throw IOException("EROFS: invalid inode size")
         return Inode(b.getShort(4).toInt() and 0xffff, size, (format shr 1) and 7, b.getInt(if (extended) 16 else 16),
             pos + (if (extended) 64 else 32) + xattrSize)
     }
 
     override fun walk(visit: (path: String, isDir: Boolean, link: String?, mode: Int, size: Long, data: (() -> InputStream)?) -> Unit) {
+        checkCancelled()
         walkDir(rootNid, "", 0, visit)
     }
 
     private fun walkDir(nid: Long, path: String, depth: Int,
                         visit: (String, Boolean, String?, Int, Long, (() -> InputStream)?) -> Unit) {
-        if (depth > 64) return
+        checkCancelled()
+        if (depth > 64) throw IOException("EROFS: directory nesting limit")
         val dir = inode(nid)
+        if (dir.mode and 0xf000 != 0x4000 || dir.size > 16L * 1024 * 1024)
+            throw IOException("EROFS: invalid or oversized directory")
         val data = content(dir).use { it.readBytes() }
+        if (data.size.toLong() != dir.size) throw IOException("EROFS: truncated directory")
         val b = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
         var at = 0
         while (at < data.size) {
             val end = minOf(at + blk, data.size)
-            val count = (b.getShort(at + 8).toInt() and 0xffff) / 12
+            if (end - at < 12) throw IOException("EROFS: truncated directory entry")
+            val firstName = b.getShort(at + 8).toInt() and 0xffff
+            if (firstName < 12 || firstName % 12 != 0 || firstName > end - at)
+                throw IOException("EROFS: invalid directory entry offsets")
+            val count = firstName / 12
             for (i in 0 until count) {
+                if (i and 255 == 0) checkCancelled()
                 val e = at + i * 12
                 val child = b.getLong(e)
                 val from = at + (b.getShort(e + 8).toInt() and 0xffff)
                 var to = if (i + 1 < count) at + (b.getShort(e + 20).toInt() and 0xffff) else end
-                if (from >= end || to > end || to < from) throw IOException("EROFS: broken directory $path")
+                if (from < at + firstName || from >= end || to > end || to < from) throw IOException("EROFS: broken directory $path")
                 while (to > from && data[to - 1].toInt() == 0) to--
                 val name = String(data, from, to - from, Charsets.UTF_8)
-                if (name == "." || name == ".." || name.isEmpty() || name.contains('/')) continue
+                if (name == "." || name == "..") continue
+                if (name.isEmpty() || name.contains('/') || name.contains('\\') || name.contains('\u0000'))
+                    throw IOException("EROFS: invalid directory name")
                 val p = if (path.isEmpty()) name else "$path/$name"
                 val ino = inode(child)
                 when (ino.mode and 0xf000) {
                     0x4000 -> { visit(p, true, null, ino.mode, 0, null); walkDir(child, p, depth + 1, visit) }
-                    0xa000 -> visit(p, false, String(content(ino).use { it.readBytes() }, Charsets.UTF_8), ino.mode, 0, null)
+                    0xa000 -> {
+                        if (ino.size > 4096) throw IOException("EROFS: oversized symbolic link")
+                        val link = content(ino).use { it.readBytes() }
+                        if (link.size.toLong() != ino.size) throw IOException("EROFS: truncated symbolic link")
+                        visit(p, false, String(link, Charsets.UTF_8), ino.mode, 0, null)
+                    }
                     0x8000 -> visit(p, false, null, ino.mode, ino.size) { content(ino) }
+                    else -> throw IOException("EROFS: unsupported inode type at $p")
                 }
             }
             at += blk
@@ -122,11 +147,19 @@ class ErofsImage(private val src: RandomSource) : TreeSource {
         private val one = ByteArray(1)
         override fun read(): Int = if (read(one, 0, 1) < 0) -1 else one[0].toInt() and 0xff
         override fun read(b: ByteArray, off: Int, len: Int): Int {
+            checkCancelled()
+            if (len == 0) return 0
             while (part < parts.size && done >= parts[part].second) { part++; done = 0 }
             if (part >= parts.size) return -1
             val (pos, size) = parts[part]
             val n = minOf(len.toLong(), size - done).toInt()
-            if (pos < 0) java.util.Arrays.fill(b, off, off + n, 0) else src.read(pos + done, ByteBuffer.wrap(b, off, n))
+            if (pos < 0) java.util.Arrays.fill(b, off, off + n, 0) else {
+                if (pos > src.size || done > src.size - pos || n.toLong() > src.size - pos - done)
+                    throw IOException("EROFS: data outside image")
+                val dst = ByteBuffer.wrap(b, off, n)
+                src.read(pos + done, dst)
+                if (dst.hasRemaining()) throw IOException("EROFS: truncated data")
+            }
             done += n
             return n
         }
@@ -136,10 +169,15 @@ class ErofsImage(private val src: RandomSource) : TreeSource {
         val chunkBits = blkBits + (ino.u and 0x1f)
         val indexes = ino.u and 0x20 != 0
         val unit = if (indexes) 8 else 4
-        val count = ((ino.size + (1L shl chunkBits) - 1) shr chunkBits).toInt()
+        if (chunkBits !in 9..46) throw IOException("EROFS: invalid chunk size")
+        val chunkSize = 1L shl chunkBits
+        val countLong = ino.size / chunkSize + if (ino.size % chunkSize == 0L) 0 else 1
+        if (countLong > MAX_INDEX_BYTES / unit) throw IOException("EROFS: oversized chunk table")
+        val count = countLong.toInt()
         val table = le((ino.body + unit - 1) / unit * unit, count * unit)
         val parts = ArrayList<Pair<Long, Long>>(count)
         for (i in 0 until count) {
+            if (i and 1023 == 0) checkCancelled()
             val addr = table.getInt(i * unit + (if (indexes) 4 else 0))
             val len = minOf(1L shl chunkBits, ino.size - (i.toLong() shl chunkBits))
             parts.add((if (addr == -1) -1L else addr.toLong() and 0xffffffffL shl blkBits) to len)
@@ -156,12 +194,17 @@ class ErofsImage(private val src: RandomSource) : TreeSource {
         val clusterBits = h.get(7).toInt() and 0xff
         if (clusterBits and 0x80 != 0) {     // the whole file is in the packed inode
             val off = h.getLong(0) and Long.MAX_VALUE
-            return ByteArrayInputStream(packedData(), off.toInt(), ino.size.toInt())
+            val data = packedData()
+            if (off > data.size || ino.size > data.size - off) throw IOException("EROFS: invalid packed range")
+            return ByteArrayInputStream(data, off.toInt(), ino.size.toInt())
         }
         val advise = h.getShort(4).toInt() and 0xffff
         val algo = h.get(6).toInt() and 0xff
         val lcBits = blkBits + (clusterBits and 7)
-        val total = ((ino.size + (1L shl lcBits) - 1) shr lcBits).toInt()
+        val clusterSize = 1L shl lcBits
+        val totalLong = ino.size / clusterSize + if (ino.size % clusterSize == 0L) 0 else 1
+        if (totalLong > (MAX_INDEX_BYTES - 64 - blk) / 8) throw IOException("EROFS: oversized compressed index")
+        val total = totalLong.toInt()
         val bigPcluster = advise and 2 != 0
         val full = ino.layout == 1
         val ebase = hdrPos + 8 + (if (full) 8 else 0)
@@ -178,6 +221,7 @@ class ErofsImage(private val src: RandomSource) : TreeSource {
         if (initial4 == 8) initial4 = 0
         val count2 = if (advise and 1 != 0 && initial4 < total) (total - initial4) / 16 * 16 else 0
         for (lcn in 0 until total) {
+            if (lcn and 1023 == 0) checkCancelled()
             val type: Int; val lo: Int; var pblk = 0L; var cblk = 0
             if (full) {
                 val e = (ebase - areaAt).toInt() + lcn * 8
@@ -263,6 +307,7 @@ class ErofsImage(private val src: RandomSource) : TreeSource {
             private val one = ByteArray(1)
             override fun read(): Int = if (read(one, 0, 1) < 0) -1 else one[0].toInt() and 0xff
             override fun read(b: ByteArray, off: Int, len: Int): Int {
+                checkCancelled()
                 while (at >= buf.size) {
                     if (next >= extents.size) return -1
                     buf = extent(extents[next++], algo, interlaced); at = 0
@@ -277,7 +322,11 @@ class ErofsImage(private val src: RandomSource) : TreeSource {
 
     private fun extent(e: Extent, algo: Int, interlaced: Boolean): ByteArray {
         val out = ByteArray(e.llen.toInt())
-        if (e.fragment) { System.arraycopy(packedData(), e.pa.toInt(), out, 0, out.size); return out }
+        if (e.fragment) {
+            val data = packedData()
+            if (e.pa < 0 || e.pa > data.size || out.size.toLong() > data.size - e.pa) throw IOException("EROFS: invalid fragment range")
+            System.arraycopy(data, e.pa.toInt(), out, 0, out.size); return out
+        }
         val raw = bytes(e.pa, e.plen)
         if (e.type == PLAIN) {
             if (out.size > raw.size) throw IOException("EROFS: an uncompressed extent longer than its blocks")
@@ -297,7 +346,7 @@ class ErofsImage(private val src: RandomSource) : TreeSource {
                 var o = 0
                 while (o < out.size && !inf.finished()) {
                     val n = inf.inflate(out, o, out.size - o)
-                    if (n == 0 && (inf.needsInput() || inf.needsDictionary())) break
+                    if (n == 0) break
                     o += n
                 }
                 if (o < out.size) throw IOException("EROFS: DEFLATE data ends early")
@@ -315,21 +364,33 @@ class ErofsImage(private val src: RandomSource) : TreeSource {
         var i = from
         var o = 0
         while (i < inp.size && o < out.size) {
+            checkCancelled()
             val token = inp[i++].toInt() and 0xff
             var lit = token shr 4
-            if (lit == 15) while (i < inp.size) { val v = inp[i++].toInt() and 0xff; lit += v; if (v != 255) break }
-            val nl = minOf(lit, out.size - o, inp.size - i)
+            if (lit == 15) while (true) {
+                if (i >= inp.size) throw IOException("EROFS: truncated LZ4 literal length")
+                val v = inp[i++].toInt() and 0xff
+                if (lit > Int.MAX_VALUE - v) throw IOException("EROFS: invalid LZ4 literal length")
+                lit += v; if (v != 255) break
+            }
+            if (lit > inp.size - i) throw IOException("EROFS: truncated LZ4 literal")
+            val nl = minOf(lit, out.size - o)
             System.arraycopy(inp, i, out, o, nl)
             i += lit; o += nl
             if (o >= out.size || i + 2 > inp.size) break
             val dist = (inp[i].toInt() and 0xff) or ((inp[i + 1].toInt() and 0xff) shl 8)
             i += 2
             var len = token and 15
-            if (len == 15) while (i < inp.size) { val v = inp[i++].toInt() and 0xff; len += v; if (v != 255) break }
+            if (len == 15) while (true) {
+                if (i >= inp.size) throw IOException("EROFS: truncated LZ4 match length")
+                val v = inp[i++].toInt() and 0xff
+                if (len > Int.MAX_VALUE - v - 4) throw IOException("EROFS: invalid LZ4 match length")
+                len += v; if (v != 255) break
+            }
             len += 4
             if (dist == 0 || dist > o) throw IOException("EROFS: broken LZ4 data")
             var s = o - dist
-            val end = minOf(o + len, out.size)
+            val end = o + minOf(len, out.size - o)
             while (o < end) out[o++] = out[s++]
         }
         if (o < out.size) throw IOException("EROFS: LZ4 data ends early")
@@ -338,9 +399,16 @@ class ErofsImage(private val src: RandomSource) : TreeSource {
     private fun packedData(): ByteArray {
         packed?.let { return it }
         if (packedNid < 0) throw IOException("EROFS: a fragment without the packed inode")
-        val ino = inode(packedNid)
-        if (ino.size > 512L shl 20) throw IOException("EROFS: packed inode of ${ino.size shr 20} MB")
-        return content(ino).use { it.readBytes() }.also { packed = it }
+        if (loadingPacked) throw IOException("EROFS: recursive packed inode")
+        loadingPacked = true
+        try {
+            val ino = inode(packedNid)
+            if (ino.size > 512L shl 20) throw IOException("EROFS: packed inode of ${ino.size shr 20} MB")
+            val result = content(ino).use { it.readBytes() }
+            if (result.size.toLong() != ino.size) throw IOException("EROFS: truncated packed inode")
+            packed = result
+            return result
+        } finally { loadingPacked = false }
     }
 
     companion object {
@@ -350,5 +418,6 @@ class ErofsImage(private val src: RandomSource) : TreeSource {
         private const val HEAD2 = 3
         private const val CBLKCNT = 0x800
         private const val MAX_EXTENT = 256L shl 20
+        private const val MAX_INDEX_BYTES = 32 * 1024 * 1024
     }
 }

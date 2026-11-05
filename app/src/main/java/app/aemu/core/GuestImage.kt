@@ -190,6 +190,8 @@ data class GuestImage(
     val profileVersion: Int = 0,
     /** container: id of the image whose /system this one shares (its own /data, card and settings) */
     val baseId: String = "",
+    /** The actual matching fingerprint read during import; null for older instances. */
+    val fingerprint: String? = null,
 ) {
     val displayVersion: String get() = "Android $release (API $api)"
 
@@ -218,6 +220,7 @@ data class GuestImage(
         .put("lastBootMs", lastBootMs).put("bootCount", bootCount)
         .put("profileVersion", profileVersion)
         .put("baseId", baseId)
+        .apply { if (fingerprint != null) put("fingerprint", fingerprint) }
 
     companion object {
         fun fromJson(o: JSONObject): GuestImage {
@@ -252,6 +255,7 @@ data class GuestImage(
                 bootCount = o.optInt("bootCount", 0),
                 profileVersion = o.optInt("profileVersion", 0),
                 baseId = o.optString("baseId", ""),
+                fingerprint = if (o.has("fingerprint") && !o.isNull("fingerprint")) o.optString("fingerprint", "") else null,
             )
         }
     }

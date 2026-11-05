@@ -116,7 +116,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         askPermissions()
-        handleView(intent)
+        if (shouldHandleInitialIntent(restored = savedInstanceState != null)) handleView(intent)
         setContent { AemuTheme { Library(model) } }
     }
 
@@ -159,307 +159,71 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** "4.0.4" < "4.1" < "10": numeric parts compared one by one */
-private fun releaseKey(r: String): List<Int> = r.split('.', '-', ' ').map { p -> p.takeWhile { it.isDigit() }.toIntOrNull() ?: 0 }
-private val releaseOrder = Comparator<GuestImage> { a, b ->
-    if (a.api != b.api) return@Comparator a.api.compareTo(b.api)
-    val x = releaseKey(a.release); val y = releaseKey(b.release)
-    for (i in 0 until maxOf(x.size, y.size)) { val c = x.getOrElse(i) { 0 }.compareTo(y.getOrElse(i) { 0 }); if (c != 0) return@Comparator c }
-    0
-}
-
-fun sortImages(ctx: Context, list: List<GuestImage>, mode: Int): List<GuestImage> {
-    val byName = compareBy<GuestImage, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
-    return when (mode) {
-        app.aemu.AppPrefs.SORT_NAME -> list.sortedWith(byName)
-        app.aemu.AppPrefs.SORT_SKIN -> list.sortedWith(compareBy<GuestImage, String>(String.CASE_INSENSITIVE_ORDER) { it.skin }.then(releaseOrder).then(byName))
-        app.aemu.AppPrefs.SORT_LAST_RUN -> list.sortedWith(compareByDescending<GuestImage> { app.aemu.AppPrefs.lastRun(ctx, it.id).takeIf { t -> t > 0 } ?: it.createdAt }.then(byName))
-        app.aemu.AppPrefs.SORT_SIZE -> list.sortedWith(compareByDescending<GuestImage> { it.sizeBytes }.then(byName))
-        else -> list.sortedWith(releaseOrder.then(byName))
-    }
-}
-
-@Composable
-fun SortRow(mode: Int, onMode: (Int) -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    val labels = listOf(R.string.sort_version, R.string.sort_name, R.string.sort_skin, R.string.sort_last_run, R.string.sort_size)
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-        Box {
-            TextButton(onClick = { open = true }) {
-                Icon(Icons.Rounded.SwapVert, null)
-                Spacer(Modifier.width(6.dp))
-                Text(stringResource(R.string.sort_by, stringResource(labels[mode.coerceIn(0, labels.lastIndex)])))
-            }
-            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                labels.forEachIndexed { i, l ->
-                    DropdownMenuItem(text = { Text(stringResource(l)) }, onClick = { open = false; onMode(i) },
-                        trailingIcon = { if (i == mode) Icon(Icons.Rounded.Check, null) })
-                }
-            }
-        }
-    }
-}
+internal fun shouldHandleInitialIntent(restored: Boolean): Boolean = !restored
 
 @Composable
 fun Library(model: LibraryModel) {
-    val all by model.images.collectAsState()
-    var sortMode by remember { mutableStateOf(app.aemu.AppPrefs.sortMode(model.getApplication())) }
-    val images = remember(all, sortMode) { sortImages(model.getApplication(), all, sortMode) }
+    val images by model.images.collectAsState()
     val imp by model.import.collectAsState()
+    val importRecovery by model.importRecovery.collectAsState()
     val ctx = LocalContext.current
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { model.import(it) } }
     var settingsFor by remember { mutableStateOf<GuestImage?>(null) }
-    var deleteFor by remember { mutableStateOf<GuestImage?>(null) }
-    var resetFor by remember { mutableStateOf<GuestImage?>(null) }
-    var renameFor by remember { mutableStateOf<GuestImage?>(null) }
-    var help by remember { mutableStateOf(false) }
-    var addMenu by remember { mutableStateOf(false) }
-    var library by remember { mutableStateOf(false) }
-    var containerFrom by remember { mutableStateOf<GuestImage?>(null) }
-    val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+    val state = singleSystemState(images?.size ?: 0, imp.active, images != null, imp.done != null)
 
-    Scaffold(
-        modifier = Modifier.nestedScroll(scroll.nestedScrollConnection),
-        topBar = {
-            LargeFlexibleTopAppBar(
-                title = { Text(stringResource(R.string.app_name)) },
-                subtitle = { Text(stringResource(R.string.lib_subtitle)) },
-                actions = { IconButton(onClick = { help = true }) { Icon(Icons.Rounded.Info, stringResource(R.string.help)) }
-                    IconButton(onClick = { ctx.startActivity(Intent(ctx, AppSettingsActivity::class.java)) }) { Icon(Icons.Rounded.Settings, stringResource(R.string.settings)) } },
-                scrollBehavior = scroll,
-            )
-        },
-        floatingActionButton = {
-            HomeFab(expanded = addMenu, onToggle = { addMenu = it },
-                onImport = { pick.launch(arrayOf("*/*")) }, onLibrary = { library = true })
-        },
-    ) { pad ->
-        val full: androidx.compose.foundation.lazy.grid.LazyGridItemSpanScope.() -> androidx.compose.foundation.lazy.grid.GridItemSpan =
-            { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }
-        androidx.compose.foundation.lazy.grid.LazyVerticalGrid(
-            columns = androidx.compose.foundation.lazy.grid.GridCells.Adaptive(148.dp),
-            modifier = Modifier.fillMaxSize().padding(pad),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 120.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            item(span = full) { StorageAccessCard() }
-            item(span = full) {
-                AnimatedVisibility(imp.active || imp.error != null || imp.done != null) {
-                    ImportCard(imp, onCancel = model::cancelImport, onDismiss = model::dismissImport)
+    Scaffold(topBar = {
+        LargeFlexibleTopAppBar(title = { Text(stringResource(R.string.app_name)) }, actions = {
+            IconButton(onClick = { ctx.startActivity(Intent(ctx, AppSettingsActivity::class.java)) }) {
+                Icon(Icons.Rounded.Settings, stringResource(R.string.settings))
+            }
+        })
+    }) { pad ->
+        Column(Modifier.fillMaxSize().padding(pad).verticalScroll(rememberScrollState()).padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            StorageAccessCard()
+            importRecovery.token?.let { displayed ->
+                Card {
+                    Column(Modifier.padding(20.dp)) {
+                        Text(stringResource(R.string.import_interrupted), style = MaterialTheme.typography.titleMedium)
+                        TextButton(onClick = { model.dismissInterruptedImport(displayed) }) { Text(stringResource(R.string.ok)) }
+                    }
                 }
             }
-            if (images.isEmpty() && !imp.active) item(span = full) { EmptyState(onHelp = { help = true }) }
-            if (images.size > 1) item(span = full) { SortRow(sortMode) { m -> sortMode = m; app.aemu.AppPrefs.setSortMode(ctx, m) } }
-            items(images.size, key = { images[it].id }) { i ->
-                val img = images[i]
-                MachineCard(
-                    img,
-                    baseName = images.firstOrNull { it.id == img.baseId }?.name,
-                    modifier = Modifier.animateItem(),
-                    onStart = { VmActivity.start(ctx, img.id) },
-                    onSettings = { settingsFor = img },
-                    onRename = { renameFor = img },
-                    onNewMachine = { containerFrom = img },
-                    onReset = { resetFor = img },
-                    onDelete = { deleteFor = img },
-                )
+            importRecovery.error?.let { error ->
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                    Column(Modifier.padding(20.dp)) {
+                        Text(stringResource(R.string.import_recovery_error), style = MaterialTheme.typography.titleMedium)
+                        Text(error)
+                        TextButton(onClick = model::retryImportRecovery) { Text(stringResource(R.string.retry)) }
+                    }
+                }
+            }
+            if (imp.active || imp.error != null || imp.cancelled || imp.done != null) {
+                ImportCard(imp, onCancel = model::cancelImport, onDismiss = model::dismissImport, canDismiss = state != SingleSystemState.LOADING)
+            }
+            when (state) {
+                SingleSystemState.EMPTY -> {
+                    Text(stringResource(R.string.single_not_imported), style = MaterialTheme.typography.titleLarge)
+                    Text(stringResource(R.string.single_target))
+                    Button(onClick = { pick.launch(arrayOf("*/*")) }) { Text(stringResource(R.string.single_choose)) }
+                }
+                SingleSystemState.LOADING -> LoadingIndicator()
+                SingleSystemState.IMPORTING -> Unit
+                SingleSystemState.CONFLICT -> Text(stringResource(R.string.single_conflict), color = MaterialTheme.colorScheme.error)
+                SingleSystemState.READY -> {
+                    val img = images!!.single()
+                    Text(stringResource(R.string.single_ready), style = MaterialTheme.typography.titleLarge)
+                    Text(stringResource(R.string.single_target))
+                    Button(onClick = { VmActivity.start(ctx, img.id) }) { Text(stringResource(R.string.start)) }
+                    TextButton(onClick = { settingsFor = img }) { Text(stringResource(R.string.settings)) }
+                }
             }
         }
     }
-
     settingsFor?.let { img ->
         SettingsSheet(img, onDismiss = { settingsFor = null }, onSave = { s -> model.updateSettings(img, s); settingsFor = null })
     }
-    resetFor?.let { img ->
-        AlertDialog(
-            onDismissRequest = { resetFor = null },
-            icon = { Icon(Icons.Rounded.Delete, null) },
-            title = { Text(stringResource(R.string.reset_title, img.name)) },
-            text = { Text(stringResource(R.string.reset_text)) },
-            confirmButton = { Button(onClick = {
-                resetFor = null
-                if (model.vmRunning()) android.widget.Toast.makeText(ctx, R.string.reset_running, android.widget.Toast.LENGTH_LONG).show()
-                else model.resetData(img)
-            }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text(stringResource(R.string.reset_data)) } },
-            dismissButton = { TextButton(onClick = { resetFor = null }) { Text(stringResource(R.string.cancel)) } },
-        )
-    }
-    deleteFor?.let { img ->
-AlertDialog(
-            onDismissRequest = { deleteFor = null },
-            icon = { Icon(Icons.Rounded.Delete, null) },
-            title = { Text(stringResource(R.string.delete_title, img.name)) },
-            text = { Text(stringResource(R.string.delete_text, Formatter.formatShortFileSize(ctx, img.sizeBytes))) },
-            confirmButton = { Button(onClick = { model.delete(img); deleteFor = null },
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text(stringResource(R.string.delete)) } },
-            dismissButton = { TextButton(onClick = { deleteFor = null }) { Text(stringResource(R.string.cancel)) } },
-        )
-    }
-    renameFor?.let { img ->
-        var name by remember { mutableStateOf(img.name) }
-        AlertDialog(
-            onDismissRequest = { renameFor = null },
-            title = { Text(stringResource(R.string.name)) },
-            text = { OutlinedTextField(value = name, onValueChange = { name = it }, singleLine = true) },
-            confirmButton = { Button(onClick = { model.rename(img, name.trim().ifEmpty { img.name }); renameFor = null }) { Text(stringResource(R.string.save)) } },
-            dismissButton = { TextButton(onClick = { renameFor = null }) { Text(stringResource(R.string.cancel)) } },
-        )
-    }
-    if (help) HelpDialog(onDismiss = { help = false })
-    if (library) LibrarySheet(images.filter { it.baseId.isEmpty() }, onDismiss = { library = false },
-        onImportFile = { library = false; pick.launch(arrayOf("*/*")) },
-        onImportFolder = { f -> library = false; model.import(android.net.Uri.fromFile(f)) },
-        onNewMachine = { library = false; containerFrom = it })
-    containerFrom?.let { src -> ContainerDialog(src, images, onDismiss = { containerFrom = null },
-        onCreate = { from, name, copy, settings -> containerFrom = null; model.clone(from, name, copy, settings) }) }
 
-
-}
-
-@Composable
-private fun ContainerDialog(
-    src: GuestImage,
-    images: List<GuestImage>,
-    onDismiss: () -> Unit,
-    onCreate: (GuestImage, String, Boolean, app.aemu.core.VmSettings) -> Unit
-) {
-    var from by remember { mutableStateOf(src) }
-    var name by remember(from) { mutableStateOf("${from.name} (${images.count { it.baseId == from.id || it.baseId == from.baseId.ifEmpty { "-" } } + 2})") }
-    var copy by remember { mutableStateOf(false) }
-    var preset by remember { mutableStateOf(1) } // 0: Perf, 1: Balanced, 2: Lite
-    var settings by remember(from) { mutableStateOf(from.settings) }
-    val has32 = app.aemu.core.CpuInfo.hasAArch32
-
-    fun applyPreset(p: Int) {
-        preset = p
-        settings = when (p) {
-            0 -> settings.copy(gpu = true, hwui = true, jit = true, lowRam = false, native32 = has32)
-            1 -> settings.copy(gpu = true, hwui = true, jit = true, lowRam = false, native32 = false)
-            else -> settings.copy(gpu = false, hwui = false, jit = true, lowRam = true, width = 480, height = 800, native32 = false)
-        }
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        icon = { Icon(Icons.Rounded.ContentCopy, null, tint = MaterialTheme.colorScheme.primary) },
-        title = {
-            Text(
-                stringResource(R.string.vmos_add_title),
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
-            )
-        },
-        text = {
-            Column(
-                Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                // Base ROM Card
-                Surface(
-                    shape = MaterialTheme.shapes.large,
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(Modifier.padding(12.dp)) {
-                        Text(
-                            stringResource(R.string.section_systems),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Text(
-                            "${from.name} · ${from.displayVersion}",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
-                        )
-                        Text(
-                            from.skin,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-
-                // Name field
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text(stringResource(R.string.name)) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                // Presets
-                Text(
-                    stringResource(R.string.vmos_preset_title),
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    FilterChip(
-                        selected = preset == 0,
-                        onClick = { applyPreset(0) },
-                        label = { Text(stringResource(R.string.vmos_preset_perf)) },
-                        leadingIcon = { Icon(Icons.Rounded.PlayArrow, null, Modifier.size(16.dp)) },
-                        modifier = Modifier.weight(1f)
-                    )
-                    FilterChip(
-                        selected = preset == 1,
-                        onClick = { applyPreset(1) },
-                        label = { Text(stringResource(R.string.vmos_preset_balanced)) },
-                        modifier = Modifier.weight(1f)
-                    )
-                    FilterChip(
-                        selected = preset == 2,
-                        onClick = { applyPreset(2) },
-                        label = { Text(stringResource(R.string.vmos_preset_lite)) },
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-
-                // Toggles
-                Row(
-                    Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium).clickable { copy = !copy },
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Checkbox(copy, { copy = it })
-                    Text(stringResource(R.string.container_copy_data), style = MaterialTheme.typography.bodyMedium)
-                }
-
-                if (has32) {
-                    Row(
-                        Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium).clickable {
-                            settings = settings.copy(native32 = !settings.native32)
-                        },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Checkbox(settings.native32, { settings = settings.copy(native32 = it) })
-                        Column(Modifier.weight(1f)) {
-                            Text(stringResource(R.string.vs_native32), style = MaterialTheme.typography.bodyMedium)
-                            Text(stringResource(R.string.vs_native32_sub), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                }
-
-                Text(
-                    stringResource(R.string.container_hint),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        },
-        confirmButton = {
-            Button(onClick = { onCreate(from, name.trim().ifEmpty { from.name }, copy, settings) }) {
-                Text(stringResource(R.string.container_create))
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
-        },
-    )
 }
 
 /** Доступ ко всем файлам: общая папка гостя в «Внутренний накопитель/AEmulator». */
@@ -511,7 +275,7 @@ private fun EmptyState(onHelp: () -> Unit) {
 }
 
 @Composable
-private fun ImportCard(s: ImportState, onCancel: () -> Unit, onDismiss: () -> Unit) {
+private fun ImportCard(s: ImportState, onCancel: () -> Unit, onDismiss: () -> Unit, canDismiss: Boolean = true) {
     Card(
         colors = CardDefaults.cardColors(containerColor = if (s.error != null) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer),
         shape = MaterialTheme.shapes.large,
@@ -521,7 +285,7 @@ private fun ImportCard(s: ImportState, onCancel: () -> Unit, onDismiss: () -> Un
                 if (s.active) LoadingIndicator(Modifier.size(40.dp)) else Icon(if (s.error != null) Icons.Rounded.Warning else Icons.Rounded.Android, null)
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(when { s.error != null -> stringResource(R.string.import_failed); s.active -> stringResource(R.string.import_running); else -> stringResource(R.string.import_done) },
+                    Text(when { s.error != null -> stringResource(R.string.import_failed); s.active -> stringResource(R.string.import_running); s.cancelled -> stringResource(R.string.import_cancelled); else -> stringResource(R.string.import_done) },
                         style = MaterialTheme.typography.titleMedium)
                     Text(s.file, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
@@ -536,13 +300,13 @@ private fun ImportCard(s: ImportState, onCancel: () -> Unit, onDismiss: () -> Un
                     Text(s.step, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 s.done != null -> {
-                    Text("${s.done.name} · ${s.done.displayVersion} · ${s.done.skin}", style = MaterialTheme.typography.bodyMedium)
-                    s.done.warnings.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall) }
+                    Text(stringResource(R.string.single_target), style = MaterialTheme.typography.bodyMedium)
+                    visibleImportWarnings(s.done.warnings).forEach { Text("• $it", style = MaterialTheme.typography.bodySmall) }
                 }
             }
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                if (s.active) TextButton(onClick = onCancel) { Text(stringResource(R.string.cancel)) } else TextButton(onClick = onDismiss) { Text(stringResource(R.string.ok)) }
+                if (s.active) TextButton(onClick = onCancel) { Text(stringResource(R.string.cancel)) } else TextButton(enabled = canDismiss, onClick = onDismiss) { Text(stringResource(R.string.ok)) }
             }
         }
     }

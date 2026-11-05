@@ -45,8 +45,8 @@ class Keeper : Service() {
             val open = PendingIntent.getActivity(ctx, 0, Intent(ctx, VmActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
             return Notification.Builder(ctx, CH)
-                .setContentTitle(ctx.getString(R.string.vm_running, title))
-                .setContentText(ctx.getString(R.string.vm_running_hint))
+                .setContentTitle(title)
+                .setContentText(ctx.getString(R.string.vm_process_active))
                 .setSmallIcon(R.drawable.ic_stat_vm)
                 .setContentIntent(open)
                 .setOngoing(true)

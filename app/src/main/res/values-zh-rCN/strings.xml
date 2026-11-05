@@ -20,6 +20,7 @@
     <string name="empty_title">还没有系统</string>
     <string name="empty_text">添加 REDMAGIC NX809J 原厂 Android 16 / API 36 / ARM64 固件。</string>
     <string name="empty_help">哪些文件可用？</string>
+    <string name="import_cancelled">已取消导入</string>
     <string name="import_failed">导入失败</string>
     <string name="import_running">正在导入固件</string>
     <string name="import_done">固件已添加</string>
@@ -216,4 +217,21 @@
     <string name="m_vnc">启动 VNC 服务器</string>
     <string name="m_vnc_stop">停止 VNC 服务器</string>
     <string name="m_vnc_started">VNC：%1$s，密码 %2$s</string>
+    <string name="single_not_imported">未导入</string>
+    <string name="single_target">REDMAGIC NX809J · Android 16 · API 36 · ARM64</string>
+    <string name="single_choose">选择指定固件</string>
+    <string name="single_ready">准备完成</string>
+    <string name="single_conflict">发现多个已有实例，请先处理后再启动。</string>
+    <string name="vm_process_active">虚拟系统进程活动中</string>
+    <string name="previous_boot_failed">上次启动失败，可以重试。</string>
+    <string name="previous_boot_interrupted">上次运行中断，可以重试。</string>
+    <string name="boot_history_error">无法读取或保存上次运行状态，请检查存储后重试。</string>
+    <string name="desktop_not_confirmed">系统报告启动完成；桌面尚未确认</string>
+    <string name="boot_unconfirmed_title">尚未确认启动</string>
+    <string name="boot_unconfirmed_message">五分钟后仍未确认系统启动，可能需要更多时间。</string>
+    <string name="boot_continue_waiting">继续等待</string>
+    <string name="boot_stop">停止</string>
+    <string name="stop_failed">无法停止系统</string>
+    <string name="import_interrupted">上次固件导入中断，请检查导入状态。</string>
+    <string name="import_recovery_error">无法检查未完成的导入数据</string>
 </resources>

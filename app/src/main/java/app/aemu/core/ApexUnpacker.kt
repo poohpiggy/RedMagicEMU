@@ -34,8 +34,7 @@ object ApexUnpacker {
                 // the package file out of the way, a "flattened package" of the same base name in its place
                 val flat = File(sysApex, pkg.name.removeSuffix(".apex").removeSuffix(".capex"))
                 pkg.renameTo(File(parked, "${sysApex.relativeTo(root).path.replace('/', '#')}#${pkg.name}"))
-                val up = "../".repeat(sysApex.relativeTo(root).path.count { it == '/' } + 1)
-                if (!flat.exists()) Os.symlink("${up}apex/$name", flat.path)
+                if (!flat.exists()) Os.symlink(ApexLink.relativeTarget(root, sysApex, name), flat.path)
                 done++
             }.onFailure { log("apex ${pkg.name}: ${it.message}") }
         }

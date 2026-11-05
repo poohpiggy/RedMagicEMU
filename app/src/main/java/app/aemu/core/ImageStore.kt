@@ -6,8 +6,8 @@ import org.json.JSONObject
 import java.io.File
 
 /** Расположение файлов одного образа внутри песочницы приложения. */
-class VmPaths(val ctx: Context, val id: String) {
-    val dir: File = File(ImageStore.imagesDir(ctx), id)
+class VmPaths(val ctx: Context, val id: String, private val directory: File? = null) {
+    val dir: File = directory ?: File(ImageStore.imagesDir(ctx), id)
     /** дерево гостя: сюда смотрит qemu через -L */
     val root: File = File(dir, "root")
     /** рабочий каталог: сокеты хоста, журналы, копии свойств */
@@ -36,21 +36,35 @@ object ImageStore {
 
     fun list(ctx: Context): List<GuestImage> =
         imagesDir(ctx).listFiles()?.mapNotNull { d ->
-            val f = File(d, "image.json")
-            if (!f.isFile) null else runCatching { GuestImage.fromJson(JSONObject(f.readText())) }.getOrNull()
+            get(ctx, d.name)
         }?.sortedByDescending { it.createdAt } ?: emptyList()
 
     fun get(ctx: Context, id: String): GuestImage? {
+        if (!InstancePathSafety.safeInstance(imagesDir(ctx), id)) return null
+        if (app.aemu.importer.PendingImports.isPublishing(VmPaths(ctx, id).dir)) return null
         val f = VmPaths(ctx, id).meta
-        return if (f.isFile) runCatching { GuestImage.fromJson(JSONObject(f.readText())) }.getOrNull() else null
+        return runCatching {
+            val dir = File(imagesDir(ctx).canonicalFile, id)
+            if (f.parentFile.canonicalFile != dir || f.canonicalFile != File(dir, "image.json")) null
+            else if (f.isFile) GuestImage.fromJson(JSONObject(f.readText())).takeIf { it.id == id } else null
+        }.getOrNull()
     }
 
     fun save(ctx: Context, img: GuestImage) {
-        val p = VmPaths(ctx, img.id)
-        p.dir.mkdirs()
-        val tmp = File(p.dir, "image.json.tmp")
-        tmp.writeText(img.toJson().toString(2))
-        tmp.renameTo(p.meta)
+        val images = imagesDir(ctx)
+        app.aemu.importer.PendingImports.withImagesLock(images) {
+            val paths = VmPaths(ctx, img.id)
+            if (!InstancePathSafety.safeInstance(images, img.id) ||
+                app.aemu.importer.PendingImports.isPublishing(paths.dir) ||
+                !java.nio.file.Files.isRegularFile(paths.meta.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                throw java.io.IOException("Cannot update missing or unfinished instance")
+            saveAt(paths.dir, img)
+        }
+    }
+
+    internal fun saveAt(dir: File, img: GuestImage) {
+        if (!dir.isDirectory && !dir.mkdirs()) throw java.io.IOException("Cannot create instance directory")
+        SafeMetadataStore.write(dir, img.toJson().toString(2).toByteArray(Charsets.UTF_8))
     }
 
     fun newId(ctx: Context): String {
@@ -61,89 +75,15 @@ object ImageStore {
         }
     }
 
-    /** Удаляет каталог образа, не проходя по символьным ссылкам наружу. */
-    fun delete(ctx: Context, id: String) {
-        wipe(VmPaths(ctx, id).dir)
-    }
+    /** Deletion is unavailable until it is coordinated with the VM process. */
+    @Suppress("UNUSED_PARAMETER")
+    fun delete(ctx: Context, id: String): Nothing =
+        throw IllegalStateException("Instance deletion is unavailable while VM coordination is incomplete")
 
-    /**
-     * New container of [src]'s firmware: a full own copy of the root including /system (flashing in one container
-     * never touches another), a fresh /data (factory reset: apps, settings and accounts start empty; dalvik-cache is kept
-     * so the first boot is quick) or a full copy of it, its own memory-card folder and settings.
-     */
-    fun clone(ctx: Context, src: GuestImage, name: String, copyData: Boolean, customSettings: VmSettings? = null, cancelled: () -> Boolean = { false }, progress: (String) -> Unit): GuestImage {
-        val from = VmPaths(ctx, src.id)
-        val need = du(from.root) + du(File(from.root, "system").canonicalFile).takeIf { File(from.root, "system").canonicalPath != File(from.root, "system").path } .let { it ?: 0 }
-        val free = imagesDir(ctx).usableSpace
-        if (need + (200L shl 20) > free) error("not enough space: need ${need shr 20} MB, free ${free shr 20} MB")
-        val id = newId(ctx)
-        val to = VmPaths(ctx, id)
-        try {
-            to.root.mkdirs()
-            val skipData = setOf("data", "system", "user", "property", "anr", "tombstones", "backup", "misc/wifi", "misc/keystore",
-                "local/tmp", "app", "app-private", "app-asec")
-            fun copy(a: File, b: File, rel: String) {
-                if (cancelled()) error("cancelled")
-                val st = runCatching { Os.lstat(a.path) }.getOrNull() ?: return
-                when {
-                    android.system.OsConstants.S_ISLNK(st.st_mode) -> runCatching { Os.symlink(Os.readlink(a.path), b.path) }
-                    android.system.OsConstants.S_ISDIR(st.st_mode) -> {
-                        b.mkdirs()
-                        for (c in a.list().orEmpty()) {
-                            val r = if (rel.isEmpty()) c else "$rel/$c"
-                            if (rel.isEmpty() && (c == "dev" || c == "proc")) continue
-                            if (rel.isEmpty() && c == "system") progress("system")
-                            if (!copyData && r.startsWith("data/") && r.removePrefix("data/") in skipData) { File(b, c).mkdirs(); continue }
-                            if (rel.isEmpty() && c == "data") progress("data")
-                            copy(File(a, c), File(b, c), r)
-                        }
-                    }
-                    android.system.OsConstants.S_ISREG(st.st_mode) -> {
-                        a.inputStream().use { i -> b.outputStream().use { i.copyTo(it, 1 shl 16) } }
-                        runCatching { Os.chmod(b.path, st.st_mode and 0xfff) }
-                    }
-                }
-            }
-            progress("root")
-            // an older container's /system may be a link to its original: copy what it points to
-            val sys = File(from.root, "system").canonicalFile
-            copy(from.root, to.root, "")
-            if (runCatching { android.system.OsConstants.S_ISLNK(Os.lstat(File(to.root, "system").path).st_mode) }.getOrDefault(false)) {
-                File(to.root, "system").delete(); copy(sys, File(to.root, "system"), "system")
-            }
-            File(to.root, "dev").mkdirs()
-            // ownership table is keyed by inode: the fresh copy gets its own on first boot
-            if (!copyData) { File(to.root, "dhd.owners").delete(); File(to.root, "dhd.owners.seeded").delete() }
-            listOf("props.base").forEach { n -> File(from.dir, n).takeIf { it.isFile }?.copyTo(File(to.dir, n), true) }
-            val img = src.copy(id = id, name = name, baseId = src.baseId.ifEmpty { src.id },
-                settings = customSettings ?: src.settings,
-                createdAt = System.currentTimeMillis(),
-                lastBootMs = 0, bootCount = 0, sizeBytes = du(to.dir))
-            save(ctx, img)
-            return img
-        } catch (t: Throwable) {
-            wipe(to.dir)
-            throw t
-        }
-    }
-
-    /**
-     * Factory reset without a recovery: the user's part of /data (apps, settings, accounts) and /cache are emptied,
-     * the rest of /data (dalvik-cache, what the import prepared) stays, like in a fresh container.
-     */
-    fun resetData(ctx: Context, id: String) {
-        val root = VmPaths(ctx, id).root
-        for (n in RESET_DIRS) {
-            val d = File(root, "data/$n")
-            if (!d.exists()) continue
-            d.listFiles()?.forEach { wipe(it) }
-        }
-        File(root, "cache").listFiles()?.forEach { wipe(it) }
-        get(ctx, id)?.let { save(ctx, it.copy(sizeBytes = du(VmPaths(ctx, id).dir))) }
-    }
-
-    private val RESET_DIRS = listOf("data", "system", "user", "property", "anr", "tombstones", "backup", "misc/wifi",
-        "misc/keystore", "local/tmp", "app", "app-private", "app-asec", "media", "user_de", "system_de", "system_ce", "misc_de", "misc_ce")
+    /** Reset is unavailable until it is coordinated with the VM process. */
+    @Suppress("UNUSED_PARAMETER")
+    fun resetData(ctx: Context, id: String): Nothing =
+        throw IllegalStateException("Instance reset is unavailable while VM coordination is incomplete")
 
     /** Changes the stored image from its current state (not from a copy read earlier: the machine updates boot counters). */
     @Synchronized
