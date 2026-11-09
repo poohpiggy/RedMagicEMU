@@ -132,8 +132,11 @@
     <string name="m_screenshot_saved">Saved: %1$s</string>
     <string name="m_failed">Failed</string>
     <string name="m_sms_sent">SMS delivered to inbox</string>
+    <string name="m_sms_submitted">已完成操作</string>
+    <string name="m_radio_submit_failed">提交失败，部分事件可能已发送</string>
     <string name="m_sms_from">From</string>
     <string name="m_sms_body">Message</string>
+    <string name="m_sms_too_long">短信最多 70 个文字单位，表情可能占 2 个。</string>
     <string name="m_send">Send</string>
     <string name="m_charging">Charging</string>
     <string name="m_apply">Apply</string>

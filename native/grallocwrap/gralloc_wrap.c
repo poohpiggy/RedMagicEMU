@@ -12,6 +12,7 @@
  * IMPLEMENTATION_DEFINED as RGBA_8888.
  */
 #include <stdint.h>
+#include <sys/stat.h>
 #include "note.h"
 #ifdef AEMU_META
 #include "../glbridge/common.h"
@@ -136,7 +137,7 @@ static int w_lock(const struct gralloc_module *m, const void *hnd, int usage, in
     if (!e && vaddr && *vaddr) { struct meta_note *n = meta_note_at(hnd); if (n && n->magic == META_NOTE && n->pad[1]) gpu_fetch(n, *vaddr); }
     /* a count of the times the buffer was opened for writing: the GLES bridge (native/glbridge) sends the pixels to
      * the host only when it moved */
-    if (!e && (usage & 0xf0)) { struct meta_note *n = meta_note_at(hnd); if (n && n->magic == META_NOTE) n->pad[0]++; }
+    if (!e && (usage & 0xf0)) { struct meta_note *n = meta_note_at(hnd); if (n && n->magic == META_NOTE) __atomic_add_fetch(&n->pad[0], 1, __ATOMIC_RELAXED); }
 #endif
     return e;
 }
@@ -154,43 +155,53 @@ static struct yuv_note *note_of(const void *handle) {
     return (struct yuv_note *)(p->base + (uint64_t)p->size - sizeof(struct yuv_note));
 }
 
-/* DEBUG(ycbcr): why a lock_ycbcr failed, one line per failure in /data/misc/cameraserver/ycbcr.log */
-extern int open(const char *p, int f, ...);
-extern long write(int fd, const void *buf, unsigned long n);
-extern int close(int fd);
-static void dbg_hex(char **o, unsigned long v) { char t[17]; int n = 0; do { t[n++] = "0123456789abcdef"[v & 15]; v >>= 4; } while (v); while (n) *(*o)++ = t[--n]; *(*o)++ = ' '; }
-static void dbg_ycbcr(const void *hnd, int e, const struct yuv_note *n) {
-    char b[256], *o = b; const struct aosp_handle *p = hnd;
-    dbg_hex(&o, (unsigned long)(unsigned)e);
-    if (p) { dbg_hex(&o, (unsigned)p->version); dbg_hex(&o, (unsigned)p->num_fds); dbg_hex(&o, (unsigned)p->num_ints); dbg_hex(&o, (unsigned)p->magic);
-             dbg_hex(&o, (unsigned)p->flags); dbg_hex(&o, (unsigned)p->size); dbg_hex(&o, (unsigned long)p->base); }
-    if (n) dbg_hex(&o, n->magic);
-    *o++ = 10;
-    int fd = open("/data/misc/cameraserver/ycbcr.log", 02 | 0100 | 02000, 0666);
-    if (fd >= 0) { write(fd, b, (unsigned long)(o - b)); close(fd); }
-}
 static int w_lock_ycbcr(const struct gralloc_module *m, const void *hnd, int usage, int l, int t, int w, int h, struct android_ycbcr *out) {
     (void)m;
     void *va = 0;
-    if (!real || !out) return -22;
+    if (!real || !out || !hnd) return -22;
+    const struct aosp_handle *p = hnd;
+    struct stat st;
+    /* Our YUV allocations use offset zero. Check the backing file before reading its trailing note. */
+    if (p->fd < 0 || (p->flags & 1) || p->offset != 0 || p->size < 4096 || fstat(p->fd, &st) ||
+        st.st_size < 0 || (uint64_t)st.st_size < (uint64_t)p->size) return -22;
     int e = real->lock(real, hnd, usage, l, t, w, h, &va);
-    if (e) { dbg_ycbcr(hnd, e, 0); return e; }
+    if (e) return e;
     struct yuv_note *n = note_of(hnd);
-    if (!va || !n || n->magic != YUV_NOTE) { dbg_ycbcr(hnd, -22, n); real->unlock(real, hnd); return -22; }
+    if (!va || !n) { real->unlock(real, hnd); return -22; }
+    /* The note is in shared guest memory: use a checked local copy for all plane offsets. */
+    struct yuv_note note = *n;
+    uint64_t reserved = sizeof(struct yuv_note);
+#ifdef AEMU_META
+    reserved = META_ROOM;
+#endif
+    if (note.magic != YUV_NOTE || note.w <= 0 || note.h <= 0 || note.w > 8192 || note.h > 8192 ||
+        p->size < 0 || (uint64_t)p->size < reserved) { real->unlock(real, hnd); return -22; }
+    uint64_t ys = note.pad ? note.pad : (uint64_t)note.w;
+    uint64_t cs = note.pad ? ((ys / 2 + 15) & ~15ULL) : ((uint64_t)(note.w + 1) / 2) * 2;
+    uint64_t chroma_rows = (uint64_t)(note.h + 1) / 2;
+    if ((note.pad && note.pad != ((uint32_t)(note.w + 15) & ~15u)) ||
+        ys * (uint64_t)note.h + (note.pad ? 2 : 1) * cs * chroma_rows > (uint64_t)p->size - reserved) {
+        real->unlock(real, hnd); return -22;
+    }
+#ifdef AEMU_META
+    if (usage & 0xf0) {
+        struct meta_note *meta = meta_note_at(hnd);
+        if (meta && meta->magic == META_NOTE) __atomic_add_fetch(&meta->pad[0], 1, __ATOMIC_RELAXED);
+    }
+#endif
     out->y = va;
-    if (n->pad) {       /* YV12: Y, then V and U planes of half size, rows aligned to 16 */
-        long ys = n->pad, cs = (ys / 2 + 15) & ~15;
-        out->cr = (char *)va + ys * n->h;
-        out->cb = (char *)out->cr + cs * ((n->h + 1) / 2);
+    if (note.pad) {       /* YV12: Y, then V and U planes of half size, rows aligned to 16 */
+        out->cr = (char *)va + ys * (uint64_t)note.h;
+        out->cb = (char *)out->cr + cs * chroma_rows;
         out->ystride = (unsigned long)ys;
         out->cstride = (unsigned long)cs;
         out->chroma_step = 1;
         return 0;
     }
-    out->cr = (char *)va + (long)n->w * n->h;
+    out->cr = (char *)va + ys * (uint64_t)note.h;
     out->cb = (char *)out->cr + 1;
-    out->ystride = (unsigned long)n->w;
-    out->cstride = (unsigned long)n->w;
+    out->ystride = (unsigned long)ys;
+    out->cstride = (unsigned long)cs;
     out->chroma_step = 2;
     return 0;
 }

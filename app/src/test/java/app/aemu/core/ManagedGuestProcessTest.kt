@@ -5,6 +5,8 @@ import org.junit.Test
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 
 class ManagedGuestProcessTest {
     private class Child : Process() {
@@ -43,5 +45,50 @@ class ManagedGuestProcessTest {
             assertTrue(expected.message!!.contains("errno=1"))
         }
         assertTrue(managed.isAlive)
+    }
+
+    @Test fun borrowedHandleIsPinnedUntilNonblockingOperationReturns() {
+        val child = Child()
+        val closed = mutableListOf<Int>()
+        val managed = ManagedGuestProcess(child, 123, 42, { _, _ -> 0 }, { closed += it })
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val borrow = pool.submit<Int> {
+                managed.withAuthenticatedHandle { pid, fd ->
+                    assertEquals(123, pid); assertEquals(42, fd)
+                    entered.countDown()
+                    assertTrue(release.await(2, TimeUnit.SECONDS))
+                    17
+                }
+            }
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            val waiter = pool.submit<Int> { managed.waitFor() }
+            try { waiter.get(100, TimeUnit.MILLISECONDS); fail("closed borrowed handle") }
+            catch (_: java.util.concurrent.TimeoutException) { }
+            assertTrue(closed.isEmpty())
+            release.countDown()
+            assertEquals(17, borrow.get(2, TimeUnit.SECONDS).toInt())
+            assertEquals(37, waiter.get(2, TimeUnit.SECONDS).toInt())
+            assertEquals(listOf(42), closed)
+            try { managed.withAuthenticatedHandle { _, _ -> fail("closed fd borrowed") }; fail("accepted exited process") }
+            catch (_: IllegalStateException) { }
+        } finally { release.countDown(); pool.shutdownNow() }
+    }
+
+    @Test fun borrowExceptionReleasesLockAndDoesNotCloseLiveHandle() {
+        val child = Child()
+        val closed = mutableListOf<Int>()
+        val managed = ManagedGuestProcess(child, 123, 42, { _, _ -> 0 }, { closed += it })
+        try { managed.withAuthenticatedHandle<Unit> { _, _ -> throw IllegalArgumentException("failed") }; fail() }
+        catch (_: IllegalArgumentException) { }
+        assertTrue(closed.isEmpty())
+        assertTrue(managed.withAuthenticatedHandle { pid, fd ->
+            assertEquals(123, pid); assertEquals(42, fd)
+            true
+        })
+        managed.waitFor()
+        assertEquals(listOf(42), closed)
     }
 }

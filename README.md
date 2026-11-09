@@ -14,7 +14,7 @@
 
 RedMagicEMU 是基于 [AEmulator](https://github.com/uxazu/AEmulator) 独立维护的非官方项目；AEmulator 又基于原始 [SENSES 模拟器](https://github.com/Istratii-tech/SENSES)。本项目不是红魔官方产品，也与红魔无关联。
 
-项目以 REDMAGIC NX809J 原厂 Android 16 / API 36 / ARM64 固件作为 Guest 目标。此限制适用于 Guest 固件，不限制宿主设备型号。该固件已在一台宿主设备上进入原厂桌面。项目仍处于 alpha 阶段，存在已知 HAL 局限；参阅[进度](docs/PROGRESS.md)和[基线](docs/BASELINE.md)。
+项目以 REDMAGIC NX809J 原厂 Android 16 / API 36 / ARM64 固件作为 Guest 目标。此限制适用于 Guest 固件，不限制宿主设备型号。该固件已在一台宿主设备上进入原厂桌面。当前版本为 0.3.0-beta，基本功能阶段验收通过，仍存在已知 HAL 局限；参阅[进度](docs/PROGRESS.md)和[基线](docs/BASELINE.md)。
 
 ## 构建
 

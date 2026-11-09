@@ -13,6 +13,8 @@ typedef unsigned int u32;
 typedef unsigned short u16;
 typedef unsigned char u8;
 
+#include "self_cmdline.h"
+
 #define IMAGE_HI 0x20u            /* IMAGE_BASE >> 32, see build.sh */
 #define IMAGE_SPAN 0x00100000u
 
@@ -42,6 +44,8 @@ enum {
     NR_socket = 198, NR_socketpair = 199, NR_bind = 200, NR_connect = 203, NR_getsockname = 204, NR_sendto = 206, NR_setsockopt = 208, NR_getsockopt = 209,
 #define BIG_MAP 0x1000000u
     NR_shutdown = 210, NR_sendmsg = 211, NR_recvmsg = 212, NR_munmap = 215, NR_execve = 221, NR_mmap = 222, NR_mprotect = 226,
+    NR_recvmmsg = 243, NR_recvmmsg_time64 = 417, NR_io_uring_setup = 425, NR_io_uring_enter = 426,
+    NR_io_uring_register = 427, NR_pidfd_getfd = 438,
     NR_renameat2 = 276, NR_memfd_create = 279, NR_statx = 291,
 };
 
@@ -94,6 +98,8 @@ static int g_logpipe;
 static u64 g_inino;                 // ...and the pipe on descriptor 0
 static char g_sd[512]; static u64 g_sdlen;   // the shared card folder on the phone (AEMU64_SDCARD)
 static int g_is32;                // this process is qemu-arm running a 32-bit program
+/* Experimental target-only preload; also gates receipt of passed descriptors. */
+static int g_vibrator_preload;
 static void (*g_fatal[32])(int, void *, void *);
 static void fatal_relay(int sig, void *info, void *uc);
 // qemu-arm's signal handler blocks every signal in the context it returns to (until the guest's handler is
@@ -161,6 +167,13 @@ static const char *xl(const char *p, char *buf, int *err) {
             if (seq(q, "/task")) memcpy(n, "/proc/.one", 11);
         }
         memcpy(buf, g_root, g_rootlen);
+        // Missing vibration nodes must not fall back to the host's hardware paths.
+        // This is an absolute-path rule, not a symlink or caller authorization check.
+        static const char *const vibration[] = { "/sys/class/leds/zte_vibrator", "/sys/class/leds/vibrator", "/sys/class/qcom-haptics", 0 };
+        for (int i = 0; vibration[i]; i++) {
+            u64 l = slen(vibration[i]);
+            if (pre(n, vibration[i]) && (n[l] == '/' || !n[l])) return buf;
+        }
         // (14: zygote takes a refused mkdir of a process's cgroup directory for fatal; the directories are the image's)
         if (pre(n, "/sys/fs/selinux") || pre(n, "/sys/power") || pre(n, "/sys/fs/cgroup") || S4(NR_faccessat, AT_FDCWD, buf, 0, 0) == 0) return buf;
         return p;
@@ -319,6 +332,40 @@ static long fake_memfile(const char *name, const char *content, u64 len) {
     S3(NR_write, fd, content, len);
     S3(NR_lseek, fd, 0, 0 /*SEEK_SET*/);
     return fd;
+}
+
+/* fd has already been opened with the caller's flags and permissions. */
+static long self_cmdline_open(long fd, long flags) {
+    const u64 limit = 65536;
+    char *buf = (char *)S6(NR_mmap, 0, limit + 1, 3, 0x22, -1, 0);
+    if ((long)buf < 0) return fd;
+    u64 used = 0;
+    long n = 0, result = fd;
+    while (used < limit + 1) {
+        n = S3(NR_read, fd, buf + used, limit + 1 - used);
+        if (n <= 0) break;
+        used += (u64)n;
+    }
+    if (n == 0 && used <= limit) {
+        u64 off = cmdline_guest_offset(buf, used, g_self);
+        if (off) {
+            long tmp = S2(NR_memfd_create, "aemu-cmdline", 1 /* MFD_CLOEXEC */);
+            if (tmp >= 0) {
+                if (S3(NR_write, tmp, buf + off, used - off) == (long)(used - off)) {
+                    char path[64], number[24];
+                    char *digits = utoa((u64)tmp, number + sizeof number);
+                    memcpy(path, "/proc/self/fd/", 14);
+                    memcpy(path + 14, digits, slen(digits) + 1);
+                    long ro = S4(NR_openat, AT_FDCWD, path, flags, 0);
+                    if (ro >= 0) { S1(NR_close, fd); result = ro; }
+                }
+                S1(NR_close, tmp);
+            }
+        }
+    }
+    S2(NR_munmap, buf, limit + 1);
+    if (result == fd) S3(NR_lseek, fd, 0, 0 /* SEEK_SET */);
+    return result;
 }
 
 // ---------------------------------------------------------------------------------------------------- memory budget
@@ -632,7 +679,7 @@ static long input_ioctl(u32 cmd, u64 arg) {
 // ---------------------------------------------------------------------------------------------------- exec
 
 static int env_is_ours(const char *e) { return pre(e, "AEMU64_"); }
-
+#include "vibrator_preload.h"
 static long do_exec(const char *path, char *const argv[], char *const envp[]) {
     static char buf[PATH_MAX]; int err = 0;      /* exec replaces the process: nobody else is left to share it */
     // A firmware whose ART module comes without a boot image (Google's own module) has the runtime compile one
@@ -657,7 +704,7 @@ static long do_exec(const char *path, char *const argv[], char *const envp[]) {
     for (u64 i = 1; i < na; i++) *a++ = argv[i];
     *a++ = 0;
     e = a;
-    for (u64 i = 0; i < ne; i++) if (!env_is_ours(envp[i])) *a++ = envp[i];
+    a = rme_vibrator_copy_env(a, envp, g_vibrator_preload);
     static char e_root[540], e_props[540], e_binder[140], e_hwbinder[140], e_vndbinder[140], e_id[64], e_f[] = "AEMU64_F=1";
     memcpy(e_root, "AEMU64_ROOT=", 12); memcpy(e_root + 12, g_root, g_rootlen + 1);
     *a++ = e_root;
@@ -813,6 +860,14 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
     case NR_openat: {
         char *b1 = PB(0);
         if (P(1)) {
+            if (!g_is32 && (a[2] == 0 || a[2] == 02000000 /* O_CLOEXEC */) &&
+                cmdline_matches_self(P(1), (u64)S0(NR_getpid))) {
+                const char *host = xl(P(1), b1, &err);
+                if (!host) return err;
+                long fd = S4(NR_openat, a[0], host, a[2], a[3]);
+                if (fd < 0 || !seq(host, P(1))) return fd;
+                return self_cmdline_open(fd, a[2]);
+            }
             // 15: the linker finds its section of ld.config.txt by realpath("/proc/self/exe") - it opens the link (O_PATH)
             // and asks what the descriptor is. The link is this program on the phone, which to the guest reads as
             // /dev/null (no section: the built-in configuration without the modules' libraries, "library not found"
@@ -1400,6 +1455,18 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
         }
         return S3(nr, a[0], a[1], a[2]);
     }
+    case NR_recvmsg: {
+        long result = S3(nr, a[0], a[1], a[2]);
+        if (g_vibrator_preload && result >= 0 &&
+            rme_vibration_check_received((struct msgh *)a[1]) != 0) return -1; /* EPERM */
+        return result;
+    }
+    /* Experimental vibrator only: these alternate interfaces can bypass the
+     * recvmsg descriptor check. Existing processes keep their prior behavior. */
+    case NR_recvmmsg: case NR_recvmmsg_time64:
+    case NR_io_uring_setup: case NR_io_uring_enter: case NR_io_uring_register: case NR_pidfd_getfd:
+        if (g_vibrator_preload) return -1; /* EPERM */
+        return S6(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
     case NR_rt_sigaction: {
         struct ksa { void *h; u64 flags; void *restorer; u64 mask; } t;
         if (a[0] == SIGSYS) { if (a[2]) memset((void *)a[2], 0, sizeof t); return 0; }
@@ -1624,6 +1691,15 @@ static void install_filter(void) {
     f[n++] = LD(8);  f[n++] = JGE(IMAGE_SPAN, L_NR, L_ALLOW);
     AT(L_NR); f[n++] = LD(0);
     for (u64 i = 0; i < sizeof trapped; i++) f[n++] = JEQ(trapped[i], L_TRAP, 0);
+    if (g_vibrator_preload) {
+        f[n++] = JEQ(NR_recvmsg, L_TRAP, 0);
+        f[n++] = JEQ(NR_recvmmsg, L_TRAP, 0);
+        f[n++] = JEQ(NR_recvmmsg_time64, L_TRAP, 0);
+        f[n++] = JEQ(NR_io_uring_setup, L_TRAP, 0);
+        f[n++] = JEQ(NR_io_uring_enter, L_TRAP, 0);
+        f[n++] = JEQ(NR_io_uring_register, L_TRAP, 0);
+        f[n++] = JEQ(NR_pidfd_getfd, L_TRAP, 0);
+    }
     f[n++] = JEQ(NR_renameat2, L_TRAP, 0);
     f[n++] = JEQ(NR_statx, L_TRAP, 0);
     f[n++] = JEQ(280 /* bpf */, L_TRAP, 0);
@@ -1765,6 +1841,7 @@ void aemu_main(u64 *sp) {
     if (n <= 0) die("cannot find myself", "");
     g_self[n] = 0;
     g_real_uid = (u32)S0(NR_getuid);
+    bct_init();
     // a service starts in "/": 8.1 looks for vendor/etc/media_profiles_V1_0.xml by a relative path. Our own exec of a
     // guest program keeps the directory the guest is in.
     { char cw[PATH_MAX]; long cn = S2(NR_getcwd, cw, sizeof cw);
@@ -1895,6 +1972,9 @@ void aemu_main(u64 *sp) {
     static char ownlibs[200];
     { const char *lp = env_get(envp, "AEMU64_LIBPATH");
       if (lp && !is32 && slen(lp) < sizeof ownlibs - 20) { memcpy(ownlibs, "LD_LIBRARY_PATH=", 16); memcpy(ownlibs + 16, lp, slen(lp) + 1); } }
+    g_vibrator_preload = rme_vibrator_preload_select(g_exe, is32, env_get(envp, "AEMU64_VIB_PRELOAD"), envp);
+    if (g_vibrator_preload < 0) die("vibration preload conflicts with LD_PRELOAD", "");
+    if (g_vibrator_preload && env_get(envp, "AEMU64_F")) die("vibration descriptor filter unavailable after inherited exec", "");
     if ((err = load_elf(prog, &exe))) die("cannot load ", prog);
     u64 entry = exe.entry, base = 0;
     if (exe.interp[0]) {
@@ -1920,7 +2000,7 @@ void aemu_main(u64 *sp) {
     // the guest's initial stack: argc, argv, envp (without our variables), auxv
     u64 ne = 0; while (envp[ne]) ne++;
     u64 na = 0; while (auxv[na * 2]) na++;
-    u64 words = 1 + (u64)gargc + 1 + ne + 13 + 1 + (na + 1) * 2;
+    u64 words = 1 + (u64)gargc + 1 + ne + 14 + 1 + (na + 1) * 2;
     // built on the real stack, well below this frame (bionic and ART find the main stack by its mapping)
     u64 *w = (u64 *)(((u64)&words - (256UL << 10) - words * 8) & ~15UL), *top = w;
     *w++ = (u64)gargc;
@@ -1930,6 +2010,7 @@ void aemu_main(u64 *sp) {
     for (u64 i = 0; i < ne; i++) if (!env_is_ours(envp[i])) *w++ = (u64)envp[i];
     for (int i = 0; i < nsock; i++) *w++ = (u64)sockenv[i];
     if (ownlibs[0]) *w++ = (u64)ownlibs;
+    if (g_vibrator_preload) *w++ = (u64)RME_VIBRATOR_PRELOAD_ENV;
     *w++ = 0;
     for (u64 i = 0; i < na; i++) {
         u64 t = auxv[i * 2], v = auxv[i * 2 + 1];

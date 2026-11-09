@@ -386,7 +386,16 @@ class VmActivity : ComponentActivity() {
                     }
                     return
                 }
-                i.getStringExtra("sms")?.let { sendSms("+15550001234", it); return }
+                i.getStringExtra("sms")?.let { body ->
+                    // The exported debug receiver retains its legacy RIL-only behavior.
+                    thread {
+                        val sent = try { vm.ril.sms("+15550001234", body) } catch (error: Exception) {
+                            android.util.Log.w("aemu-radio", "Legacy debug SMS failed", error); false
+                        }
+                        toast(getString(if (sent) R.string.m_sms_submitted else R.string.m_radio_submit_failed))
+                    }
+                    return
+                }
                 if (i.getBooleanExtra("shot", false)) { runOnUiThread { screenshot() }; return }
                 // --ez frames true --es out <name>: the count of frames shown and the clock, for the testers
                 if (i.getBooleanExtra("frames", false)) {
@@ -771,9 +780,36 @@ class VmActivity : ComponentActivity() {
         recorder = r; recOn.value = true
     }
 
-    // APK picked on the host: copied into the shared card folder, then installed by the guest's package manager
+    private var apkPickerGeneration: Long? = null
+
+    // APK picked on the host: for API 36, stream a private staged copy into the guest package manager.
     private val pickApk = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val generation = apkPickerGeneration.also { apkPickerGeneration = null }
         if (uri == null) return@registerForActivityResult
+        if (vm.img.api == 36) {
+            if (generation == null) { toast(getString(R.string.m_failed)); return@registerForActivityResult }
+            if (!vm.apkInstallGate.tryAcquire()) { toast(getString(R.string.m_failed)); return@registerForActivityResult }
+            toast(getString(R.string.m_install_apk_start))
+            thread {
+                var staged: java.io.File? = null
+                try {
+                    staged = java.io.File.createTempFile("rme-apk-", ".tmp", cacheDir)
+                    val size = (contentResolver.openInputStream(uri) ?: throw java.io.IOException("Cannot open APK"))
+                        .use { app.aemu.core.stageApk(it, staged) }
+                    val result = vm.installApkStream(staged, size, generation)
+                    if (result.success) toast("Success")
+                    else toast(result.output.trim().lines().firstOrNull { it.startsWith("Failure") || it.startsWith("Error") }
+                        ?.take(200) ?: getString(R.string.m_failed))
+                } catch (e: Exception) {
+                    vm.log("apk install: ${e.javaClass.simpleName}")
+                    toast(getString(R.string.m_failed))
+                } finally {
+                    staged?.let { if (it.exists() && !it.delete()) vm.log("apk install: temporary file cleanup failed") }
+                    vm.apkInstallGate.release()
+                }
+            }
+            return@registerForActivityResult
+        }
         val dir = app.aemu.core.Sdcard.hostDir(vm.paths)
         if (dir == null) { toast(getString(R.string.m_failed)); return@registerForActivityResult }
         toast(getString(R.string.m_install_apk_start))
@@ -790,28 +826,49 @@ class VmActivity : ComponentActivity() {
         }
     }
 
+    private fun pickApkForGuest() {
+        if (vm.img.api == 36) {
+            apkPickerGeneration = vm.apkInstallGeneration()
+            if (apkPickerGeneration == null) { toast(getString(R.string.m_failed)); return }
+        }
+        pickApk.launch(arrayOf("application/vnd.android.package-archive", "application/octet-stream", "*/*"))
+    }
+
     private fun sendSms(from: String, body: String) {
-        // through the emulated modem: stored, notified and rung like a real SMS on every version
-        if (vm.ril.sms(from, body)) { toast(getString(R.string.m_sms_sent)); return }
-        // radio emulation off: the message is written straight into the SMS provider inbox (4.1+)
-        val cmd = "content insert --uri content://sms/inbox --bind address:s:${q(from)} --bind body:s:${q(body)} " +
-            "--bind read:i:0 --bind date:l:${System.currentTimeMillis()}"
-        guestAsync(cmd) { out -> toast(if (out.isBlank()) getString(R.string.m_sms_sent) else out.trim().take(200)) }
+        val generation = vm.radioEventGeneration()
+        if (generation == null) { toast(getString(R.string.m_radio_submit_failed)); return }
+        thread {
+            val result = try { vm.sendVirtualSms(from, body, generation) } catch (error: Exception) {
+                android.util.Log.w("aemu-radio", "Virtual SMS submission failed", error); null
+            }
+            toast(getString(if (result == app.aemu.core.RadioSubmitResult.SUBMITTED) R.string.m_sms_submitted else R.string.m_radio_submit_failed))
+        }
     }
 
     @Composable
     private fun SmsDialog(onDone: () -> Unit) {
         var from by remember { mutableStateOf("+10000000000") }
         var body by remember { mutableStateOf("Hello from RedMagicEMU") }
+        var tooLong by remember { mutableStateOf(false) }
         AlertDialog(onDismissRequest = onDone,
             title = { Text(stringResource(R.string.m_sms)) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(from, { from = it }, label = { Text(stringResource(R.string.m_sms_from)) }, singleLine = true)
-                    OutlinedTextField(body, { body = it }, label = { Text(stringResource(R.string.m_sms_body)) })
+                    OutlinedTextField(body, {
+                        body = it
+                        if (tooLong) tooLong = !app.aemu.core.VirtualSmsDeliver.isTextLengthSupported(it)
+                    }, label = { Text(stringResource(R.string.m_sms_body)) },
+                        isError = tooLong,
+                        supportingText = if (tooLong) {{ Text(stringResource(R.string.m_sms_too_long)) }} else null)
                 }
             },
-            confirmButton = { Button(onClick = { sendSms(from, body); onDone() }) { Text(stringResource(R.string.m_send)) } },
+            confirmButton = { Button(onClick = {
+                if (app.aemu.core.VirtualSmsDeliver.isTextLengthSupported(body)) {
+                    sendSms(from, body)
+                    onDone()
+                } else tooLong = true
+            }) { Text(stringResource(R.string.m_send)) } },
             dismissButton = { OutlinedButton(onClick = onDone) { Text(stringResource(R.string.close)) } })
     }
 
@@ -914,7 +971,16 @@ class VmActivity : ComponentActivity() {
             title = { Text(stringResource(R.string.m_call)) },
             text = { OutlinedTextField(from, { from = it }, label = { Text(stringResource(R.string.m_sms_from)) }, singleLine = true) },
             confirmButton = { Button(onClick = {
-                if (!vm.ril.ring(from.trim())) toast(getString(R.string.m_failed))
+                val number = from.trim()
+                val generation = vm.radioEventGeneration()
+                thread {
+                    val result = generation?.let {
+                        try { vm.ringVirtualCall(number, it) } catch (error: Exception) {
+                            android.util.Log.w("aemu-radio", "Virtual call submission failed", error); null
+                        }
+                    }
+                    toast(getString(if (result == app.aemu.core.RadioSubmitResult.SUBMITTED) R.string.m_sms_submitted else R.string.m_radio_submit_failed))
+                }
                 onDone()
             }) { Text(stringResource(R.string.m_call_ring)) } },
             dismissButton = { OutlinedButton(onClick = onDone) { Text(stringResource(R.string.close)) } })
@@ -1043,13 +1109,9 @@ class VmActivity : ComponentActivity() {
                 Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.9f),
                     modifier = Modifier.align(Alignment.TopStart).displayCutoutPadding().statusBarsPadding().padding(8.dp)) {
                     Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (state == GuestVm.State.BOOTING) {
-                            LoadingIndicator(Modifier.size(24.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text(stringResource(R.string.vm_booting_short, seconds.toInt()), style = MaterialTheme.typography.labelMedium)
-                        } else {
-                            Text(stringResource(R.string.desktop_not_confirmed), style = MaterialTheme.typography.labelMedium)
-                        }
+                        LoadingIndicator(Modifier.size(24.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(stringResource(R.string.vm_booting_short, seconds.toInt()), style = MaterialTheme.typography.labelMedium)
                     }
                 }
             }
@@ -1113,7 +1175,7 @@ class VmActivity : ComponentActivity() {
                         DropdownMenuItem(text = { Text(stringResource(R.string.m_battery)) }, leadingIcon = { Icon(Icons.Rounded.BatteryStd, null) },
                             enabled = running, onClick = { menu = false; dialog = Dlg.BATTERY })
                         DropdownMenuItem(text = { Text(stringResource(R.string.m_install_apk)) }, leadingIcon = { Icon(Icons.Rounded.InstallMobile, null) },
-                            enabled = running, onClick = { menu = false; pickApk.launch(arrayOf("application/vnd.android.package-archive", "application/octet-stream", "*/*")) })
+                            enabled = running, onClick = { menu = false; pickApkForGuest() })
                         DropdownMenuItem(text = { Text(stringResource(R.string.m_camera)) }, leadingIcon = { Icon(Icons.Rounded.PhotoCamera, null) },
                             onClick = { menu = false; dialog = Dlg.CAMERA })
                         DropdownMenuItem(text = { Text(stringResource(R.string.m_device)) }, leadingIcon = { Icon(Icons.Rounded.Tune, null) },
@@ -1601,4 +1663,4 @@ internal fun shouldBootOnAttach(state: GuestVm.State, previousFailure: Boolean =
     state == GuestVm.State.STOPPED && !previousFailure && !poweredOff
 
 internal fun shouldShowBootNotice(state: GuestVm.State): Boolean =
-    state == GuestVm.State.BOOTING || state == GuestVm.State.RUNNING
+    state == GuestVm.State.BOOTING

@@ -29,6 +29,7 @@
 #include <fcntl.h>
 #include "common.h"
 #include "../grallocwrap/note.h"
+#include "yv12_rgba.h"
 
 extern int __android_log_print(int prio, const char *tag, const char *fmt, ...);
 extern int __system_property_get(const char *name, char *value);
@@ -821,6 +822,9 @@ struct ANativeWindow {
 };
 static int (*ahb_lock)(void *b, uint64_t usage, int fence, const void *rect, void **va);
 static int (*ahb_unlock)(void *b, int *fence);
+struct ahb_plane { void *data; uint32_t pixelStride, rowStride; };
+struct ahb_planes { uint32_t planeCount; struct ahb_plane planes[4]; };
+static int (*ahb_lock_planes)(void *b, uint64_t usage, int fence, const void *rect, struct ahb_planes *planes);
 static void *(*anwb_ahb)(struct ANativeWindowBuffer *b);
 /* before 8.0 there is no AHardwareBuffer API: the gralloc module locks the window buffer itself */
 struct gr_module {
@@ -842,6 +846,7 @@ static int buf_api(void) {
         void *l = dlopen("libnativewindow.so", RTLD_NOW);
         ahb_lock = l ? dlsym(l, "AHardwareBuffer_lock") : 0;
         ahb_unlock = l ? dlsym(l, "AHardwareBuffer_unlock") : 0;
+        ahb_lock_planes = l ? dlsym(l, "AHardwareBuffer_lockPlanes") : 0;
         anwb_ahb = l ? dlsym(l, "ANativeWindowBuffer_getHardwareBuffer") : 0;
         state = ahb_lock && ahb_unlock ? 1 : -1;
         if (state < 0) {
@@ -864,6 +869,33 @@ static void *buf_lock(struct ANativeWindowBuffer *b, int write) {
     return va;
 }
 static void buf_unlock(struct ANativeWindowBuffer *b) { if (g_gr) g_gr->unlock(g_gr, b->handle); else ahb_unlock(ahb_of(b), 0); }
+
+/* Convert only the engine's own planar YV12 buffers. The mapper validates the backing fd and the YUV note;
+ * check each returned plane against that same mapped allocation before reading it. */
+static uint8_t *buf_yv12_rgba(struct ANativeWindowBuffer *b, uint32_t w, uint32_t h) {
+    if (!w || !h || w > 8192 || h > 8192 || (uint64_t)w * h * 4 > 64u * 1024u * 1024u ||
+        !buf_api() || g_gr || !ahb_lock_planes || !b->handle) return 0;
+    struct ahb_planes planes = {0};
+    if (ahb_lock_planes(ahb_of(b), 0x3 /* CPU_READ_OFTEN */, -1, 0, &planes)) return 0;
+    uint8_t *dst = 0;
+    const struct rgb_note_handle *handle = b->handle;
+    uintptr_t base = (uintptr_t)handle->base;
+    if (planes.planeCount != 3 || !base || handle->offset || handle->size < (int)META_ROOM ||
+        (uintptr_t)(handle->size - META_ROOM) > UINTPTR_MAX - base) goto done;
+    uintptr_t end = base + (uintptr_t)(handle->size - META_ROOM);
+    struct aemu_yv12_plane p[3];
+    for (int i = 0; i < 3; i++) {
+        uintptr_t addr = (uintptr_t)planes.planes[i].data;
+        if (planes.planes[i].pixelStride != 1 || addr < base || addr >= end) goto done;
+        p[i] = (struct aemu_yv12_plane){ planes.planes[i].data, (size_t)(end - addr), planes.planes[i].rowStride };
+    }
+    size_t bytes = (size_t)w * h * 4;
+    dst = malloc(bytes);
+    if (dst && !aemu_yv12_to_rgba(dst, bytes, (size_t)w * 4, w, h, p[0], p[1], p[2])) { free(dst); dst = 0; }
+done:
+    ahb_unlock(ahb_of(b), 0);
+    return dst;
+}
 
 /* ---- SwiftShader behind ---- */
 #ifdef __LP64__
@@ -1957,14 +1989,25 @@ static void e_glEGLImageTargetTexture2DOES(GLenum target, GLeglImageOES image) {
     struct meta_note *note = meta_note_at(b->handle);
     int bpp = b->format == 1 || b->format == 2 ? 4 : b->format == 3 ? 3 : b->format == 4 ? 2 : 0;
     if (note && note->magic == META_NOTE && note->id) {
-        uint64_t count = note->pad[0];
+        uint64_t count = __atomic_load_n(&note->pad[0], __ATOMIC_RELAXED);
         begin(T, OP_IMAGE_BIND, 28, 28);
         put32(T, target); put64(T, note->id); put64(T, count); put32(T, w); put32(T, h);
         rsync(T);
         uint32_t wanted = get32v(T);
         /* (it may be drawn into from now on: gralloc asks the host before the memory is read) */
-        if (target == 0x0DE1 && !note->pad[1]) note->pad[1] = 1;
-        if (!wanted || !bpp) return;
+        if (bpp && target == 0x0DE1 && !note->pad[1]) note->pad[1] = 1;
+        if (!wanted) return;
+        if (b->format == 0x32315659 /* YV12 */) {
+            uint8_t *rgba = buf_yv12_rgba(b, w, h);
+            if (!rgba) return;
+            uint32_t n = w * h * 4;
+            begin(T, OP_IMAGE_DATA, 36, 36 + BLOB(n));
+            put64(T, note->id); put64(T, count); put32(T, w); put32(T, h); put32(T, w); put32(T, 1 /* RGBA */);
+            putblob(T, rgba, n);
+            free(rgba);
+            return;
+        }
+        if (!bpp) return;
         uint8_t *px = buf_lock(b, 0);
         if (!px) return;
         uint32_t n = (uint32_t)b->stride * h * (uint32_t)bpp;

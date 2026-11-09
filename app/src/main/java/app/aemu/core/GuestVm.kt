@@ -22,12 +22,38 @@ private val N64_SKIP = setOf("audiod", "ATFWD-daemon", "imsqmidaemon", "loc_laun
     "tftp_server", "qcom-system-daemon", "hvdcp_opti", "pm-service", "mtd", "mlipayd", "vsimd", "fdpp", "perfd", "ipacm",
     "qti", "netmgrd", "port-bridge", "ims_rtp_daemon", "imsdatadaemon", "wcnss_service", "msm_irqbalance", "energy-awareness", "sscrpcd", "adsprpcd", "cdsprpcd", "audioadsprpcd")
 
+/** True confirms only an inert adapter was prepared, not isolation or service availability. */
+internal fun prepareVibrationRuntime(recovery: Boolean, prepare: () -> Boolean, log: (String) -> Unit): Boolean {
+    if (recovery) return false
+    return try {
+        prepare()
+    } catch (interrupted: InterruptedException) {
+        Thread.currentThread().interrupt()
+        throw interrupted
+    } catch (failure: Exception) {
+        log("vibration: adapter preparation failed (${failure.javaClass.simpleName})")
+        false
+    }
+}
+
 /**
  * Одна запущенная виртуальная машина. Живёт в процессе :vm (одна на процесс: GL-мост нельзя
  * поднять дважды), заменяет собой init: готовит дерево, поднимает службы хоста (свойства, ввод,
  * звук, заглушки радио и накопителя), binderd, GL-мост и службы гостя в порядке загрузки Android.
  */
 class GuestVm(val ctx: Context, image: GuestImage) {
+    // Offline development only. The limited guard does not prevent access to
+    // devices exposed by a mount inside the Guest tree. Never enable in builds.
+    private val experimentalVibrationEnabled = false
+    // Controlled testing only: Guest caller permission authenticity is not established.
+    private val directVibrationEnabled = true
+    @Volatile private var directVibrationBlockQti = false
+    private val directVibrationLock = Any()
+    private var directVibrationBridge: HostVibrationBinderBridge? = null
+    @Volatile private var experimentalVibrationPrepared = false
+    private val vibrationLock = Any()
+    private var vibrationChannel: HostVibrationChannel? = null
+
     // Select the same runtime engine for every entry point without modifying stored metadata.
     val img = image.effective()
 
@@ -149,6 +175,22 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     }
     val audio by audioDelegate
     val ril = RilStub(paths, ::log, img.settings.imei.ifBlank { VmSettings.DEFAULT_IMEI }, img.api)
+    @Volatile private var activeRadioBackend = TargetRadioLaunch.Backend.DISABLED
+    @Volatile private var radioEvents: RadioHostChannel? = null
+
+    internal fun radioEventGeneration(): Long? = lifecycle.currentGeneration()
+
+    internal fun sendVirtualSms(from: String, body: String, generation: Long): RadioSubmitResult =
+        lifecycle.runForGeneration(generation) {
+            TargetRadioLaunch.routeEvent(activeRadioBackend, { radioEvents?.sms(from, body) ?: RadioSubmitResult.UNAVAILABLE },
+                { ril.sms(from, body) })
+        }
+
+    internal fun ringVirtualCall(from: String, generation: Long): RadioSubmitResult =
+        lifecycle.runForGeneration(generation) {
+            TargetRadioLaunch.routeEvent(activeRadioBackend, { radioEvents?.call(from) ?: RadioSubmitResult.UNAVAILABLE },
+                { ril.ring(from.trim()) })
+        }
     // 2.x-3.x: wifi.c / dhcp_utils.c era; 4.0+ talks to p2p_supplicant and netd differently (not emulated yet)
     val wifi = if (img.api in 5..13) WifiStub(paths, img.api, props, "8.8.8.8" to "1.1.1.1", ::log) else null
     val vold = VoldStub(paths, img.sdcardPath, ::log, others = img.volumes, api = img.api, setProp = { k, v -> props.put(k, v) })
@@ -159,7 +201,8 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     /** notification / battery LED of the guest (lights HAL → /dev/aemu_lights) */
     val lights = Lights(paths.root, ::log)
     /** the phone's accelerometer and vibration motor for the guest */
-    val sensors = Sensors(ctx, paths.root, ::log)
+    // Only the admitted target firmware is supported; Guest API metadata is not a trust boundary.
+    val sensors = Sensors(ctx, paths.root, legacyVibration = false, log = ::log)
     /** the phone's microphone for the guest (audio HAL input → /dev/aemu_mic) */
     val mic = AudioIn(ctx, paths.root, ::log)
     /** the phone's cameras for the guest (camera HAL → /dev/socket/aemu_cam) */
@@ -210,6 +253,12 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                         if (!stopping) { if (recoveryMode) doRecovery() else doBoot() }
                     }
                 } catch (t: Throwable) {
+                    activeRadioBackend = TargetRadioLaunch.Backend.DISABLED
+                    closeDirectVibration()?.let { t.addSuppressed(it) }
+                    closeExperimentalVibration()?.let { t.addSuppressed(it) }
+                    closeRadioChannelForStop(radioEvents) { radioEvents = null }?.let { cleanup ->
+                        log("radio: event channel cleanup failed: ${cleanup.javaClass.simpleName}")
+                    }
                     if (!stopping) {
                         failure = t.message ?: t.toString()
                         log("✖ boot aborted: $failure")
@@ -355,6 +404,14 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         // 1. дерево
         val fixer = TreeFixer(ctx, paths, img, ::log)
         fixer.fixup()
+        val vibrationAdapterReady = prepareVibrationRuntime(recoveryMode, {
+            TargetVibrationArtifacts.prepare(paths.root, img.api, img.model, img.abi, engine, true) { asset ->
+                EngineAssets.open(ctx, asset).use { it.readBytes() }
+            }
+        }, ::log)
+        experimentalVibrationPrepared = prepareExperimentalVibration(experimentalVibrationEnabled, vibrationAdapterReady) { enabled ->
+            TargetVibrationDeclaration.prepare(paths.root, img.api, img.model, img.abi, engine, enabled)
+        }
         // политика звука уже подменялась раньше — обновить её файлы (обёртка/AOSP) до текущей версии
         if (File(paths.root, "system/.aemu-parked/system#lib#hw#audio_policy.default.so").isFile) swapAudioPolicy()
         GuestLog.clear(paths.root)
@@ -362,6 +419,15 @@ class GuestVm(val ctx: Context, image: GuestImage) {
 
         // 2. свойства
         val s = settings
+        val radioBackend = TargetRadioLaunch.select(img.api, img.model, img.abi, engine, s.radio)
+        val eventChannel = lifecycle.create {
+            val channel = if (radioBackend == TargetRadioLaunch.Backend.AIDL) RadioHostChannel.prepare() else null
+            radioEvents = channel
+            activeRadioBackend = radioBackend
+            channel
+        }
+        val aidlRadio = if (eventChannel != null) TargetRadioLaunch.service(paths.root, eventChannel.socketName,
+            AProcess.myPid(), AProcess.myUid(), eventChannel.epoch) else null
         val overrides = LinkedHashMap<String, String>()
         // 2.3: ro.kernel.qemu=1 включает в фреймворке режим эмулятора — ставим его только mediaserver
         overrides["ro.kernel.qemu"] = if (engine == Engine.GB) "0" else "1"
@@ -528,6 +594,8 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         }
         // своя панель кнопок у нас — экранную панель гостя (4.x) прячем, чтобы не дублировать
         overrides["qemu.hw.mainkeys"] = if (s.showNavBar && !(engine == Engine.N64 && kernel.navBarRequired)) "1" else "0"
+        TargetRadioLaunch.applyBootProperties(radioBackend, overrides)
+        TargetRichTapProperty.apply(img.api, img.model, img.abi, engine, overrides)
         // отладка: run/props.extra — строки ключ=значение поверх всего остального
         File(paths.bin, "props.extra").takeIf { it.isFile }?.readLines()?.forEach { l ->
             val k = l.substringBefore('=').trim()
@@ -618,7 +686,11 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         input.wide = engine == Engine.N64 && img.abi == "arm64-v8a"     // (a 32-bit firmware reads 16-byte events)
         input.serve()
         frames.serve()
-        if (s.radio) ril.serve() else log("radio: emulation disabled in settings")
+        when (radioBackend) {
+            TargetRadioLaunch.Backend.LEGACY -> ril.serve()
+            TargetRadioLaunch.Backend.DISABLED -> log("radio: emulation disabled in settings")
+            TargetRadioLaunch.Backend.AIDL -> log("radio: target AIDL service selected")
+        }
         vold.serve()
         // у vold производителей бывают дополнительные сокеты (Samsung: usbstorage, enc_report) — отвечаем «ладно»
         runCatching {
@@ -722,6 +794,26 @@ class GuestVm(val ctx: Context, image: GuestImage) {
 
         // 5. службы гостя по плану из init.rc прошивки
         val plan = servicePlan()
+        if (aidlRadio != null) TargetRadioLaunch.requireServiceOrder(plan)
+        val managedVibrationBinder = synchronized(procs) { procs["binderd"] } as? ManagedGuestProcess
+        val directControl = if (directVibrationEnabled) runCatching { HostVibrationDevice.fromContext(ctx) }.getOrNull() else null
+        var directPending = false
+        if (directVibrationEnabled && DirectVibrationBoot.validServiceOrder(plan) &&
+            DirectVibrationBoot.eligible(true, recoveryMode, img.api, img.model, img.abi, engine,
+                managedVibrationBinder != null, directControl != null,
+                HostNative.available && VibrationBinderExperimentalNative.available)) {
+            try {
+                directVibrationBlockQti = true
+                directPending = TargetVibrationDeclaration.prepare(paths.root, img.api, img.model, img.abi, engine, true)
+                if (!directPending) directVibrationBlockQti = false
+            } catch (failure: Exception) {
+                directVibrationBlockQti = false
+                // No ServiceManager has started yet; remove only our matching fragment.
+                TargetVibrationDeclaration.prepare(paths.root, img.api, img.model, img.abi, engine, false)
+                val stage = (failure as? VibrationDeclarationStageException)?.stage?.name ?: failure.javaClass.simpleName
+                log("vibration: preparation unavailable ($stage)")
+            }
+        }
         var glDone = false
         // (debugging, see Kernel64.syncLog: only the first N services are started, then the guest is left as it is)
         val stopAfter = if (engine == Engine.N64 && kernel.syncLog) runCatching { File(paths.root, "dev/.aemu-stop-after").readText().trim().toInt() }.getOrNull() else null
@@ -743,6 +835,10 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             // 10+: the package manager requires apexd's binder service, which is there once apexd reports "ready"
             if (svc.name == "zygote" && engine == Engine.N64 && plan.any { it.name == "apexd" })
                 waitFor("apexd", 15_000) { props.get("apexd.status") == "ready" }
+            if (svc.name == "zygote" && aidlRadio != null) {
+                log("radio: requesting AIDL service start; framework discovery not verified")
+                startService(aidlRadio)
+            }
             // 4.2+: заглушка bluetooth_manager до зиготы (system_server с ro.kernel.qemu=1 свою не поднимает)
             if (svc.name == "zygote" && img.api >= 9 && engine != Engine.GB && File(paths.root, "system/framework/aemu-stubs.jar").isFile) {
                 // 2.3–4.1 look up "bluetooth" instead; without it BluetoothAdapter is null and the vendor's Bluetooth apps crash
@@ -779,6 +875,32 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                     "-Djava.class.path=/system/framework/aemu-stubs.jar", "/system/bin", "app.aemu.stub.StandIn") + names, optional = true))
             }
             startService(svc)
+            if (directPending && svc.name == "servicemanager") {
+                directPending = false
+                try {
+                    val manager = synchronized(procs) { procs["servicemanager"] }
+                        ?: error("ServiceManager did not start")
+                    check(awaitDirectVibrationManager(r, manager)) { "ServiceManager unavailable" }
+                    startDirectVibration(managedVibrationBinder!!, directControl!!, manager)
+                    log("vibration: host bridge registration acknowledged; discovery and Guest permissions unverified")
+                } catch (failure: Exception) {
+                    if (stopping) return
+                    log("vibration: host bridge unavailable (${failure.javaClass.simpleName}); restoring boot")
+                    DirectVibrationBoot.rollback(
+                        stopBridge = { closeDirectVibration()?.let { throw it } },
+                        stopManager = { stopEarlyVibrationProcess("servicemanager") },
+                        stopBinder = { stopEarlyVibrationProcess("binderd") },
+                        removeDeclaration = { TargetVibrationDeclaration.prepare(paths.root, img.api, img.model, img.abi, engine, false) },
+                        restartBinder = {
+                            paths.binderSock.delete()
+                            spawnMainBinder()
+                            check(waitFor("binder socket", 15_000) { paths.binderSock.exists() }) { "binderd failed after vibration rollback" }
+                        },
+                        restartManager = { startService(svc) },
+                    )
+                    directVibrationBlockQti = false
+                }
+            }
             svc.waitSocket?.let { sock -> waitFor("socket $sock", 20_000) { paths.socket(sock).exists() } }
             if (svc.delayMs > 0) Thread.sleep(svc.delayMs)
         }
@@ -801,6 +923,17 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     @Volatile private var runnerRef: GuestRunner? = null
     val guestRunner: GuestRunner get() = runnerRef ?: runner
 
+    private fun spawnMainBinder() {
+        val env = if (File(paths.bin, "binder.verbose").exists()) mapOf("AEMU_BINDER_VERBOSE" to "1") else emptyMap()
+        val displayEnv = if (img.api == 36 && File(paths.bin, "binder.display.trace").isFile)
+            env + ("AEMU_BINDER_DISPLAY_TRACE" to "1") else env
+        val txnEnv = if (img.api == 36 && File(paths.bin, "binder.txn.trace").isFile)
+            displayEnv + ("AEMU_BINDER_TXN_TRACE" to "1") else displayEnv
+        val mainEnv = if (img.api == 36 && File(paths.bin, "binder.media.main.trace").isFile)
+            txnEnv + ("AEMU_MEDIA_BINDER_TRACE" to "main") else txnEnv
+        spawn("binderd", listOf(paths.nativeBin(kernel.binderd).absolutePath, paths.binderSock.absolutePath), mainEnv)
+    }
+
     private fun startBinder() {
         val sock = paths.binderSock.absolutePath
         when (engine) {
@@ -808,11 +941,11 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             Engine.N64 -> {
                 val env = if (File(paths.bin, "binder.verbose").exists()) mapOf("AEMU_BINDER_VERBOSE" to "1") else emptyMap()
                 val bin = paths.nativeBin(kernel.binderd).absolutePath
-                val mainEnv = if (img.api == 36 && File(paths.bin, "binder.display.trace").isFile)
-                    env + ("AEMU_BINDER_DISPLAY_TRACE" to "1") else env
-                spawn("binderd", listOf(bin, sock), mainEnv)
+                spawnMainBinder()
                 if (kernel.treble) {
-                    spawn("hwbinderd", listOf(bin, paths.hwbinderSock.absolutePath), env)
+                    val hwEnv = if (img.api == 36 && File(paths.bin, "binder.media.hw.trace").isFile)
+                        env + ("AEMU_MEDIA_BINDER_TRACE" to "hw") else env
+                    spawn("hwbinderd", listOf(bin, paths.hwbinderSock.absolutePath), hwEnv)
                     spawn("vndbinderd", listOf(bin, paths.vndbinderSock.absolutePath), env)
                     log("· Treble hwbinder and vndbinder daemons started")
                 }
@@ -895,6 +1028,10 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     val glInApp: Boolean get() = engine == Engine.KK && GlBridge.running()
 
     private fun startService(svc0: GuestService, propsFile: File? = null) {
+        if (DirectVibrationBoot.skipQti(directVibrationBlockQti, img.api, img.model, img.abi, engine, svc0.argv)) {
+            props.put("init.svc.${svc0.name}", "stopped")
+            return
+        }
         // Older saved plans and explicit service starts also pass through here.
         if (InitPlan.isZteOffModeCharger(svc0.argv)) return
         if (InitPlan.isIsolatedQtiBluetoothHal(img.api, svc0.argv)) return
@@ -947,7 +1084,10 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             val dirs = dir.split(':').filter { File(paths.root, it).isDirectory }
             if (dirs.isNotEmpty()) extra["AEMU64_LIBPATH"] = dirs.joinToString(":") { "/$it" }
         }
-        spawn(svc.name, guestRunner.cmdline(argv, props), guestRunner.env(extra))
+        if (experimentalVibrationEnabled && argv.first() == "/vendor/bin/hw/vendor.qti.hardware.vibrator.service") {
+            if (experimentalVibrationPrepared) spawnExperimentalVibration(svc.name, argv, props, extra)
+            else log("vibration: experimental service unavailable, skipping")
+        } else spawn(svc.name, guestRunner.cmdline(argv, props), guestRunner.env(extra))
     }
 
     /** a 64-bit ELF or a script */
@@ -965,7 +1105,99 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         }
     }
 
-    private fun spawn(name: String, cmd: List<String>, env: Map<String, String>) = lifecycle.ifRunning {
+    private fun spawnExperimentalVibration(name: String, argv: List<String>, propsFile: File?, extra: Map<String, String>) = lifecycle.ifRunning {
+        synchronized(vibrationLock) { if (vibrationChannel != null) return@ifRunning }
+        val channel = try { HostVibrationChannel.prepare(ctx) } catch (failure: Throwable) {
+            try { disableExperimentalVibration() } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
+            throw failure
+        }
+        synchronized(vibrationLock) { vibrationChannel = channel }
+        try {
+            val vibrationEnv = extra + mapOf(
+                "AEMU64_VIB_PRELOAD" to "1",
+                "RME_VIBRATION_SOCKET" to channel.socketName,
+                "RME_VIBRATION_HOST_PID" to AProcess.myPid().toString(),
+                "RME_VIBRATION_HOST_UID" to AProcess.myUid().toString(),
+                "RME_VIBRATION_EPOCH" to channel.epoch.toString(),
+            )
+            spawn(name, guestRunner.cmdline(argv, propsFile, experimentalVibration = true), guestRunner.env(vibrationEnv), channel)
+        } catch (failure: Throwable) {
+            try { retireExperimentalVibration(channel) } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
+            throw failure
+        }
+    }
+
+    private fun retireExperimentalVibration(channel: HostVibrationChannel) {
+        try { channel.close() } finally {
+            val owned = synchronized(vibrationLock) {
+                if (vibrationChannel === channel) { vibrationChannel = null; true } else false
+            }
+            if (owned) disableExperimentalVibration()
+        }
+    }
+
+    private fun disableExperimentalVibration() {
+        if (!experimentalVibrationPrepared) return
+        TargetVibrationDeclaration.prepare(paths.root, img.api, img.model, img.abi, engine, false)
+        experimentalVibrationPrepared = false
+    }
+
+    /** Before any other guest services start, verify that the manager answers a bounded request. */
+    private fun awaitDirectVibrationManager(runner: GuestRunner, manager: Process): Boolean {
+        val deadline = SystemClock.uptimeMillis() + 8_000
+        while (!stopping && manager.isAlive && SystemClock.uptimeMillis() < deadline) {
+            val answer = try { runner.run(listOf("/system/bin/service", "list"), 2_000) }
+                catch (interrupted: InterruptedException) { Thread.currentThread().interrupt(); throw interrupted }
+                catch (_: Exception) { null }
+            if (answer != null && answer.first == 0 && answer.second.trimStart().startsWith("Found ")) return true
+            Thread.sleep(100)
+        }
+        return false
+    }
+
+    private fun startDirectVibration(binder: ManagedGuestProcess, control: HostVibrationControl, manager: Process) {
+        // First two words were verified against a fixed target-Guest test; SYST follows.
+        val header = byteArrayOf(0, 0, 0, 0x80.toByte(), -1, -1, -1, -1, 0x54, 0x53, 0x59, 0x53)
+        val transport = NativeVibrationBinderTransport.connect(binder, paths.binderSock, header)
+        var bridge: HostVibrationBinderBridge? = null
+        try {
+            bridge = HostVibrationBinderBridge(control, transport)
+            val owned = bridge
+            lifecycle.create { synchronized(directVibrationLock) { directVibrationBridge = owned } }
+            check(transport.awaitRegistration(5_000) && manager.isAlive && binder.isAlive && !stopping) {
+                "Vibration registration unavailable"
+            }
+        } catch (failure: Throwable) {
+            try {
+                if (bridge != null) bridge.close() else transport.close()
+            } catch (cleanup: Throwable) { if (cleanup !== failure) failure.addSuppressed(cleanup) }
+            synchronized(directVibrationLock) { if (directVibrationBridge === bridge) directVibrationBridge = null }
+            throw failure
+        }
+    }
+
+    private fun closeDirectVibration(): Exception? = try {
+        val bridge = synchronized(directVibrationLock) { directVibrationBridge.also { directVibrationBridge = null } }
+        bridge?.close()
+        null
+    } catch (failure: Exception) { failure }
+
+    /** Never clear a cached declaration until both early processes have really exited. */
+    private fun stopEarlyVibrationProcess(name: String) {
+        val process = synchronized(procs) { procs[name] } ?: error("Missing early process $name")
+        ourKills.add(process)
+        if (process.isAlive) process.destroyForcibly()
+        check(process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS) && !process.isAlive) { "$name did not exit" }
+        synchronized(procs) { if (procs[name] === process) procs.remove(name) }
+    }
+
+    private fun closeExperimentalVibration(): Exception? = try {
+        val channel = synchronized(vibrationLock) { vibrationChannel }
+        if (channel != null) retireExperimentalVibration(channel) else disableExperimentalVibration()
+        null
+    } catch (failure: Exception) { failure }
+
+    private fun spawn(name: String, cmd: List<String>, env: Map<String, String>, vibration: HostVibrationChannel? = null) = lifecycle.ifRunning {
         val log = paths.log(name)
         val pb = ProcessBuilder(cmd).directory(paths.bin).redirectErrorStream(true)
         pb.environment().clear()
@@ -977,8 +1209,48 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             runCatching { log.appendText("\n=== $name ${stamp()} ===\n") }
             pb.redirectInput(File("/dev/null")).redirectOutput(ProcessBuilder.Redirect.appendTo(log))
         }
-        val p = guestLauncher.start(pb)
+        val processChannel = if (name == "aemu-radio") radioEvents else null
+        val p = if (vibration != null) guestLauncher.startLimitedVibrationExperiment(pb, paths.root)
+            else guestLauncher.start(pb, requireAuthenticated = processChannel != null)
+        try {
         trackGuestProcess(name, p)
+        vibration?.let { channel ->
+            Thread({
+                try { p.waitFor() } finally { retireExperimentalVibration(channel) }
+            }, "vibration-exit").apply { isDaemon = true; start() }
+            Thread({
+                var attached = false
+                try { attached = channel.attach(p) } finally {
+                    if (!attached) {
+                        log("vibration: event channel authentication failed")
+                        runCatching { p.destroyForcibly() }
+                    }
+                }
+            }, "vibration-attach").apply { isDaemon = true; start() }
+        }
+        processChannel?.let { channel ->
+            Thread({
+                try { waitForRadioProcess(p, channel) }
+                catch (interrupted: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    log("radio: process watcher interrupted")
+                } catch (failure: Exception) {
+                    log("radio: process watcher cleanup failed: ${failure.javaClass.simpleName}")
+                }
+            }, "radio-event-exit").apply { isDaemon = true; start() }
+            Thread({
+                var attached = false
+                try {
+                    attached = channel.attach(p)
+                    if (attached) log("radio: authenticated event channel ready")
+                } finally {
+                    if (!attached) {
+                        log("radio: event channel authentication failed")
+                        runCatching { p.destroyForcibly() }
+                    }
+                }
+            }, "radio-event-attach").apply { isDaemon = true; start() }
+        }
         log("· $name started")
         // init publishes every service's state; the framework waits on it (SystemService.waitForState: the WebView
         // zygote, the boot animation)
@@ -1005,6 +1277,10 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             // a restarted service is already running again under this name
             synchronized(procs) { if (procs[name].let { it == null || it === p }) props.put("init.svc.$name", "stopped") }
         }, "log-$name").apply { isDaemon = true; start() }
+        } catch (failure: Throwable) {
+            if (vibration != null) runCatching { p.destroyForcibly() }
+            throw failure
+        }
     }
 
     private fun alive(): List<String> = synchronized(procs) { procs.filterValues { it.isAlive }.keys.toList() }
@@ -1177,6 +1453,32 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     private fun afterBoot() {
         val r = guestRunner
         if (skipWizardNow()) return   // the system comes up again and gets here once more
+        lifecycle.launch("vm-ringtone-index") {
+            try {
+                val result = TargetRingtoneIndex.ensureWithRetry(img.api, img.model, img.abi, engine, { wait ->
+                    var remaining = wait
+                    while (remaining > 0 && !stopping) {
+                        val step = minOf(remaining, 200L)
+                        Thread.sleep(step)
+                        remaining -= step
+                    }
+                    !stopping
+                }, { message -> log("ringtone: $message") }) { command, timeout ->
+                    lifecycle.run { r.run(listOf("/system/bin/sh", "-c", shellPrefix + command), timeout) }
+                }
+                when (result) {
+                    TargetRingtoneIndex.Result.SCANNED -> {
+                        log("ringtone: system audio indexed")
+                        initializeFirstRingtones(r)
+                    }
+                    TargetRingtoneIndex.Result.FAILED -> log("ringtone: system audio indexing failed")
+                    TargetRingtoneIndex.Result.CANCELLED -> log("ringtone: system audio indexing cancelled")
+                    TargetRingtoneIndex.Result.NOT_APPLICABLE -> Unit
+                }
+            } catch (e: Exception) {
+                log("ringtone: system audio indexing failed: ${e.javaClass.simpleName}")
+            }
+        }
         // open32: right after the boot completes a dozen Google apps wake up at once, each 100-250 MB under the
         // translator; the host runs out of memory and swaps (kswapd at 100%), the screen stands still for ~15 s and
         // LMK kills and restarts them in a loop. Two background processes at most (AMS setProcessLimit, 7.x code 51).
@@ -1208,6 +1510,46 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         if (img.api >= 24) runCatching { enableHome() }.onFailure { log("home screen check failed: $it") }
         val img2 =img.copy(lastBootMs = bootDoneAt - bootAt, bootCount = img.bootCount + 1)
         ImageStore.save(ctx, img2)
+    }
+
+    private fun initializeFirstRingtones(runner: GuestRunner) {
+        if (img.api != 36 || img.model != "NX809J" || img.abi != "arm64-v8a" || engine != Engine.N64) return
+        try {
+            FirstRingtoneInitStore.open(paths.dir, img.id).use { store ->
+                val result = FirstRingtoneScan.execute(
+                    store, img.api, img.model, img.abi, engine, systemAudioIndexed = true,
+                    pause = { wait ->
+                        var remaining = wait
+                        while (remaining > 0 && !stopping) {
+                            val step = minOf(remaining, 200L)
+                            Thread.sleep(step)
+                            remaining -= step
+                        }
+                        !stopping
+                    },
+                ) { command, timeout ->
+                    if (command == "content call --uri content://media --method scan_volume --arg external_primary")
+                        log("ringtone: starting default volume scan")
+                    when (val completed = lifecycle.run {
+                        runner.runBounded(listOf("/system/bin/sh", "-c", shellPrefix + command), timeout)
+                    }) {
+                        is BoundedGuestCommand.Result.Completed -> TargetRingtoneDefaults.CommandResult.Completed(
+                            completed.exitCode, completed.output, outputComplete = true,
+                        )
+                        is BoundedGuestCommand.Result.Uncertain -> TargetRingtoneDefaults.CommandResult.TimedOut
+                    }
+                }
+                when (result) {
+                    FirstRingtoneScan.Result.Skipped -> Unit
+                    FirstRingtoneScan.Result.NotReady -> log("ringtone: first initialization not ready")
+                    FirstRingtoneScan.Result.ObservedMatchingDefaults -> log("ringtone: first defaults verified")
+                    FirstRingtoneScan.Result.ConfiguredWithUserChoices -> log("ringtone: first settings verified; non-default or silent selections retained")
+                    FirstRingtoneScan.Result.Uncertain -> log("ringtone: first initialization unverified")
+                }
+            }
+        } catch (e: Exception) {
+            log("ringtone: first initialization failed: ${e.javaClass.simpleName}")
+        }
     }
 
     /**
@@ -1534,9 +1876,25 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     // ------------------------------------------------------------------ остановка
 
     fun stop() {
+        var radioCleanupFailure: Exception? = null
+        var vibrationCleanupFailure: Exception? = null
         lifecycle.stop(onRequest = {
             stopping = true
             setState(State.STOPPING)
+            closeRadioChannelForStop(radioEvents) { radioEvents = null }?.let { failure ->
+                radioCleanupFailure = failure
+                log("radio: event channel cleanup failed: ${failure.javaClass.simpleName}")
+            }
+            activeRadioBackend = TargetRadioLaunch.Backend.DISABLED
+            closeDirectVibration()?.let { failure ->
+                vibrationCleanupFailure = failure
+                log("vibration: host bridge cleanup failed: ${failure.javaClass.simpleName}")
+            }
+            directVibrationBlockQti = false
+            closeExperimentalVibration()?.let { failure ->
+                vibrationCleanupFailure = failure
+                log("vibration: cleanup failed: ${failure.javaClass.simpleName}")
+            }
             adb.requestStop()
             externalProcs.forEach { runCatching { it.destroyForcibly() } }
         }) {
@@ -1550,6 +1908,8 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                 lmk?.stop(); lmk = null
                 Keeper.release(ctx)
             }
+            radioCleanupFailure?.let { throw it }
+            vibrationCleanupFailure?.let { throw it }
             setState(State.STOPPED)
         }
     }
@@ -1626,6 +1986,14 @@ class GuestVm(val ctx: Context, image: GuestImage) {
 
     fun guestShell(cmd: String, timeoutMs: Long = 60_000): String = lifecycle.run {
         guestRunner.run(listOf("/system/bin/sh", "-c", shellPrefix + cmd), timeoutMs).second
+    }
+
+    internal val apkInstallGate = ApkInstallGate()
+
+    internal fun apkInstallGeneration(): Long? = lifecycle.currentGeneration()
+
+    internal fun installApkStream(staged: File, size: Long, generation: Long, timeoutMs: Long = 300_000): ApkStreamResult = lifecycle.runForGeneration(generation) {
+        guestRunner.installStream(shellPrefix + "pm install -r --bypass-low-target-sdk-block -S $size", staged, size, timeoutMs)
     }
 
     internal fun startExternalProcess(builder: ProcessBuilder): Process = lifecycle.create {

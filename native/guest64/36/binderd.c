@@ -9,6 +9,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/memfd.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -19,11 +20,16 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 #include "bproto.h"
 #include "display_trace.h"
+#include "binder_txn_trace.h"
+#include "binder_hw_get_trace.h"
+#include "binder_pid_guard.h"
 
 typedef uint64_t u64;
 typedef uint32_t u32;
@@ -90,9 +96,12 @@ struct txn {
     struct node *target; u32 code, flags; int reply, need_reply, sender_pid; u32 sender_euid;
     u64 data_size, offsets_size, extra_size; char *data; int memfd; int nfds, *fds; int nheld; struct held *held;
     int display_trace_code;
+    unsigned binder_txn_trace_id;
+    unsigned media_txn_trace_id;
 };
 struct thread {
     int fd, tid, is_main, waiting, nonblock, looper, woken; u32 read_size;
+    int pid_guard_enabled; struct binder_pid_guard pid_guard;
     struct proc *proc; struct wq todo; struct txn *stack; struct thread *next;
 };
 #define NHASH 256
@@ -108,11 +117,76 @@ static struct node *ctx_mgr;
 static struct thread *cur;
 static int kick_any;
 static int ep, verbose, display_trace_enabled;
+/* Experimental, off by default. It authenticates physical PID only. */
+static int binder_strict_pid;
 static unsigned display_trace_phases;
 static struct display_trace_tracker display_trace_tracker;
+static int binder_txn_trace_enabled;
+static struct btt_state binder_txn_trace_state;
+static int media_txn_trace_enabled, media_txn_trace_driver;
+static struct btt_state media_txn_trace_state;
+static int strict_snapshot_memfd(int input, u64 data_size, u64 offsets_size);
 
 static void logf_(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap); fputc('\n', stderr);
+}
+
+/* Identify only the already-observed process and thread; never log their argv. */
+static int binder_txn_trace_match(int pid, int tid) {
+    char path[96], exe[1024], cmd[1024], comm[32];
+    if (pid <= 0 || tid <= 0) return 0;
+    snprintf(path, sizeof path, "/proc/%d/exe", pid);
+    ssize_t n = readlink(path, exe, sizeof exe - 1);
+    if (n <= 0 || n >= (ssize_t)sizeof exe - 1) return 0;
+    exe[n] = 0;
+    snprintf(path, sizeof path, "/proc/%d/cmdline", pid);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    n = read(fd, cmd, sizeof cmd); close(fd);
+    if (n <= 0 || !btt_identity(cmd, (unsigned long)n, exe)) return 0;
+    snprintf(path, sizeof path, "/proc/%d/task/%d/comm", pid, tid);
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    n = read(fd, comm, sizeof comm); close(fd);
+    return n > 0 && btt_thread(comm, (unsigned long)n);
+}
+
+/* This identity is intentionally limited to the API 36 guest mediaserver. */
+static int media_txn_process_match(int pid, int hwmanager) {
+    char path[96], exe[1024], cmd[1024];
+    if (pid <= 0) return 0;
+    snprintf(path, sizeof path, "/proc/%d/exe", pid);
+    ssize_t n = readlink(path, exe, sizeof exe - 1);
+    if (n <= 0 || n >= (ssize_t)sizeof exe - 1) return 0;
+    exe[n] = 0;
+    static const char suffix[] = "/libaemu64_36.so";
+    size_t len = (size_t)n;
+    if (len < sizeof suffix - 1 || strcmp(exe + len - (sizeof suffix - 1), suffix)) return 0;
+    snprintf(path, sizeof path, "/proc/%d/cmdline", pid);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    n = read(fd, cmd, sizeof cmd); close(fd);
+    return n > 0 && (hwmanager ? bmt_hwmanager_identity(cmd, (unsigned long)n, exe) :
+                                  bmt_identity(cmd, (unsigned long)n, exe));
+}
+
+static void media_txn_trace_event(unsigned id, const char *phase, int pid, int tid,
+                                  unsigned handle, unsigned code, unsigned detail) {
+    if (!bmt_event(&media_txn_trace_state, id)) return;
+    logf_("media-binder-txn: driver=%s id=%u phase=%s pid=%d tid=%d handle=%u code=%u detail=%u",
+          media_txn_trace_driver == 1 ? "main" : "hw", id, phase, pid, tid, handle, code, detail);
+    if (media_txn_trace_state.events == BMT_LIMIT)
+        logf_("media-binder-txn: driver=%s event limit reached; later transactions unobserved",
+              media_txn_trace_driver == 1 ? "main" : "hw");
+}
+
+static void binder_txn_trace_event(unsigned id, const char *phase, int pid, int tid,
+                                   unsigned handle, unsigned code, unsigned flags) {
+    if (!btt_event(&binder_txn_trace_state, id)) return;
+    logf_("binder-txn: id=%u phase=%s pid=%d tid=%d handle=%u code=%u detail=%u",
+          id, phase, pid, tid, handle, code, flags);
+    if (binder_txn_trace_state.events == 256)
+        logf_("binder-txn: event limit reached; later transactions unobserved");
 }
 #define V(...) do { if (verbose) logf_(__VA_ARGS__); } while (0)
 
@@ -336,6 +410,8 @@ static void thread_error(struct thread *th, u32 err) {
 
 /* the caller of t will never get an answer */
 static void txn_fail(struct txn *t, u32 err) {
+    binder_txn_trace_event(t->binder_txn_trace_id, "failed", 0, 0, 0, t->code, err);
+    media_txn_trace_event(t->media_txn_trace_id, "failed", 0, 0, 0, t->code, err);
     if (t->display_trace_code) {
         struct display_trace_event event = { .code = t->display_trace_code, .server = DISPLAY_EVENT_TRANSPORT,
             .translated = DISPLAY_TRANSLATED_FAILED, .exception = (int)err };
@@ -457,8 +533,14 @@ static void kick_proc(struct proc *p) {
 
 static void queue_txn(struct txn *t, struct thread *target) {
     struct work *w = mkwork(W_TXN); w->t = t;
-    if (target) { wq_push(&target->todo, w); deliver(target); }
-    else { wq_push(&t->to_proc->todo, w); kick_proc(t->to_proc); }
+    if (target) wq_push(&target->todo, w);
+    else wq_push(&t->to_proc->todo, w);
+    binder_txn_trace_event(t->binder_txn_trace_id, t->reply ? "reply-queued" : "request-queued",
+                           t->to_proc->pid, target ? target->tid : 0, 0, t->code, t->flags);
+    media_txn_trace_event(t->media_txn_trace_id, t->reply ? "reply-queued" : "request-queued",
+                          t->to_proc->pid, target ? target->tid : 0, 0, t->code, t->flags);
+    if (target) deliver(target);
+    else kick_proc(t->to_proc);
 }
 
 static void do_txn(struct thread *th, struct c_txn *m, char *payload, size_t payload_len, int *fds, int nfds) {
@@ -473,6 +555,14 @@ static void do_txn(struct thread *th, struct c_txn *m, char *payload, size_t pay
     if (m->h.flags & F_BIG) {
         if (nfds < 1) { free(t); thread_error(th, BR_FAILED_REPLY); return; }
         t->memfd = fds[0]; fds++; nfds--;
+        if (th->pid_guard_enabled) {
+            int snapshot = strict_snapshot_memfd(t->memfd, t->data_size, t->offsets_size);
+            close(t->memfd); t->memfd = snapshot;
+            if (snapshot < 0) {
+                for (int i = 0; i < nfds; i++) close(fds[i]);
+                free(t); thread_error(th, BR_FAILED_REPLY); return;
+            }
+        }
         data = mmap(0, total ? total : 1, PROT_READ | PROT_WRITE, MAP_SHARED, t->memfd, 0);
         if (data == MAP_FAILED) { close(t->memfd); for (int i = 0; i < nfds; i++) close(fds[i]); free(t); thread_error(th, BR_FAILED_REPLY); return; }
     } else {
@@ -511,6 +601,28 @@ static void do_txn(struct thread *th, struct c_txn *m, char *payload, size_t pay
         }
     }
     t->to_proc = to;
+    if (!reply && media_txn_trace_enabled && !(t->flags & TF_ONE_WAY) &&
+        media_txn_trace_state.events < BMT_LIMIT && media_txn_process_match(p->pid, 0)) {
+        t->media_txn_trace_id = bmt_start(&media_txn_trace_state, 1, 1, t->flags);
+        media_txn_trace_event(t->media_txn_trace_id, "request", p->pid, th->tid, m->handle, t->code, t->flags);
+        if (t->media_txn_trace_id && media_txn_trace_driver == 2 && t->code == 1 &&
+            media_txn_trace_state.events < BMT_LIMIT && media_txn_process_match(to->pid, 1)) {
+            struct hwget_class cls = hwget_classify(1, !(m->h.flags & F_BIG), data, payload_len,
+                (size_t)t->data_size, (size_t)t->offsets_size, (size_t)t->extra_size);
+            media_txn_trace_event(t->media_txn_trace_id, "hw-get-class", p->pid, th->tid,
+                                  0, t->code, ((unsigned)cls.service << 8) | (unsigned)cls.instance);
+        }
+    }
+    if (!reply && binder_txn_trace_enabled && !(t->flags & TF_ONE_WAY) &&
+        binder_txn_trace_state.events < 256 && binder_txn_trace_match(p->pid, th->tid)) {
+        t->binder_txn_trace_id = btt_start(&binder_txn_trace_state, 1, 1, 1, t->flags);
+        binder_txn_trace_event(t->binder_txn_trace_id, "request", p->pid, th->tid, m->handle, t->code, t->flags);
+        if (t->binder_txn_trace_id && t->code == 7) {
+            int token = btt_token(1, t->code, display_trace_data_safe(t, total, payload_len), data,
+                                  (size_t)t->data_size);
+            binder_txn_trace_event(t->binder_txn_trace_id, "request-token", 0, 0, 0, t->code, (unsigned)token);
+        }
+    }
     if (!reply && display_trace_enabled && (t->code == 12 || t->code == 13) && !(t->flags & TF_ONE_WAY)) {
         display_trace_phase(PHASE_CANDIDATE);
         if (t->sender_euid != 1000) display_trace_phase(PHASE_UID_OTHER);
@@ -551,6 +663,8 @@ static void do_txn(struct thread *th, struct c_txn *m, char *payload, size_t pay
 
     struct work *done = mkwork(W_COMPLETE);
     if (reply) {
+        t->binder_txn_trace_id = in_reply_to->binder_txn_trace_id;
+        t->media_txn_trace_id = in_reply_to->media_txn_trace_id;
         target_thread->stack = in_reply_to->from_parent;
         in_reply_to->from = 0; txn_free(in_reply_to);
         wq_push(&th->todo, done);
@@ -567,6 +681,8 @@ static void do_txn(struct thread *th, struct c_txn *m, char *payload, size_t pay
     }
     return;
 fail:
+    binder_txn_trace_event(t->binder_txn_trace_id, "failed", p->pid, th->tid, m->handle, t->code, err);
+    media_txn_trace_event(t->media_txn_trace_id, "failed", p->pid, th->tid, m->handle, t->code, err);
     V("txn failed: pid %d handle %u code %u err %x", p->pid, m->handle, m->code, err);
     if (t->display_trace_code) {
         struct display_trace_event event = { .code = t->display_trace_code, .server = DISPLAY_EVENT_TRANSPORT,
@@ -669,7 +785,14 @@ static void deliver(struct thread *th) {
         memcpy(CMSG_DATA(c), pass, sizeof(int) * np);
     }
     V("  -> %d/%d: br %u words%s%s", p->pid, th->tid, (u32)k, t ? (t->reply ? " + reply" : " + transaction") : "", np ? " + fds" : "");
-    if (sendmsg(th->fd, &mh, MSG_DONTWAIT | MSG_NOSIGNAL) < 0) V("send to %d/%d failed: %s", p->pid, th->tid, strerror(errno));
+    ssize_t sent = sendmsg(th->fd, &mh, MSG_DONTWAIT | MSG_NOSIGNAL);
+    if (sent < 0) V("send to %d/%d failed: %s", p->pid, th->tid, strerror(errno));
+    if (t) binder_txn_trace_event(t->binder_txn_trace_id,
+        sent < 0 ? "send-failed" : t->reply ? "reply-sent" : "request-sent",
+        p->pid, th->tid, 0, t->code, t->flags);
+    if (t) media_txn_trace_event(t->media_txn_trace_id,
+        sent < 0 ? "send-failed" : t->reply ? "reply-sent" : "request-sent",
+        p->pid, th->tid, 0, t->code, t->flags);
     /* a polling looper goes back to poll after this batch: work that did not fit into it (a call queued for the
        process while the thread's own queue had something) must make the descriptor readable again */
     int more = (th->looper & 2) && !(t && t->need_reply) && deliverable(th);
@@ -779,6 +902,7 @@ static void thread_release(struct thread *th) {
     if (cur == th) cur = 0;
     if (p) { struct thread **pp = &p->threads; while (*pp && *pp != th) pp = &(*pp)->next; if (*pp) *pp = th->next; }
     epoll_ctl(ep, EPOLL_CTL_DEL, th->fd, 0);
+    if (th->pid_guard_enabled) bpg_close(&th->pid_guard);
     close(th->fd);
     free(th);
 }
@@ -822,41 +946,177 @@ static void kick_pending(void) {
     }
 }
 
+/* Strict-only private snapshot of a large Binder payload. */
+static int strict_snapshot_memfd(int input, u64 data_size, u64 offsets_size) {
+    if (input < 0 || data_size > UINT64_MAX - 7 || (offsets_size & 7)) return -1;
+    u64 aligned = (data_size + 7) & ~7ULL;
+    if (aligned > UINT64_MAX - offsets_size) return -1;
+    u64 total = aligned + offsets_size;
+    if (!total || total > 16ULL * 1024 * 1024) return -1;
+    u64 needed = offsets_size ? total : data_size;
+    int output = (int)syscall(SYS_memfd_create, "aemu-binder-snapshot", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (output < 0) return -1;
+    if (ftruncate(output, (off_t)total) != 0) goto fail;
+    char buffer[8192];
+    for (u64 at = 0; at < needed;) {
+        size_t wanted = needed - at < sizeof buffer ? (size_t)(needed - at) : sizeof buffer;
+        ssize_t count = pread(input, buffer, wanted, (off_t)at);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) goto fail;
+        size_t done = 0;
+        while (done < (size_t)count) {
+            ssize_t written = pwrite(output, buffer + done, (size_t)count - done, (off_t)(at + done));
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) goto fail;
+            done += (size_t)written;
+        }
+        at += (u64)count;
+    }
+    if (fcntl(output, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL) != 0) goto fail;
+    return output;
+fail:
+    close(output);
+    return -1;
+}
+
+/* Strict mode validates the packet envelope before Binder reads any fields.
+ * Big scatter-gather messages stay unsupported until their mmap path is fixed. */
+static int strict_frame_shape(const char *data, size_t length, const int *fds, int nfds) {
+    if (length < sizeof(struct c_hdr)) return 0;
+    const struct c_hdr *h = (const struct c_hdr *)data;
+    if (h->op == OP_HELLO) {
+        if (length != sizeof(struct c_hello) || nfds) return 0;
+        const struct c_hello *m = (const struct c_hello *)data;
+        return m->main <= 1 && m->tid > 0 && m->tid <= INT32_MAX;
+    }
+    if (h->op == OP_READ) return length == sizeof(*h) && nfds == 0;
+    if (h->op == OP_BCS) return nfds == 0 && (length - sizeof(*h)) % sizeof(u32) == 0;
+    if (h->op != OP_TXN || length < sizeof(struct c_txn)) return 0;
+    const struct c_txn *m = (const struct c_txn *)data;
+    if (m->cmd != BC_TRANSACTION && m->cmd != BC_REPLY) return 0;
+    if (m->data_size > UINT64_MAX - 7 || (m->offsets_size & 7)) return 0;
+    u64 aligned = (m->data_size + 7) & ~7ULL;
+    if (aligned > UINT64_MAX - m->offsets_size) return 0;
+    u64 total = aligned + m->offsets_size;
+    if (total > UINT64_MAX - m->extra_size || total + m->extra_size > 16ULL * 1024 * 1024) return 0;
+    if (h->flags & F_BIG) {
+        struct stat st;
+        /* The copy path reads only data_size if no offsets follow; its own
+         * sealed snapshot supplies zero padding before Binder maps it. */
+        u64 needed = m->offsets_size ? total : m->data_size;
+        return nfds >= 1 && !m->extra_size && length == sizeof(*m) &&
+               fstat(fds[0], &st) == 0 && S_ISREG(st.st_mode) && st.st_size >= 0 && (u64)st.st_size >= needed;
+    }
+    if (total + m->extra_size > INLINE_MAX + 4096) return 0;
+    /* bclient only adds alignment bytes if offsets or extra data follow. */
+    u64 wire = (m->offsets_size || m->extra_size ? aligned : m->data_size) + m->offsets_size + m->extra_size;
+    return wire <= SIZE_MAX && length - sizeof(*m) == (size_t)wire;
+}
+
+static void strict_drop(struct thread *th, int *fds, int nfds) {
+    for (int i = 0; i < nfds; i++) close(fds[i]);
+    if (th->is_main && th->proc) proc_release(th->proc); else thread_release(th);
+    kick_pending();
+}
+
+/* On strict registration failure close both the connected socket and pidfd. */
+static int watch_thread(int epoll_fd, struct thread *th) {
+    struct epoll_event event = { .events = EPOLLIN, .data.ptr = th };
+    int result = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, th->fd, &event);
+    if (result != 0 && th->pid_guard_enabled) {
+        bpg_close(&th->pid_guard); close(th->fd); free(th);
+    }
+    return result;
+}
+
+static int strict_collect_rights(struct msghdr *message, int *fds, int *nfds) {
+    int valid = 1;
+    for (struct cmsghdr *c = CMSG_FIRSTHDR(message); c; c = CMSG_NXTHDR(message, c)) {
+        if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS) continue;
+        if (c->cmsg_len < CMSG_LEN(0)) { valid = 0; continue; }
+        size_t bytes = c->cmsg_len - CMSG_LEN(0), count = bytes / sizeof(int);
+        if (bytes % sizeof(int)) valid = 0;
+        for (size_t i = 0; i < count; i++) {
+            int received; memcpy(&received, (char *)CMSG_DATA(c) + i * sizeof(int), sizeof received);
+            if (*nfds < 254) fds[(*nfds)++] = received; else { close(received); valid = 0; }
+        }
+    }
+    return valid;
+}
+
 static void on_message(struct thread *th) {
     static char buf[INLINE_MAX + 4096 + 512];
-    char cbuf[CMSG_SPACE(sizeof(int) * 254)];
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(int) * 254) + CMSG_SPACE(sizeof(struct ucred))]; } cbuf;
     struct iovec iov = { buf, sizeof buf };
     struct msghdr mh = { 0 };
-    mh.msg_iov = &iov; mh.msg_iovlen = 1; mh.msg_control = cbuf; mh.msg_controllen = sizeof cbuf;
+    mh.msg_iov = &iov; mh.msg_iovlen = 1; mh.msg_control = cbuf.bytes;
+    mh.msg_controllen = th->pid_guard_enabled ? sizeof cbuf.bytes : CMSG_SPACE(sizeof(int) * 254);
     ssize_t n = recvmsg(th->fd, &mh, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
     if (n < 0 && (errno == EAGAIN || errno == EINTR)) return;
     if (n <= 0) {
+        if (n == 0 && th->pid_guard_enabled) {
+            int received[254], count = 0;
+            strict_collect_rights(&mh, received, &count);
+            for (int i = 0; i < count; i++) close(received[i]);
+        }
         if (th->is_main && th->proc) proc_release(th->proc); else thread_release(th);
         kick_pending();
         return;
     }
     int fds[254], nfds = 0;
-    for (struct cmsghdr *c = CMSG_FIRSTHDR(&mh); c; c = CMSG_NXTHDR(&mh, c))
-        if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS) {
-            nfds = (int)((c->cmsg_len - CMSG_LEN(0)) / sizeof(int));
-            memcpy(fds, CMSG_DATA(c), nfds * sizeof(int));
+    int valid_rights = 1;
+    if (th->pid_guard_enabled) valid_rights = strict_collect_rights(&mh, fds, &nfds);
+    else {
+        for (struct cmsghdr *c = CMSG_FIRSTHDR(&mh); c; c = CMSG_NXTHDR(&mh, c)) {
+            if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS) {
+                nfds = (int)((c->cmsg_len - CMSG_LEN(0)) / sizeof(int));
+                memcpy(fds, CMSG_DATA(c), nfds * sizeof(int));
+            }
         }
+    }
+    if (th->pid_guard_enabled) {
+        if (!valid_rights || !bpg_packet(&th->pid_guard, &mh) ||
+            !strict_frame_shape(buf, (size_t)n, fds, nfds)) {
+            strict_drop(th, fds, nfds); return;
+        }
+        /* Pad unaligned inline data with zeroes: the sender can omit these
+         * bytes when no offsets or scatter-gather payload follows. */
+        struct c_hdr *header = (struct c_hdr *)buf;
+        if (header->op == OP_TXN && !(header->flags & F_BIG)) {
+            struct c_txn *m = (struct c_txn *)buf;
+            if (!m->offsets_size && !m->extra_size && (m->data_size & 7)) {
+                size_t padding = 8 - (size_t)(m->data_size & 7);
+                if ((size_t)n + padding > sizeof buf) { strict_drop(th, fds, nfds); return; }
+                memset(buf + n, 0, padding);
+            }
+        }
+    }
     struct c_hdr *h = (struct c_hdr *)buf;
     if ((size_t)n < sizeof *h) return;
     if (h->op == OP_HELLO) {
         struct c_hello *m = (struct c_hello *)buf;
+        if (th->pid_guard_enabled && th->proc) { strict_drop(th, fds, nfds); return; }
         /* every open("/dev/binder") is a process of its own, as in the driver; its threads name it by pid + descriptor */
         struct proc *p = procs;
-        while (p && !(p->pid == (int)m->pid && p->key == m->pad)) p = p->next;
+        int peer_pid = th->pid_guard_enabled ? (int)th->pid_guard.pid : (int)m->pid;
+        while (p && !(p->pid == peer_pid && p->key == m->pad)) p = p->next;
+        if (th->pid_guard_enabled) {
+            int has_main = 0;
+            if (p) for (struct thread *t = p->threads; t; t = t->next) if (t->is_main) { has_main = 1; break; }
+            if ((!m->main && !has_main) || (m->main && p)) { strict_drop(th, fds, nfds); return; }
+        }
         if (m->main || !p) {
-            p = zalloc(sizeof *p); p->pid = (int)m->pid; p->key = m->pad; p->next = procs; procs = p;
+            p = zalloc(sizeof *p); p->pid = peer_pid; p->key = m->pad; p->next = procs; procs = p;
             V("pid %d opened binder (fd %u)", p->pid, p->key);
         }
         th->proc = p; th->tid = (int)m->tid; th->is_main = (int)m->main;
         th->next = p->threads; p->threads = th;
         return;
     }
-    if (!th->proc) return;
+    if (!th->proc) {
+        if (th->pid_guard_enabled) strict_drop(th, fds, nfds);
+        return;
+    }
     cur = th;
     V("%d/%d: op %u flags %u len %zd fds %d", th->proc->pid, th->tid, h->op, h->flags, n, nfds);
     if (h->op == OP_BCS) do_bcs(th, (u32 *)(h + 1), (int)((n - sizeof *h) / 4));
@@ -874,19 +1134,37 @@ static void on_message(struct thread *th) {
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: binderd64 <socket>\n"); return 2; }
     verbose = getenv("AEMU_BINDER_VERBOSE") != 0;
+    const char *strict = getenv("AEMU_BINDER_STRICT_PID");
+    binder_strict_pid = strict && !strcmp(strict, "1");
+    if (binder_strict_pid && bpg_probe() != 0) {
+        perror("binderd64: strict PID unavailable"); return 1;
+    }
     display_trace_enabled = getenv("AEMU_BINDER_DISPLAY_TRACE") != 0;
+    binder_txn_trace_enabled = getenv("AEMU_BINDER_TXN_TRACE") != 0;
+    const char *media_trace = getenv("AEMU_MEDIA_BINDER_TRACE");
+    media_txn_trace_driver = media_trace && !strcmp(media_trace, "main") ? 1 :
+                             media_trace && !strcmp(media_trace, "hw") ? 2 : 0;
+    media_txn_trace_enabled = media_txn_trace_driver != 0;
     signal(SIGPIPE, SIG_IGN);
     setvbuf(stderr, 0, _IOLBF, 0);
     if (display_trace_enabled) logf_("display-trace: enabled; exact process identity required; no matching output means unobserved");
     struct rlimit rl; if (!getrlimit(RLIMIT_NOFILE, &rl)) { rl.rlim_cur = rl.rlim_max; setrlimit(RLIMIT_NOFILE, &rl); }
     int ls = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (binder_strict_pid) {
+        int passcred = 1;
+        if (setsockopt(ls, SOL_SOCKET, SO_PASSCRED, &passcred, sizeof passcred) != 0) {
+            perror("binderd64: strict credentials"); close(ls); return 1;
+        }
+    }
     struct sockaddr_un sa = { .sun_family = AF_UNIX };
     strncpy(sa.sun_path, argv[1], sizeof sa.sun_path - 1);
     unlink(argv[1]);
     if (bind(ls, (struct sockaddr *)&sa, sizeof sa) < 0 || listen(ls, 128) < 0) { perror("binderd64: bind"); return 1; }
     ep = epoll_create1(EPOLL_CLOEXEC);
+    if (binder_strict_pid && ep < 0) { perror("binderd64: strict epoll"); close(ls); return 1; }
     struct epoll_event ev = { .events = EPOLLIN, .data.ptr = 0 };
-    epoll_ctl(ep, EPOLL_CTL_ADD, ls, &ev);
+    int listener_watch = epoll_ctl(ep, EPOLL_CTL_ADD, ls, &ev);
+    if (binder_strict_pid && listener_watch != 0) { perror("binderd64: strict listener watch"); close(ls); close(ep); return 1; }
     logf_("binderd64: listening on %s", argv[1]);
     for (;;) {
         struct epoll_event evs[64];
@@ -897,8 +1175,11 @@ int main(int argc, char **argv) {
                 if (fd < 0) continue;
                 struct thread *th = zalloc(sizeof *th);
                 th->fd = fd;
-                ev.events = EPOLLIN; ev.data.ptr = th;
-                epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev);
+                if (binder_strict_pid) {
+                    if (bpg_init(&th->pid_guard, fd) != 0) { close(fd); free(th); continue; }
+                    th->pid_guard_enabled = 1;
+                }
+                watch_thread(ep, th);
             } else {
                 on_message(evs[i].data.ptr);
                 break;      /* the handler may have freed threads named by the remaining events: poll again */

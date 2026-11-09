@@ -6,9 +6,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BootNoticeTest {
-    @Test fun reportedBootCompletionDoesNotHideUnverifiedDesktopStatus() {
+    @Test fun bootNoticeDisappearsAfterGuestReportsBootCompletion() {
         assertTrue(shouldShowBootNotice(GuestVm.State.BOOTING))
-        assertTrue(shouldShowBootNotice(GuestVm.State.RUNNING))
+        assertFalse(shouldShowBootNotice(GuestVm.State.RUNNING))
         assertFalse(shouldShowBootNotice(GuestVm.State.FAILED))
     }
 }

@@ -9,6 +9,10 @@ object HostNative {
     @JvmStatic external fun pidfdOpen(pid: Int): Int
     @JvmStatic external fun pidfdSignal(fd: Int, signal: Int): Int
     @JvmStatic external fun pidfdClose(fd: Int)
+    /** Nonblocking; 0 means no packet, -1 invalid/closed, 1..3 authenticated ACK. */
+    @JvmStatic external fun radioReadAck(socketFd: Int, pidfd: Int, pid: Int, uid: Int, epoch: Long, sequence: Long): Int
+    /** Dedicated vibration connection: -1 reject, 0 empty, 1 cancel, otherwise milliseconds+1. */
+    @JvmStatic external fun vibrationRead(socketFd: Int, pidfd: Int, pid: Int, uid: Int, epoch: Long, sequence: Long): Int
 
     /** Закрытый GL-мост делает freopen() поверх fd 2 — без этого fdsan роняет процесс :vm. */
     /** RLIMIT_STACK 8 MB for guest processes (bionic 6.0 derives the main thread's stack bounds from it). */

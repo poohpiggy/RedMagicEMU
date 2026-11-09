@@ -7,6 +7,57 @@ import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 class VmLifecycleTest {
+    @Test fun delayedRadioRequestDoesNotReachRestartedSession() {
+        val lifecycle = VmLifecycle()
+        assertTrue(lifecycle.begin())
+        lifecycle.endBoot()
+        val clickedGeneration = lifecycle.currentGeneration()!!
+        val release = CountDownLatch(1)
+        var delivered = false
+        val worker = thread {
+            release.await()
+            try { lifecycle.runForGeneration(clickedGeneration) { delivered = true } }
+            catch (_: IllegalStateException) { }
+        }
+        lifecycle.stop({}) {}
+        assertTrue(lifecycle.begin())
+        lifecycle.endBoot()
+        release.countDown()
+        worker.join(3000)
+        assertFalse("old click delivered to restarted session", delivered)
+        lifecycle.stop({}) {}
+    }
+
+    @Test fun stoppedBootCannotPublishLateRadioChannel() {
+        val lifecycle = VmLifecycle()
+        assertTrue(lifecycle.begin())
+        val stopping = CountDownLatch(1)
+        val stopper = thread { lifecycle.stop({ stopping.countDown() }) {} }
+        assertTrue(stopping.await(3, TimeUnit.SECONDS))
+        var published = false
+        try {
+            try { lifecycle.create { published = true } } catch (_: IllegalStateException) { }
+            assertFalse("channel published after stop request", published)
+        } finally { lifecycle.endBoot(); stopper.join(3000) }
+    }
+
+    @Test fun stagedWorkFromPreviousBootIsRejectedAfterRestart() {
+        val lifecycle = VmLifecycle()
+        assertTrue(lifecycle.begin())
+        lifecycle.endBoot()
+        val old = lifecycle.currentGeneration()!!
+        lifecycle.stop({}) {}
+        assertNull(lifecycle.currentGeneration())
+        assertTrue(lifecycle.begin())
+        lifecycle.endBoot()
+        assertNotEquals(old, lifecycle.currentGeneration())
+        var started = false
+        try { lifecycle.runForGeneration(old) { started = true } } catch (_: IllegalStateException) { }
+        assertFalse(started)
+        lifecycle.runForGeneration(lifecycle.currentGeneration()!!) { started = true }
+        assertTrue(started)
+        lifecycle.stop({}) {}
+    }
     @Test fun stopCannotPassProcessRegistrationAndRejectsLaterStarts() {
         val lifecycle = VmLifecycle()
         assertTrue(lifecycle.begin())

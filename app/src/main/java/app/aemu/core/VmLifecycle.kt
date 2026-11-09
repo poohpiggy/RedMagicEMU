@@ -7,9 +7,11 @@ internal class VmLifecycle {
     private var booting = false
     private var stopping = false
     private var workers = 0
+    private var generation = 0L
 
     fun begin(onBegin: () -> Unit = {}): Boolean = synchronized(lock) {
         if (active) return false
+        generation++
         active = true
         booting = true
         stopping = false
@@ -34,6 +36,18 @@ internal class VmLifecycle {
     fun <T> run(action: () -> T): T {
         synchronized(lock) {
             check(active && !stopping) { "VM is stopping or stopped" }
+            workers++
+        }
+        try { return action() } finally {
+            synchronized(lock) { workers--; lock.notifyAll() }
+        }
+    }
+
+    fun currentGeneration(): Long? = synchronized(lock) { if (active && !stopping) generation else null }
+
+    fun <T> runForGeneration(expected: Long, action: () -> T): T {
+        synchronized(lock) {
+            check(active && !stopping && generation == expected) { "VM session changed" }
             workers++
         }
         try { return action() } finally {

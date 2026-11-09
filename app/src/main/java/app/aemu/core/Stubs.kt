@@ -89,10 +89,11 @@ class RilStub(
     /** Incoming call from [number], like "gsm call" in the SDK emulator console. False when telephony is not up. */
     fun ring(number: String): Boolean {
         val o = out ?: return false
+        // A write failure can occur after the peer received a complete event. Do not undo
+        // the call state: a notification already observed by the guest cannot be recalled.
         call = number to CALL_INCOMING
-        unsol(o, UNSOL_RESPONSE_CALL_STATE_CHANGED, ByteArray(0))
-        unsol(o, UNSOL_CALL_RING, ByteArray(0))
-        return true
+        return unsol(o, UNSOL_RESPONSE_CALL_STATE_CHANGED, ByteArray(0)).isSuccess &&
+            unsol(o, UNSOL_CALL_RING, ByteArray(0)).isSuccess
     }
 
     /**
@@ -105,7 +106,7 @@ class RilStub(
         val parts = if (text.length <= 70) listOf(text) else text.chunked(67)
         val ref = (System.nanoTime() and 0xff).toInt()
         parts.forEachIndexed { i, part ->
-            unsol(o, UNSOL_RESPONSE_NEW_SMS, str(smsPdu(from, part, if (parts.size > 1) Triple(ref, parts.size, i + 1) else null)))
+            if (unsol(o, UNSOL_RESPONSE_NEW_SMS, str(smsPdu(from, part, if (parts.size > 1) Triple(ref, parts.size, i + 1) else null))).isFailure) return false
         }
         return true
     }

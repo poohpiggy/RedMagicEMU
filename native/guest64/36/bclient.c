@@ -2,6 +2,7 @@
 // Included by run64.c; runs inside the SIGSYS handler, so no libc and little stack.
 
 #include "bproto.h"
+#include "binder_client_trace.h"
 
 // syscalls defined in run64.c: NR_pwrite64, NR_sched_yield, NR_getpid, NR_gettid, NR_sendmsg, NR_recvmsg
 
@@ -35,11 +36,14 @@ struct bfda { u32 type, pad; u64 num_fds, parent, parent_offset; };
 struct iov { void *base; u64 len; };
 struct msgh { void *name; u32 namelen; struct iov *iov; u64 iovlen; void *control; u64 controllen; int flags; };
 struct cmsg { u64 len; int level, type; };
+#include "vibration_fd_guard.h"
 
 static char g_bsock[108];                       // the daemon's socket (AEMU64_BINDER)
 static char g_hwbsock[108];                     // AEMU64_HWBINDER
 static char g_vndbsock[108];                    // AEMU64_VNDBINDER
 static int g_bpid;                              // the process the state below belongs to
+static unsigned g_bct_count;
+static int g_bct_enabled;
 static int g_bfds[8];                           // descriptors open("/dev/binder", etc.) returned, +1
 static char g_bfd_socks[8][108];
 #define NTH 509
@@ -105,6 +109,60 @@ static const char *sock_for_fd(int fd) {
     return g_bsock;
 }
 
+/* Open only a pre-existing, private, singly-linked regular file; never follow a link or block on a FIFO. */
+static long bct_open(void) {
+    static const char suffix[] = "/../run/binder.client.trace";
+    char path[560];
+    struct kstat st;
+    if (g_rootlen + sizeof suffix > sizeof path) return -1;
+    memcpy(path, g_root, g_rootlen); memcpy(path + g_rootlen, suffix, sizeof suffix);
+    long out = S4(NR_openat, AT_FDCWD, path, 1 | 02000 | 04000 | 0400000 | 02000000, 0);
+    if (out < 0) return -1;
+    if (S2(NR_fstat, out, &st) < 0 || (st.st_mode & 0170000) != 0100000 ||
+        (st.st_mode & 0077) || st.st_uid != g_real_uid || st.st_nlink != 1 || st.st_size < 0 || st.st_size > 65376) {
+        S1(NR_close, out); return -1;
+    }
+    return out;
+}
+
+/* Opt in before Guest boot; otherwise binder reads perform no diagnostic I/O. */
+static void bct_init(void) {
+    long out = bct_open();
+    if (out >= 0) { g_bct_enabled = 1; S1(NR_close, out); }
+}
+
+/* SIGSYS handler: stack-local buffers, raw engine syscalls, no locks or guest data. */
+static void bct_log(struct bth *t, int phase) {
+    char path[560], cmdline[1024], comm[32], line[160];
+    if (!g_bct_enabled || g_is32) return;
+    long out = -1;
+    long fd = S4(NR_openat, AT_FDCWD, "/proc/self/cmdline", 02000000 | 0400000, 0);
+    if (fd < 0) goto done;
+    long n = S3(NR_read, fd, cmdline, sizeof cmdline); S1(NR_close, fd);
+    if (n <= 0 || !bct_identity(cmdline, (u64)n, g_self)) goto done;
+    int tid = (int)S0(NR_gettid);
+    char digits[24]; char *s = utoa((u64)tid, digits + sizeof digits);
+    static const char prefix[] = "/proc/self/task/";
+    static const char tail[] = "/comm";
+    u64 dlen = slen(s); memcpy(path, prefix, sizeof prefix - 1);
+    memcpy(path + sizeof prefix - 1, s, dlen);
+    memcpy(path + sizeof prefix - 1 + dlen, tail, sizeof tail);
+    fd = S4(NR_openat, AT_FDCWD, path, 02000000 | 0400000, 0);
+    if (fd < 0) goto done;
+    n = S3(NR_read, fd, comm, sizeof comm); S1(NR_close, fd);
+    if (n <= 0 || !bct_thread(comm, (u64)n)) goto done;
+    out = bct_open();
+    if (out < 0 || !bct_reserve(&g_bct_count)) goto done;
+    const char *sock = sock_for_fd(t->bfd);
+    int driver = g_bsock[0] && seq(sock, g_bsock) ? 1 :
+                 g_hwbsock[0] && seq(sock, g_hwbsock) ? 2 :
+                 g_vndbsock[0] && seq(sock, g_vndbsock) ? 3 : 0;
+    u64 len = bct_format(line, (u64)S0(NR_getpid), (u64)tid, (u64)t->sock, driver, phase);
+    S3(NR_write, out, line, len);
+done:
+    if (out >= 0) S1(NR_close, out);
+}
+
 static long bconnect(int main_, int cloexec, int bfd, const char *sock_path) {
     long s = S3(NR_socket, 1, 5 /*SOCK_SEQPACKET*/ | (cloexec ? 02000000 : 0), 0);
     if (s < 0) return s;
@@ -150,6 +208,7 @@ static long binder_open(long flags, const char *dev_name) {
     if (g_bpid != pid) {                        // a fresh process (or a fork child): nothing is inherited
         memset(g_bth, 0, sizeof g_bth); memset(g_bfds, 0, sizeof g_bfds);
         memset(g_bfd_socks, 0, sizeof g_bfd_socks);
+        __atomic_store_n(&g_bct_count, 0, __ATOMIC_RELAXED);
         g_bmap = 0; g_block = 0; g_bpid = pid;
     }
     long s = bconnect(1, (flags & 02000000) != 0, -1, target_sock);
@@ -284,7 +343,23 @@ static long bread(struct bth *t, struct bwr *w) {
     long r;
     do {
         mh.controllen = sizeof cm;
+        bct_log(t, 0);
         r = S3(NR_recvmsg, t->sock, &mh, 0x40000000 /*MSG_CMSG_CLOEXEC*/);
+        bct_log(t, r >= (long)sizeof h ? 1 : 2);
+        /* Binder uses a trusted syscall trampoline and bypasses run64's normal
+         * recvmsg trap. The experimental vibration process must reject passed
+         * descriptors here too, including the memfd used by F_BIG. */
+        if (g_vibrator_preload && r >= 0 &&
+            (rme_vibration_check_received(&mh) != 0 ||
+             (r >= (long)sizeof h && (h.flags & F_BIG)))) {
+            /* The transaction was consumed and cannot be replied to. Retire
+             * this connection even if its FD was duplicated, then terminate
+             * this experimental service rather than silently hanging it. */
+            if (S2(NR_shutdown, t->sock, 2 /* SHUT_RDWR */) < 0)
+                say("vibration: Binder connection shutdown failed\n");
+            S1(NR_exit_group, 127);
+            for (;;) { }
+        }
     } while (r == -EINTR || (r >= (long)sizeof h && (h.flags & F_WAKE)));
     if (r < (long)sizeof h) return r < 0 ? r : -EBADF;
     if (h.flags & F_AGAIN) return -EAGAIN;

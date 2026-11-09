@@ -36,8 +36,20 @@ class GuestRunner(
     val qemu: File get() = paths.nativeBin(if (engine == Engine.N64) kernel.runner else engine.qemu)
     val runner: File get() = paths.nativeBin(engine.runner)
 
-    fun cmdline(argv: List<String>, propsFile: File? = null): List<String> {
+    fun cmdline(argv: List<String>, propsFile: File? = null, experimentalVibration: Boolean = false): List<String> {
         val prog = argv.first()
+        if (experimentalVibration) {
+            require(img.model == "NX809J" && img.api == 36 && img.abi == "arm64-v8a" &&
+                engine == Engine.N64 && prog == "/vendor/bin/hw/vendor.qti.hardware.vibrator.service") {
+                "Experimental vibration engine requires the target firmware and vibration service"
+            }
+            val vibrationEngine = paths.nativeBin("libaemu64_vibration_36.so")
+            check(vibrationEngine.isFile && vibrationEngine.canExecute()) {
+                "Experimental vibration engine is missing or not executable"
+            }
+            // Selection alone does not establish isolation; normal boot must not enable this experiment.
+            return listOf(vibrationEngine.absolutePath, prog) + argv
+        }
         val host = File(paths.root, prog.removePrefix("/")).absolutePath
         val cmd = ArrayList<String>()
         if (engine == Engine.N64) return listOf(qemu.absolutePath, prog) + argv
@@ -166,6 +178,12 @@ class GuestRunner(
             else -> e[k] = v
         }
         e.putAll(derivedExports)
+        // Only an explicit host launch may configure the vibration bridge;
+        // firmware and user exports cannot enable or redirect it.
+        for (key in VIBRATION_ENV_KEYS) {
+            e.remove(key)
+            extra[key]?.let { e[key] = it }
+        }
         return e
     }
 
@@ -234,6 +252,21 @@ class GuestRunner(
         return e
     }
 
+    /**
+     * Bounded command for operations that must distinguish a complete result
+     * from timeout, partial output or failed process startup. Callers must keep
+     * their VM lifecycle worker active for the entire operation.
+     */
+    internal fun runBounded(argv: List<String>, timeoutMs: Long,
+                            extra: Map<String, String> = emptyMap()): BoundedGuestCommand.Result =
+        BoundedGuestCommand().run(timeoutMs) {
+            check(qemu.canExecute()) { "Guest engine is not executable" }
+            val pb = ProcessBuilder(cmdline(argv)).directory(paths.bin).redirectErrorStream(true)
+            pb.environment().clear()
+            pb.environment().putAll(env(extra))
+            processStarter(pb)
+        }
+
     /** Одноразовый запуск гостевой команды (am, pm, settings, sh -c …) с ожиданием вывода. */
     fun run(argv: List<String>, timeoutMs: Long = 120_000, extra: Map<String, String> = emptyMap(),
             start: (ProcessBuilder) -> Process = processStarter): Pair<Int, String> {
@@ -252,8 +285,22 @@ class GuestRunner(
         return code to sb.toString()
     }
 
+    internal fun installStream(command: String, staged: File, size: Long, timeoutMs: Long): ApkStreamResult {
+        if (!qemu.canExecute()) return ApkStreamResult(false, "no qemu")
+        if (size <= 0 || staged.length() != size) return ApkStreamResult(false, "Incomplete APK")
+        val pb = ProcessBuilder(cmdline(listOf("/system/bin/sh", "-c", command)))
+            .directory(paths.bin).redirectErrorStream(true).redirectInput(staged)
+        pb.environment().clear()
+        pb.environment().putAll(env())
+        return runApkInstallStream(processStarter(pb), staged, size, timeoutMs)
+    }
+
     companion object {
         private val EXPORTS_SKIP = setOf("PATH", "LD_LIBRARY_PATH", "BOOTCLASSPATH", "LD_PRELOAD")
+        private val VIBRATION_ENV_KEYS = setOf(
+            "AEMU64_VIB_PRELOAD", "RME_VIBRATION_SOCKET", "RME_VIBRATION_HOST_PID",
+            "RME_VIBRATION_HOST_UID", "RME_VIBRATION_EPOCH",
+        )
 
         /** Whether a 32-bit ELF has a PT_GNU_STACK program header (unreadable file: assume yes, nothing changes). */
         fun hasGnuStack(f: File): Boolean = runCatching {

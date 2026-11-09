@@ -1,0 +1,14 @@
+{
+  "android/hardware/vibrator/ActivePwle.aidl": "06056a74ac1e6fead3ad6c5ed3d19f6c2a85534ea39d011048c4c7b7fad66d0b",
+  "android/hardware/vibrator/Braking.aidl": "d09b0adfd75a14b488a8b555312d80bdc12a824653db8c4ff6b7dc6e94c71294",
+  "android/hardware/vibrator/BrakingPwle.aidl": "09df2c16cbdaf9af7c877a0b48f21abefae05f74ba3a872490dfa565a62fba80",
+  "android/hardware/vibrator/CompositeEffect.aidl": "815e466d146da215a6b3c7cf8cf3901adb79047d8c9966a9d1739cd64f6fc939",
+  "android/hardware/vibrator/CompositePrimitive.aidl": "84607cd13ddf5c690797f227f0f5173d755677a27b60bb565427f2fa5c57769b",
+  "android/hardware/vibrator/Effect.aidl": "81ace5d9309c38215e41f5b99e01da681bd783051ad12fc89bacf77a18435e91",
+  "android/hardware/vibrator/EffectStrength.aidl": "f5f38f6b028c9b531044d88bff6b3e59f734ea08de677f717789e6244937769f",
+  "android/hardware/vibrator/IVibrator.aidl": "51161792eba95aee28a92723a1430b235e57e75751c24db04d84f7d83cca318e",
+  "android/hardware/vibrator/IVibratorCallback.aidl": "7f7a3f87207923fa5a2f85480c039772ec61b9d8fa9e95fffd9dc9e5dac58544",
+  "android/hardware/vibrator/IVibratorManager.aidl": "c6f4223a08073b4c35560f0f6abf1f65afb3bf5acdad0635463dd217c87b6fb3",
+  "android/hardware/vibrator/PrimitivePwle.aidl": "af2871535b58e159e7dfe678d7e44ecf25f0c98a445b5ee344c9d94ed9f5907e",
+  ".hash": "a9bdb448f3dc3d53206c1f188cd36d5c8ca3feef4f12ba61436061e7e460f64f"
+}

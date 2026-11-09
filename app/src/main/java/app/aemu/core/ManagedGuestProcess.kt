@@ -14,6 +14,17 @@ internal class ManagedGuestProcess(
 ) : Process() {
     private val lock = Any()
 
+    /**
+     * Borrow the launcher-authenticated handle for a short, nonblocking operation.
+     * The callback must not retain or close the fd, wait for the process, or perform
+     * blocking socket I/O. Close and signal operations wait until the callback returns.
+     * The consumer must check pidfd liveness; the process can exit during the callback.
+     */
+    internal fun <T> withAuthenticatedHandle(operation: (pid: Int, fd: Int) -> T): T = synchronized(lock) {
+        check(fd >= 0 && delegate.isAlive) { "authenticated Guest process $pid is unavailable" }
+        operation(pid, fd)
+    }
+
     override fun getOutputStream(): OutputStream = delegate.outputStream
     override fun getInputStream(): InputStream = delegate.inputStream
     override fun getErrorStream(): InputStream = delegate.errorStream

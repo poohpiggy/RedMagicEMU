@@ -1,8 +1,9 @@
 #!/bin/sh
-# DEFS=-DAEMU_META (Android 17): room for the stable-C mapper's note in every buffer (note.h).
+# AEMU_META reserves buffer metadata used by the API 36 graphics bridge and the Android 17 mapper (note.h).
 # gralloc of the native arm64 engine (see gralloc_wrap.c): sh build.sh <kernel tag> builds it into that kernel's guest
 # files as vendor/lib64/hw/gralloc.default.so; AOSP's own module has to be there as vendor/lib64/libgralloc_aosp.so (outside hw/, where the tree fixer sets aside every gralloc but the default).
 TAG=${1:?usage: sh build.sh <kernel tag>}
+if [ "$TAG" = 36 ]; then DEFS="${DEFS:-} -DAEMU_META"; fi
 NDK=${NDK:-$ANDROID_NDK_HOME}
 BIN="$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin"
 [ -x "$BIN/clang" ] || BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"

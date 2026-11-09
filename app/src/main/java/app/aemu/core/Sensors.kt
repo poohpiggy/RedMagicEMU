@@ -15,40 +15,68 @@ import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
+/** The old vibration FIFO requires explicit opt-in. */
+internal class SensorChannels(
+    private val legacyVibration: Boolean,
+    private val accelerometerStart: () -> Unit,
+    private val accelerometerStop: () -> Unit,
+    private val vibrationStart: () -> Unit,
+    private val vibrationStop: () -> Unit,
+) {
+    fun start() {
+        accelerometerStart()
+        if (legacyVibration) vibrationStart()
+    }
+
+    fun stop() {
+        accelerometerStop()
+        if (legacyVibration) vibrationStop()
+    }
+}
+
 /**
  * The phone's accelerometer and vibration motor for the guest.
  *  - accelerometer: 16-byte records (type, x, y, z) into the FIFO /dev/aemu_sensors, read by the emulator's sensors
  *    HAL (native/sensorshal); only while the VM screen is shown;
  *  - vibration: /sys/class/timed_output/vibrator/enable is a FIFO; libhardware_legacy / the vibrator HAL of 2.3–7.x
- *    write the duration in ms there, and the phone vibrates for that long.
+ *    write the duration in ms there, and the phone vibrates for that long. The FIFO requires explicit opt-in because
+ *    it does not authenticate the Guest caller; disabling it does not retire a prior reader.
  */
-class Sensors(private val ctx: Context, private val root: File, private val log: (String) -> Unit) : SensorEventListener {
+class Sensors(private val ctx: Context, private val root: File, legacyVibration: Boolean, private val log: (String) -> Unit) : SensorEventListener {
     private val accelFifo = File(root, "dev/aemu_sensors")
     private val vibFifo = File(root, "sys/class/timed_output/vibrator/enable")
     @Volatile private var out: FileDescriptor? = null
     @Volatile private var running = false
     private val rec = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
 
-    fun start() {
-        running = true
+    private val channels = SensorChannels(legacyVibration, accelerometerStart = {
         runCatching {
             mkfifo(accelFifo)
             // O_RDWR | O_NONBLOCK: opening needs no reader, and a full pipe (guest not polling) drops samples
             out = Os.open(accelFifo.absolutePath, OsConstants.O_RDWR or OsConstants.O_NONBLOCK or OsConstants.O_CLOEXEC, 0)
             apply()
         }.onFailure { log("sensors: accelerometer channel failed: ${it.message}") }
+    }, accelerometerStop = {
+        apply()
+        runCatching { out?.let { Os.close(it) } }; out = null
+    }, vibrationStart = {
         runCatching {
             vibFifo.parentFile?.mkdirs()
             mkfifo(vibFifo)
             Thread({ vibrations() }, "vibrator").apply { isDaemon = true; start() }
         }.onFailure { log("sensors: vibrator channel failed: ${it.message}") }
+    }, vibrationStop = {
+        runCatching { File(vibFifo.absolutePath).appendText("0\n") }
+    })
+
+    fun start() {
+        running = true
+        channels.start()
     }
 
     fun stop() {
         running = false
-        apply()
-        runCatching { out?.let { Os.close(it) } }; out = null
-        runCatching { File(vibFifo.absolutePath).appendText("0\n") }
+        channels.stop()
     }
 
     @Volatile private var visible = false

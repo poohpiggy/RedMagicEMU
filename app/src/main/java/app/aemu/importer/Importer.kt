@@ -9,6 +9,7 @@ import app.aemu.core.TreeFixer
 import app.aemu.core.VmPaths
 import app.aemu.core.RecoveryImage
 import app.aemu.core.InstanceAdmission
+import app.aemu.core.FirstRingtoneInitStore
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
@@ -28,6 +29,16 @@ import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 import java.nio.file.StandardOpenOption
 import java.util.zip.GZIPInputStream
+
+/** Mark a validated private import before it can be published to the instance library. */
+internal fun publishWithFreshRingtoneMarker(
+    lease: PendingImports.Lease,
+    id: String,
+    publish: (() -> Unit) -> Unit,
+): File {
+    FirstRingtoneInitStore.open(File(lease.dir, id), id).use { it.createFresh() }
+    return lease.commit(id, publish = publish)
+}
 
 /**
  * Импорт прошивки в дерево гостя. Понимает (в том числе вложенные друг в друга):
@@ -83,7 +94,7 @@ class Importer(
                 }
             }
             if (cancelled) throw ImportCancelledException()
-            lease.commit(result.id, publish = publicationGate::publish)
+            publishWithFreshRingtoneMarker(lease, result.id, publicationGate::publish)
             published = true
             var finalResult = result
             try { lease.close() } catch (cleanup: Throwable) {

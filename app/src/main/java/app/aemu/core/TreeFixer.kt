@@ -162,6 +162,9 @@ class TreeFixer(
         if (owners) seedOwners()
         if (TargetQtiComponent.prepare(root, img.api, img.model, engine)) log("QTI radio extension default-disabled: unavailable HAL")
         installEngineFiles()
+        TargetRadioArtifacts.prepare(root, img.api, img.model, img.abi, engine, img.settings.radio) { asset ->
+            EngineAssets.open(ctx, asset).use { it.readBytes() }
+        }
         HcHwRender.install(ctx, root, img.api, log)
         protectOat()
         fixThemeXml()
