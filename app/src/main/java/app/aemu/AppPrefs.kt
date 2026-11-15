@@ -8,16 +8,18 @@ import java.util.Locale
 /** Настройки самого приложения (не отдельной системы): язык, тема, умолчания для новых систем. */
 object AppPrefs {
     private const val FILE = "app"
+    private const val DEFAULT_LANGUAGE = "en-US"
 
     /** Языки интерфейса: код BCP-47 → самоназвание. Пустой код — как в системе. */
     val LANGUAGES = listOf(
         "" to "",
-        "en-US" to "English (United States)",
+        DEFAULT_LANGUAGE to "English (United States)",
         "en-GB" to "English (United Kingdom)",
         "zh-CN" to "简体中文",
         "zh-TW" to "繁體中文",
         "zh-HK" to "繁體中文（香港）",
     )
+    private val SUPPORTED_LANGUAGES = LANGUAGES.mapTo(mutableSetOf()) { it.first }.apply { remove("") }
 
     const val THEME_SYSTEM = 0
     const val THEME_LIGHT = 1
@@ -39,10 +41,41 @@ object AppPrefs {
     fun lastRun(ctx: Context, id: String): Long = sp(ctx).getLong("last_run_$id", 0L)
     fun setLastRun(ctx: Context, id: String, v: Long) = sp(ctx).edit().putLong("last_run_$id", v).apply()
 
-    private fun normalizeLanguageTag(tag: String): String = if (tag == "en") "en-US" else tag
+    private fun canonicalLanguageTag(tag: String): String {
+        val locale = Locale.forLanguageTag(tag.trim())
+        val language = locale.language.lowercase(Locale.ROOT)
+        if (language.isEmpty()) return ""
+        val country = locale.country.uppercase(Locale.ROOT)
+        return if (country.isEmpty()) language else "$language-$country"
+    }
 
-    fun language(ctx: Context): String = normalizeLanguageTag(sp(ctx).getString("lang", "") ?: "")
-    fun setLanguage(ctx: Context, tag: String) = sp(ctx).edit().putString("lang", normalizeLanguageTag(tag)).apply()
+    private fun selectedLanguageTag(tag: String): String {
+        val canonical = canonicalLanguageTag(tag)
+        return when {
+            canonical.isEmpty() -> ""
+            canonical == "en" -> DEFAULT_LANGUAGE
+            canonical in SUPPORTED_LANGUAGES -> canonical
+            else -> DEFAULT_LANGUAGE
+        }
+    }
+
+    internal fun resolveLanguageTag(selectedTag: String, systemTag: String): String {
+        val selected = selectedLanguageTag(selectedTag)
+        if (selected.isNotEmpty()) return selected
+        val system = canonicalLanguageTag(systemTag)
+        return if (system in SUPPORTED_LANGUAGES) system else DEFAULT_LANGUAGE
+    }
+
+    private fun rawLanguage(ctx: Context): String = sp(ctx).getString("lang", "") ?: ""
+
+    fun language(ctx: Context): String = selectedLanguageTag(rawLanguage(ctx))
+    fun setLanguage(ctx: Context, tag: String) = sp(ctx).edit().putString("lang", selectedLanguageTag(tag)).apply()
+
+    private fun effectiveLanguage(ctx: Context): String {
+        val locales = ctx.resources.configuration.locales
+        val systemTag = if (locales.size() == 0) "" else locales[0].toLanguageTag()
+        return resolveLanguageTag(rawLanguage(ctx), systemTag)
+    }
 
     fun theme(ctx: Context): Int = sp(ctx).getInt("theme", THEME_SYSTEM)
     fun setTheme(ctx: Context, v: Int) = sp(ctx).edit().putInt("theme", v).apply()
@@ -76,7 +109,7 @@ object AppPrefs {
      * invisible status bar icons.
      */
     fun wrap(base: Context): Context {
-        val tag = language(base)
+        val tag = effectiveLanguage(base)
         val night = when (theme(base)) {
             THEME_LIGHT -> Configuration.UI_MODE_NIGHT_NO
             THEME_DARK -> Configuration.UI_MODE_NIGHT_YES

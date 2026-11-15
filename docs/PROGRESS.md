@@ -1295,3 +1295,5 @@
 - 界面语言新增 `en-US`、`en-GB`、`zh-TW` 和 `zh-HK`；语言选择器、Android locale config 与旧 `en` 偏好的 `en-US` 迁移已接通。简体中文补齐 42 条缺失资源，繁体台湾和繁体香港各生成完整 311 条资源，并分别采用台湾与香港地区常用词。
 - `app/l10n/keys.py` 已扩展到当前 311 条 key。`gen.py` 改为直接以现有 XML 为翻译源，删除不再使用的旧 `langs/*.py`；`--check` 强制校验通用英文、en-US、en-GB、zh-CN、zh-TW 和 zh-HK 的 key、空值及占位符完整性。
 - `RequiredLocaleCoverageTest` 同时校验五种对外语言、语言选择器和 locale config。WSL 完整 `:app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --rerun-tasks` 通过：718 项测试、0 失败、0 错误、3 跳过。其他 16 个可选 locale 及对应资源目录已删除；通用英文只作为缺省回退。
+- 2026-11-16 补齐运行态语言匹配：跟随系统时只保留支持表中的语言；未列入表中、空语言或未知旧偏好统一解析为 `en-US`，不再保留未支持 locale 的布局方向。新增 `LanguageFallbackTest` 覆盖显式选择、系统语言、未知语言、旧 `en` 别名和 locale 扩展；版本号提升到 11，供已安装 10 的测试包覆盖升级。
+- 同一提交在 WSL 使用 OpenJDK 21 完成 `:app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --rerun-tasks`：722 项测试、0 失败、0 错误、3 跳过，93 个构建任务全部执行。最终可安装 Debug APK 使用原 `494e…e389` 证书重构建，v2 签名与 16 KB 对齐通过。
