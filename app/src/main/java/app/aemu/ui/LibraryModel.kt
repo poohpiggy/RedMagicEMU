@@ -117,12 +117,16 @@ class LibraryModel(app: Application) : AndroidViewModel(app) {
 
     fun rename(img: GuestImage, name: String) = update(img) { it.copy(name = name) }
 
-    fun updateSettings(img: GuestImage, s: VmSettings) = update(img) { it.copy(settings = s) }
+    fun updateSettings(img: GuestImage, s: VmSettings, onDone: () -> Unit = {}) =
+        update(img, onDone) { it.copy(settings = s) }
 
-    private fun update(img: GuestImage, f: (GuestImage) -> GuestImage) {
+    private fun update(img: GuestImage, onDone: () -> Unit = {}, f: (GuestImage) -> GuestImage) {
         viewModelScope.launch(Dispatchers.IO) {
             ImageStore.update(getApplication(), img.id, f)
-            refresh()
+            withContext(Dispatchers.Main.immediate) {
+                refresh()
+                onDone()
+            }
         }
     }
 }

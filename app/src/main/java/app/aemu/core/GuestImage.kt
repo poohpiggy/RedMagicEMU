@@ -25,7 +25,7 @@ data class VmSettings(
     val lowRam: Boolean = false,
     val showFrame: Boolean = false,
     val showNavBar: Boolean = true,
-    /** buttons of the bar under the screen, in order: back home recents menu search volup voldown power dpad */
+    /** buttons of the bar under the screen, in order: back home recents search volup voldown power dpad */
     val navKeys: String = NAV_DEFAULT,
     /** size of the button bar: 0 compact, 1 large */
     val navSize: Int = 0,
@@ -34,6 +34,10 @@ data class VmSettings(
     val vsync: Boolean = true,
     /** the guest phone's notification LED drawn above its screen */
     val showLed: Boolean = true,
+    /** Forward the host accelerometer to the guest while its screen is visible. */
+    val accelerometerBridge: Boolean = true,
+    /** Mirror host battery level, charging state and power source while the guest runs. */
+    val batterySync: Boolean = true,
     val mtMode: Int = 0,
     /** старый движок для 2.x (GL через pbuffer, только GLES 1.x) — запасной вариант */
     val legacyEngine: Boolean = false,
@@ -47,35 +51,32 @@ data class VmSettings(
     val radio: Boolean = true,
     /** hardware 32-bit (AArch32 EL0) bypass without translator on supported CPUs */
     val native32: Boolean = false,
-    /** IMEI reported by the fake modem; blank = default sample IMEI */
+    /** Optional preconfigured synthetic IMEI; blank generates an instance-specific value. */
     val imei: String = "",
     /** extra qemu options; KEY=VALUE tokens are passed as environment variables */
     val qemuArgs: String = "",
+    /** Per-instance virtual access point settings, not the host Wi-Fi configuration. */
+    val virtualWifi: TargetVirtualWifiConfig = TargetVirtualWifiConfig(),
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("width", width).put("height", height).put("density", density)
         .put("gpu", gpu).put("hwui", hwui).put("jit", jit).put("fullDexopt", fullDexopt).put("fbHz", fbHz)
         .put("touchHz", touchHz).put("netProxy", netProxy).put("lowRam", lowRam)
         .put("showFrame", showFrame).put("showNavBar", showNavBar).put("navKeys", navKeys).put("navSize", navSize)
-        .put("keepScreenOn", keepScreenOn).put("vsync", vsync).put("showLed", showLed).put("mtMode", mtMode).put("legacyEngine", legacyEngine).put("open32", open32)
+        .put("keepScreenOn", keepScreenOn).put("vsync", vsync).put("showLed", showLed)
+        .put("accelerometerBridge", accelerometerBridge).put("batterySync", batterySync)
+        .put("mtMode", mtMode).put("legacyEngine", legacyEngine).put("open32", open32)
         .put("ramMb", ramMb).put("diskMb", diskMb).put("radio", radio).put("native32", native32).put("imei", imei).put("qemuArgs", qemuArgs)
+        .put("virtualWifi", JSONObject().put("ssid", virtualWifi.ssid).put("rssiDbm", virtualWifi.rssiDbm))
 
     internal fun withNx809jDisplay(): VmSettings = copy(width = 1216, height = 2688, density = 520)
 
+    /** Default NX809J layout: 75% of the stock 1216 x 2688 / 520 dpi display. */
+    internal fun withNx809jDefaultDisplay(): VmSettings = copy(width = 912, height = 2016, density = 390)
+
     companion object {
-        const val NAV_DEFAULT = "back,home,recents,menu"
-        val NAV_ALL = listOf("back", "home", "recents", "menu", "search", "voldown", "volup", "power", "dpad")
-
-        /** Luhn-valid sample IMEI from the standard; the guest has no real modem */
-        const val DEFAULT_IMEI = "490154203237518"
-
-        /** Random Luhn-valid IMEI with a test TAC prefix. */
-        fun randomImei(): String {
-            val d = IntArray(14) { if (it < 2) intArrayOf(3, 5)[it] else (0..9).random() }
-            var sum = 0
-            for (i in 0 until 14) { var x = d[i]; if (i % 2 == 1) { x *= 2; if (x > 9) x -= 9 }; sum += x }
-            return d.joinToString("") + ((10 - sum % 10) % 10)
-        }
+        const val NAV_DEFAULT = "back,home,recents"
+        val NAV_ALL = listOf("back", "home", "recents", "search", "voldown", "volup", "power", "dpad")
 
         fun fromJson(o: JSONObject?): VmSettings {
             if (o == null) return VmSettings()
@@ -99,6 +100,8 @@ data class VmSettings(
                 keepScreenOn = o.optBoolean("keepScreenOn", d.keepScreenOn),
                 vsync = o.optBoolean("vsync", d.vsync),
                 showLed = o.optBoolean("showLed", d.showLed),
+                accelerometerBridge = o.optBoolean("accelerometerBridge", d.accelerometerBridge),
+                batterySync = o.optBoolean("batterySync", d.batterySync),
                 mtMode = o.optInt("mtMode", d.mtMode),
                 legacyEngine = o.optBoolean("legacyEngine", false),
                 open32 = o.optBoolean("open32", false),
@@ -108,6 +111,11 @@ data class VmSettings(
                 native32 = o.optBoolean("native32", false),
                 imei = o.optString("imei", ""),
                 qemuArgs = o.optString("qemuArgs", ""),
+                virtualWifi = o.optJSONObject("virtualWifi")?.let { wifi ->
+                    val dWifi = TargetVirtualWifiConfig()
+                    TargetVirtualWifiConfig(wifi.optString("ssid", dWifi.ssid),
+                        wifi.optInt("rssiDbm", dWifi.rssiDbm))
+                } ?: TargetVirtualWifiConfig(),
             )
         }
     }

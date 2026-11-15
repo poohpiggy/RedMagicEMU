@@ -18,6 +18,8 @@ internal object TargetArchive {
         "vendor_boot.img" to 256L * 1024 * 1024,
         "README.txt" to 1024L * 1024,
     )
+    private const val ZTECFG = "ztecfg.img"
+    private const val ZTECFG_SIZE = 512L * 1024
 
     fun validate(file: File, expectedEntries: Map<String, Long>? = null) {
         inspect(file, expectedEntries)
@@ -30,15 +32,16 @@ internal object TargetArchive {
             val entries = zip.entries
             while (entries.hasMoreElements()) {
                 val e = entries.nextElement()
-                val limit = limits[e.name] ?: throw IOException("Unexpected firmware ZIP entry: ${e.name}")
+                val limit = limits[e.name] ?: if (expectedEntries == null && e.name == ZTECFG) ZTECFG_SIZE
+                    else throw IOException("Unexpected firmware ZIP entry: ${e.name}")
                 val type = e.unixMode and 0xF000
                 if (found.containsKey(e.name) || e.isDirectory || e.isUnixSymlink || type != 0 && type != 0x8000 ||
-                    e.size < 0 || (if (expectedEntries == null) e.size > limit else e.size != limit) ||
+                    e.size < 0 || (if (expectedEntries == null && e.name != ZTECFG) e.size > limit else e.size != limit) ||
                     e.compressedSize < 0 || e.method !in listOf(ZipArchiveEntry.STORED, ZipArchiveEntry.DEFLATED) ||
                     !zip.canReadEntryData(e)) throw IOException("Invalid firmware ZIP entry: ${e.name}")
                 found[e.name] = e.size
             }
-            if (found.keys != limits.keys) throw IOException("Firmware ZIP entries are missing")
+            if (!found.keys.containsAll(limits.keys)) throw IOException("Firmware ZIP entries are missing")
         }
         return found
     }
@@ -50,6 +53,7 @@ internal object TargetArchive {
         expectedEntries: Map<String, Long>? = null,
         names: Set<String>,
         cancelled: () -> Boolean,
+        optionalNames: Set<String> = emptySet(),
         availableBytes: (File) -> Long = { it.usableSpace },
         block: (Map<String, File>) -> T,
     ): T {
@@ -57,8 +61,10 @@ internal object TargetArchive {
         val sizes = inspect(file, expectedEntries)
         if (names.isEmpty() || !sizes.keys.containsAll(names) || names.any { !it.matches(Regex("[A-Za-z0-9_.-]+")) || it == "." || it == ".." })
             throw IOException("Invalid extraction entry name")
+        if (optionalNames.any { it != ZTECFG } || optionalNames.any { it in names }) throw IOException("Invalid optional extraction entry")
+        val selected = names + optionalNames.filter { it in sizes }
         var required = 0L
-        for (name in names) {
+        for (name in selected) {
             val size = sizes.getValue(name)
             if (size < 0 || size > Long.MAX_VALUE - required) throw IOException("Invalid extraction size")
             required += size
@@ -69,7 +75,7 @@ internal object TargetArchive {
         try {
             val extracted = mutableMapOf<String, File>()
             ZipFile.builder().setFile(file).get().use { zip ->
-                for (name in names.sorted()) {
+                for (name in selected.sorted()) {
                     if (cancelled()) throw ImportCancelledException()
                     val entry = zip.getEntry(name) ?: throw IOException("Missing firmware entry: $name")
                     val output = File(dir, name)

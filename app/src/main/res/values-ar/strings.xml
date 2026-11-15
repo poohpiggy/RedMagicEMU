@@ -46,7 +46,7 @@
     <string name="vs_proxy_sub">تفتح المتصفحات والتطبيقات القديمة مواقع HTTPS الحالية.</string>
     <string name="vs_controls">التحكم</string>
     <string name="vs_nav">شريط أزرار أندرويد</string>
-    <string name="vs_nav_sub">رجوع والشاشة الرئيسية والأخيرة والقائمة أسفل الشاشة.</string>
+    <string name="vs_nav_sub">رجوع والشاشة الرئيسية والتطبيقات الأخيرة أسفل الشاشة.</string>
     <string name="vs_awake">إبقاء الشاشة مضاءة</string>
     <string name="vs_awake_sub">ما دام النظام مفتوحًا.</string>
     <string name="vs_vsync">VSync</string>
@@ -59,7 +59,7 @@
     <string name="vol_up">رفع الصوت</string>
     <string name="vol_down">خفض الصوت</string>
     <string name="power">زر التشغيل</string>
-    <string name="shutdown">إيقاف النظام</string>
+    <string name="shutdown">إيقاف تشغيل الآلة الافتراضية</string>
     <string name="back">رجوع</string>
     <string name="home">الرئيسية</string>
     <string name="recents">الأخيرة</string>
@@ -113,14 +113,14 @@
     <string name="vs_advanced">Advanced</string>
     <string name="vs_qemu_args">Extra qemu options</string>
     <string name="vs_qemu_args_sub">Example: -d unimp DHD_TBFLUSH=2 (NAME=value becomes an environment variable)</string>
-    <string name="m_power_menu">Power menu</string>
+    <string name="m_power_menu">قائمة الطاقة</string>
     <string name="m_keyboard">إظهار/إخفاء لوحة المفاتيح</string>
-    <string name="m_paste">Paste text from clipboard</string>
-    <string name="m_sms">Fake SMS</string>
-    <string name="m_battery">Battery</string>
-    <string name="m_screenshot">Screenshot</string>
-    <string name="m_settings">Open Android settings</string>
-    <string name="m_reboot">Reboot</string>
+    <string name="m_paste">لصق النص من الحافظة</string>
+    <string name="m_sms">رسالة نصية افتراضية</string>
+    <string name="m_battery">البطارية</string>
+    <string name="m_screenshot">لقطة شاشة</string>
+    <string name="m_settings">فتح إعدادات Android</string>
+    <string name="m_reboot">إعادة تشغيل الآلة الافتراضية</string>
     <string name="m_clip_empty">Clipboard is empty</string>
     <string name="m_screenshot_saved">Saved: %1$s</string>
     <string name="m_failed">Failed</string>
@@ -131,7 +131,7 @@
     <string name="m_charging">Charging</string>
     <string name="m_apply">Apply</string>
     <string name="m_reset">Reset</string>
-    <string name="m_call">مكالمة واردة</string>
+    <string name="m_call">مكالمة واردة افتراضية</string>
     <string name="m_call_ring">اتصال</string>
     <string name="fw_folder_title">البرامج الثابتة في المجلد</string>
     <string name="fw_folder_import">استيراد</string>
@@ -175,21 +175,6 @@
     <string name="m_device">حالة الجهاز</string>
     <string name="m_airplane">وضع الطيران</string>
     <string name="m_stay_awake">إبقاء الشاشة مضاءة</string>
-    <string name="as_updates">التحديثات</string>
-    <string name="as_auto_updates">التحقق التلقائي من التحديثات</string>
-    <string name="as_auto_updates_sub">البحث عن إصدارات جديدة على GitHub عند التشغيل</string>
-    <string name="as_check_updates">التحقق من التحديثات</string>
-    <string name="as_check_updates_sub">الإصدار الحالي: %1$s</string>
-    <string name="update_available_title">يتوفر تحديث</string>
-    <string name="update_available_msg">يتوفر الإصدار %1$s. هل تريد التحديث؟</string>
-    <string name="update_latest">لديك أحدث إصدار (%1$s)</string>
-    <string name="update_checking">جارٍ التحقق من التحديثات…</string>
-    <string name="update_btn">تحديث</string>
-    <string name="update_later">لاحقًا</string>
-    <string name="update_downloading">جارٍ تنزيل التحديث…</string>
-    <string name="update_install">تثبيت</string>
-    <string name="update_error">تعذّر التحقق من التحديثات: %1$s</string>
-    <string name="update_open_github">عرض على GitHub</string>
     <string name="lib_title">مكتبة البرامج الثابتة</string>
     <string name="lib_empty">لا توجد برامج ثابتة بعد: استورد ملف برنامج ثابت لإنشاء أول جهاز.</string>
     <string name="new_machine">جهاز جديد</string>
@@ -212,4 +197,9 @@
     <string name="m_vnc">تشغيل خادم VNC</string>
     <string name="m_vnc_stop">إيقاف خادم VNC</string>
     <string name="m_vnc_started">VNC: %1$s، كلمة المرور %2$s</string>
+    <string name="m_hud">لوحة الأداء</string>
+    <string name="m_network_mode">وضع الشبكة</string>
+    <string name="vs_disk_hint">يحدد السعة المعروضة للنظام الضيف؛ تعتمد المساحة المتاحة على الهاتف.</string>
+    <string name="instance_settings">إعدادات النسخة</string>
+    <string name="about_title">حول</string>
 </resources>

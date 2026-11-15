@@ -68,6 +68,9 @@ struct gralloc_module {
 };
 
 struct rect { int l, t, r, b; };
+#ifdef AEMU_NX809J_DYNAMIC_REFRESH
+struct frect { float l, t, r, b; };
+#endif
 struct region { size_t n; const struct rect *rects; };
 struct layer {
     int32_t type;
@@ -75,7 +78,12 @@ struct layer {
     const void *handle;
     uint32_t transform;
     int32_t blending;
+#ifdef AEMU_NX809J_DYNAMIC_REFRESH
+    union { struct rect crop; struct frect cropf; };
+    struct rect frame;
+#else
     struct rect crop, frame;
+#endif
     struct region visible;
     int acquire_fence, release_fence;
     uint8_t plane_alpha, pad[3];
@@ -105,7 +113,13 @@ struct hwc {
     void (*dump)(struct hwc *d, char *buf, int len);
     int (*get_configs)(struct hwc *d, int disp, uint32_t *configs, size_t *n);
     int (*get_attributes)(struct hwc *d, int disp, uint32_t config, const uint32_t *attrs, int32_t *values);
+#ifdef AEMU_NX809J_DYNAMIC_REFRESH
+    int (*get_active_config)(struct hwc *d, int disp);
+    int (*set_active_config)(struct hwc *d, int disp, int index);
+    void *reserved_proc[5];
+#else
     void *reserved_proc[7];
+#endif
 
     const struct procs *procs;
     volatile int vsync_on;
@@ -114,6 +128,9 @@ struct hwc {
     uint32_t *fb, *back;
     uint32_t *frames;           /* after the screen page: a count of frames, so the viewer shows each one at once */
     int direct, gl;             /* SurfaceFlinger draws on the phone's GPU; the connection to the renderer there */
+#ifdef AEMU_NX809J_DYNAMIC_REFRESH
+    int active_config;
+#endif
 };
 
 enum { L_FRAMEBUFFER = 0, L_OVERLAY = 1, L_BACKGROUND = 2, L_TARGET = 3 };
@@ -125,6 +142,20 @@ enum { L_FRAMEBUFFER = 0, L_OVERLAY = 1, L_BACKGROUND = 2, L_TARGET = 3 };
 #define FMT_RGBX 2
 #define VSYNC_NS 16666666L
 
+#ifdef AEMU_NX809J_DYNAMIC_REFRESH
+/* NX809J's fixed modes; presentation on the host remains limited by its display. */
+static const int refresh_periods[] = { 16666666, 11111111, 8333333, 6944444 };
+#define REFRESH_CONFIGS (sizeof(refresh_periods) / sizeof(refresh_periods[0]))
+static int hwc_get_active_config(struct hwc *d, int disp) {
+    return disp ? -22 : __atomic_load_n(&d->active_config, __ATOMIC_ACQUIRE);
+}
+static int hwc_set_active_config(struct hwc *d, int disp, int index) {
+    if (disp || index < 0 || (size_t)index >= REFRESH_CONFIGS) return -22;
+    __atomic_store_n(&d->active_config, index, __ATOMIC_RELEASE);
+    return 0;
+}
+#endif
+
 static void *base_of(struct hwc *d, const void *handle) {
     void *va = 0;
     if (!handle || !d->gralloc) return 0;
@@ -133,16 +164,43 @@ static void *base_of(struct hwc *d, const void *handle) {
     return va;
 }
 
+#ifdef AEMU_NX809J_DYNAMIC_REFRESH
+/* HWC 1.3+ supplies floats. Fractional crops must be composed by SurfaceFlinger. */
+static int layer_crop(const struct layer *l, struct rect *out) {
+    float f[] = { l->cropf.l, l->cropf.t, l->cropf.r, l->cropf.b };
+    int values[4];
+    for (int i = 0; i < 4; i++) {
+        if (!(f[i] >= 0.0f && f[i] < 2147483648.0f)) return 0;
+        values[i] = (int)f[i];
+        if ((float)values[i] != f[i]) return 0;
+    }
+    *out = (struct rect){ values[0], values[1], values[2], values[3] };
+    return 1;
+}
+#endif
+
 /* a layer this module draws: a 1:1 copy or blend of a 32-bit buffer it knows the shape of */
 static const struct rgb_note *plain(struct hwc *d, const struct layer *l) {
     if ((l->type != L_FRAMEBUFFER && l->type != L_OVERLAY) || (l->flags & SKIP_LAYER) || l->transform) return 0;
     if (l->blending != BLEND_NONE && l->blending != BLEND_PREMULT && l->blending != BLEND_COVERAGE) return 0;
+#ifdef AEMU_NX809J_DYNAMIC_REFRESH
+    struct rect crop;
+    if (!layer_crop(l, &crop)) return 0;
+#endif
     int w = l->frame.r - l->frame.l, h = l->frame.b - l->frame.t;
+#ifdef AEMU_NX809J_DYNAMIC_REFRESH
+    if (w <= 0 || h <= 0 || crop.r - crop.l != w || crop.b - crop.t != h) return 0;
+#else
     if (w <= 0 || h <= 0 || l->crop.r - l->crop.l != w || l->crop.b - l->crop.t != h) return 0;
+#endif
     if (!base_of(d, l->handle)) return 0;
     const struct rgb_note *n = rgb_note_of(l->handle);
     if (!n || (n->format != FMT_RGBA && n->format != FMT_RGBX)) return 0;
+#ifdef AEMU_NX809J_DYNAMIC_REFRESH
+    if (crop.l < 0 || crop.t < 0 || crop.r > n->w || crop.b > n->h) return 0;
+#else
     if (l->crop.l < 0 || l->crop.t < 0 || l->crop.r > n->w || l->crop.b > n->h) return 0;
+#endif
     return n;
 }
 
@@ -219,7 +277,13 @@ static void blend_row(uint8_t *dst, const uint8_t *src, int n, unsigned alpha, i
 static void draw(struct hwc *d, const struct layer *l, const struct rgb_note *n) {
     const uint8_t *base = base_of(d, l->handle);
     int x0 = l->frame.l, y0 = l->frame.t, x1 = l->frame.r, y1 = l->frame.b;
+#ifdef AEMU_NX809J_DYNAMIC_REFRESH
+    struct rect crop;
+    if (!layer_crop(l, &crop)) return;
+    int sx = crop.l, sy = crop.t;
+#else
     int sx = l->crop.l, sy = l->crop.t;
+#endif
     if (x0 < 0) { sx -= x0; x0 = 0; }
     if (y0 < 0) { sy -= y0; y0 = 0; }
     if (x1 > d->w) x1 = d->w;
@@ -268,7 +332,13 @@ static int hwc_query(struct hwc *d, int what, int *value) {
     (void)d;
     switch (what) {
     case 0: *value = 0; return 0;                   /* no background layer */
-    case 1: *value = (int)VSYNC_NS; return 0;
+    case 1:
+#ifdef AEMU_NX809J_DYNAMIC_REFRESH
+        *value = refresh_periods[__atomic_load_n(&d->active_config, __ATOMIC_ACQUIRE)];
+#else
+        *value = (int)VSYNC_NS;
+#endif
+        return 0;
     case 2: *value = 1; return 0;                   /* the primary display only */
     }
     return -22;
@@ -278,13 +348,29 @@ static void hwc_dump(struct hwc *d, char *buf, int len) { (void)d; if (buf && le
 static int hwc_get_configs(struct hwc *d, int disp, uint32_t *configs, size_t *n) {
     (void)d;
     if (disp) return -22;
+#ifdef AEMU_NX809J_DYNAMIC_REFRESH
+    size_t capacity = *n;
+    for (size_t i = 0; i < capacity && i < REFRESH_CONFIGS; i++) configs[i] = (uint32_t)i;
+    *n = REFRESH_CONFIGS;
+#else
     if (*n) { configs[0] = 0; *n = 1; }
+#endif
     return 0;
 }
 static int hwc_get_attributes(struct hwc *d, int disp, uint32_t config, const uint32_t *attrs, int32_t *values) {
+#ifdef AEMU_NX809J_DYNAMIC_REFRESH
+    if (disp || config >= REFRESH_CONFIGS) return -22;
+#else
     if (disp || config) return -22;
+#endif
     for (int i = 0; attrs[i]; i++) switch (attrs[i]) {
-    case 1: values[i] = (int32_t)VSYNC_NS; break;
+    case 1:
+#ifdef AEMU_NX809J_DYNAMIC_REFRESH
+        values[i] = refresh_periods[config];
+#else
+        values[i] = (int32_t)VSYNC_NS;
+#endif
+        break;
     case 2: values[i] = d->w; break;
     case 3: values[i] = d->h; break;
     case 4: case 5: values[i] = 160000; break;      /* as the plain framebuffer reports; the density is a property */
@@ -298,7 +384,11 @@ static void *vsync_thread(void *arg) {
     struct timespec64 t;
     clock_gettime(1 /* MONOTONIC */, &t);
     for (;;) {
+#ifdef AEMU_NX809J_DYNAMIC_REFRESH
+        t.tv_nsec += refresh_periods[__atomic_load_n(&d->active_config, __ATOMIC_ACQUIRE)];
+#else
         t.tv_nsec += VSYNC_NS;
+#endif
         if (t.tv_nsec >= 1000000000L) { t.tv_nsec -= 1000000000L; t.tv_sec++; }
         clock_nanosleep(1, 1 /* TIMER_ABSTIME */, &t, 0);
         const struct procs *p = d->procs;
@@ -317,7 +407,13 @@ static int hwc_open(const struct hw_module *m, const char *id, struct hw_device 
     if (!up) {
         struct hwc *d = &dev;
         d->common.tag = 0x48574454;                 /* HARDWARE_DEVICE_TAG */
+#ifdef AEMU_NX809J_DYNAMIC_REFRESH
+        d->common.version = 0x01040001;             /* HWC 1.4: active configuration can be switched */
+        d->get_active_config = hwc_get_active_config;
+        d->set_active_config = hwc_set_active_config;
+#else
         d->common.version = 0x01020001;             /* HWC 1.2 */
+#endif
         d->common.module = (struct hw_module *)m;
         d->common.close = hwc_close;
         d->prepare = hwc_prepare; d->set = hwc_set; d->event_control = hwc_event_control; d->blank = hwc_blank;

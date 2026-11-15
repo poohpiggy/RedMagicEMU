@@ -46,7 +46,7 @@
     <string name="vs_proxy_sub">Trình duyệt và ứng dụng cũ mở được trang HTTPS ngày nay.</string>
     <string name="vs_controls">Điều khiển</string>
     <string name="vs_nav">Thanh nút Android</string>
-    <string name="vs_nav_sub">Quay lại, Trang chủ, Gần đây và Menu dưới màn hình.</string>
+    <string name="vs_nav_sub">Quay lại, Trang chủ và Gần đây dưới màn hình.</string>
     <string name="vs_awake">Giữ màn hình sáng</string>
     <string name="vs_awake_sub">Khi hệ thống đang mở.</string>
     <string name="vs_vsync">VSync</string>
@@ -59,7 +59,7 @@
     <string name="vol_up">Âm lượng +</string>
     <string name="vol_down">Âm lượng −</string>
     <string name="power">Nút nguồn</string>
-    <string name="shutdown">Tắt hệ thống</string>
+    <string name="shutdown">Tắt máy ảo</string>
     <string name="back">Quay lại</string>
     <string name="home">Trang chủ</string>
     <string name="recents">Gần đây</string>
@@ -113,14 +113,14 @@
     <string name="vs_advanced">Advanced</string>
     <string name="vs_qemu_args">Extra qemu options</string>
     <string name="vs_qemu_args_sub">Example: -d unimp DHD_TBFLUSH=2 (NAME=value becomes an environment variable)</string>
-    <string name="m_power_menu">Power menu</string>
+    <string name="m_power_menu">Trình đơn nguồn</string>
     <string name="m_keyboard">Hiện/ẩn bàn phím</string>
-    <string name="m_paste">Paste text from clipboard</string>
-    <string name="m_sms">Fake SMS</string>
-    <string name="m_battery">Battery</string>
-    <string name="m_screenshot">Screenshot</string>
-    <string name="m_settings">Open Android settings</string>
-    <string name="m_reboot">Reboot</string>
+    <string name="m_paste">Dán văn bản từ bộ nhớ tạm</string>
+    <string name="m_sms">Tin nhắn SMS ảo</string>
+    <string name="m_battery">Pin</string>
+    <string name="m_screenshot">Ảnh chụp màn hình</string>
+    <string name="m_settings">Mở cài đặt Android</string>
+    <string name="m_reboot">Khởi động lại máy ảo</string>
     <string name="m_clip_empty">Clipboard is empty</string>
     <string name="m_screenshot_saved">Saved: %1$s</string>
     <string name="m_failed">Failed</string>
@@ -131,7 +131,7 @@
     <string name="m_charging">Charging</string>
     <string name="m_apply">Apply</string>
     <string name="m_reset">Reset</string>
-    <string name="m_call">Cuộc gọi đến</string>
+    <string name="m_call">Cuộc gọi đến ảo</string>
     <string name="m_call_ring">Gọi</string>
     <string name="fw_folder_title">Firmware trong thư mục</string>
     <string name="fw_folder_import">Nhập</string>
@@ -175,21 +175,6 @@
     <string name="m_device">Trạng thái thiết bị</string>
     <string name="m_airplane">Chế độ máy bay</string>
     <string name="m_stay_awake">Giữ màn hình sáng</string>
-    <string name="as_updates">Cập nhật</string>
-    <string name="as_auto_updates">Tự kiểm tra cập nhật</string>
-    <string name="as_auto_updates_sub">Kiểm tra bản mới trên GitHub khi mở ứng dụng</string>
-    <string name="as_check_updates">Kiểm tra cập nhật</string>
-    <string name="as_check_updates_sub">Phiên bản hiện tại: %1$s</string>
-    <string name="update_available_title">Có bản cập nhật</string>
-    <string name="update_available_msg">Đã có phiên bản %1$s. Cập nhật ngay?</string>
-    <string name="update_latest">Bạn đang dùng bản mới nhất (%1$s)</string>
-    <string name="update_checking">Đang kiểm tra cập nhật…</string>
-    <string name="update_btn">Cập nhật</string>
-    <string name="update_later">Để sau</string>
-    <string name="update_downloading">Đang tải bản cập nhật…</string>
-    <string name="update_install">Cài đặt</string>
-    <string name="update_error">Không kiểm tra được cập nhật: %1$s</string>
-    <string name="update_open_github">Xem trên GitHub</string>
     <string name="lib_title">Thư viện firmware</string>
     <string name="lib_empty">Chưa có firmware: hãy nhập một tệp firmware để tạo máy đầu tiên.</string>
     <string name="new_machine">Máy mới</string>
@@ -212,4 +197,9 @@
     <string name="m_vnc">Bật máy chủ VNC</string>
     <string name="m_vnc_stop">Tắt máy chủ VNC</string>
     <string name="m_vnc_started">VNC: %1$s, mật khẩu %2$s</string>
+    <string name="m_hud">Lớp phủ hiệu năng</string>
+    <string name="m_network_mode">Chế độ mạng</string>
+    <string name="vs_disk_hint">Đặt dung lượng hiển thị cho hệ thống khách; dung lượng khả dụng phụ thuộc vào điện thoại.</string>
+    <string name="instance_settings">Cài đặt phiên bản</string>
+    <string name="about_title">Giới thiệu</string>
 </resources>

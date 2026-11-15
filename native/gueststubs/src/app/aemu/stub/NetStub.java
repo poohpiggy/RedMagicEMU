@@ -43,10 +43,16 @@ public class NetStub extends NetworkAgent {
     }
 
     public static void main(String[] args) throws Exception {
-        try { run(args.length > 0 && "ethernet".equals(args[0])); } catch (Throwable t) { t.printStackTrace(System.out); System.out.flush(); }
+        try { run(args.length > 0 && "ethernet".equals(args[0]),
+                args.length > 1 && "redmagic-control".equals(args[1])); }
+        catch (Throwable t) { t.printStackTrace(System.out); System.out.flush(); }
     }
 
     static void run(boolean ethernet) throws Exception {
+        run(ethernet, false);
+    }
+
+    static void run(boolean ethernet, boolean requestControl) throws Exception {
         Looper.prepare();
         final Class<?> sm = Class.forName("android.os.ServiceManager");
         Method get = sm.getMethod("getService", String.class);
@@ -111,8 +117,51 @@ public class NetStub extends NetworkAgent {
         call(lp, "addDnsServer", new Class<?>[]{InetAddress.class}, InetAddress.getByAddress(new byte[]{1, 1, 1, 1}));
 
         // 12+: that constructor is gone
-        try { new NetStub(Looper.myLooper(), ctx, ni, nc, lp); }
-        catch (NoSuchMethodError e) { NetAgent2.start(ctx, Looper.myLooper(), nc, lp); }
+        try {
+            new NetStub(Looper.myLooper(), ctx, ni, nc, lp);
+            if (requestControl) System.out.println("aemu-net: target network control unavailable on legacy agent");
+        } catch (NoSuchMethodError e) {
+            final Looper networkLooper = Looper.myLooper();
+            final NetAgent2[] agent = { NetAgent2.start(ctx, networkLooper, nc, lp) };
+            if (requestControl && android.os.Build.VERSION.SDK_INT == 36) {
+                try {
+                    TargetNetControl.publish(new TargetNetControl.Lease() {
+                        @Override public android.net.Network network() { return agent[0].network(); }
+                        @Override public boolean networkRegistered() {
+                            if (Looper.myLooper() == networkLooper)
+                                throw new IllegalStateException("cannot wait for registration on network Looper");
+                            android.net.Network expected = agent[0].network();
+                            android.net.ConnectivityManager cm = (android.net.ConnectivityManager) cmHolder[0];
+                            android.net.Network[] networks = cm.getAllNetworks();
+                            if (networks == null) throw new IllegalStateException("network list unavailable");
+                            for (android.net.Network current : networks) if (current.equals(expected)) return true;
+                            return false;
+                        }
+                        @Override public void stop() throws Exception { agent[0].stop(); }
+                        @Override public boolean canRestore() {
+                            android.net.ConnectivityManager cm = (android.net.ConnectivityManager) cmHolder[0];
+                            android.net.Network[] networks = cm.getAllNetworks();
+                            if (networks == null) return false;
+                            for (android.net.Network current : networks) {
+                                if (current.equals(agent[0].network())) return false;
+                                LinkProperties properties = cm.getLinkProperties(current);
+                                if (properties == null || properties.getInterfaceName() == null) return false;
+                                if ("eth0".equals(properties.getInterfaceName())) return false;
+                            }
+                            return true;
+                        }
+                        @Override public void restore() throws Exception {
+                            if (!canRestore()) throw new TargetNetControl.InterfaceBusyException();
+                            agent[0] = NetAgent2.start(ctx, networkLooper, nc, lp);
+                        }
+                    });
+                    System.out.println("aemu-net: target network control published");
+                } catch (Exception failure) {
+                    // Publication is optional; the current network remains registered.
+                    System.out.println("aemu-net: target network control unavailable: " + failure);
+                }
+            }
+        }
         System.out.println("aemu-net: сеть зарегистрирована");
         Looper.loop();
     }

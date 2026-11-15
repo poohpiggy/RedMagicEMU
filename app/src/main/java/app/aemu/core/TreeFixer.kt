@@ -26,6 +26,12 @@ class TreeFixer(
     private val root get() = paths.root
     private val engine get() = img.engine
     private val kernel get() = Kernel64.forApi(img.api)
+    internal var wifiPrepared = false
+        private set
+    internal var ltePrepared = false
+        private set
+    internal var voldPrepared = false
+        private set
     /** a whole 32-bit firmware on the arm64 kernel (open32): its programs draw and sound through the 4.4 engine's guest files */
     private val kk32 get() = engine == Engine.N64 && img.abi != "arm64-v8a"
 
@@ -162,6 +168,15 @@ class TreeFixer(
         if (owners) seedOwners()
         if (TargetQtiComponent.prepare(root, img.api, img.model, engine)) log("QTI radio extension default-disabled: unavailable HAL")
         installEngineFiles()
+        voldPrepared = try {
+            TargetVoldArtifacts.prepare(root, img.api, img.model, img.abi, engine) { asset ->
+                EngineAssets.open(ctx, asset).use { it.readBytes() }
+            }
+        } catch (e: Exception) {
+            log("vold: target preparation failed (${e.javaClass.simpleName}); using existing service")
+            false
+        }
+        if (TargetSensorsConfig.prepare(root, img.api, img.model, img.abi, engine)) log("sensors: original multihal configuration set aside")
         TargetRadioArtifacts.prepare(root, img.api, img.model, img.abi, engine, img.settings.radio) { asset ->
             EngineAssets.open(ctx, asset).use { it.readBytes() }
         }
@@ -176,6 +191,30 @@ class TreeFixer(
         restoreBoardAudioPolicy()
         eglConfig(img.settings.gpu)
         makeDataDirs()
+        // This gate stays closed until service permissions, guest identity isolation, stopped-instance
+        // lease, recovery behavior, and network handoff have all been verified on the target ROM.
+        val wifiTarget = TargetWifiArtifacts.applies(img.api, img.model, img.abi, engine)
+        val networkMode = if (wifiTarget) TargetNetworkMode.read(ctx, img.id)
+            else TargetNetworkMode.ETHERNET
+        wifiPrepared = TargetWifiLaunch.prepare(
+            networkMode.prepareWifi(TargetWifiArtifacts.RUNTIME_READY, wifiTarget),
+            action = {
+                TargetWifiArtifacts.prepare(root, img.api, img.model, img.abi, engine, true) { asset ->
+                    EngineAssets.open(ctx, asset).use { it.readBytes() }
+                }
+                TargetWifiArtifacts.prepareNetwork(root, img.api, img.model, img.abi, engine, true) { asset ->
+                    EngineAssets.open(ctx, asset).use { it.readBytes() }
+                }
+                TargetVirtualWifiProperties.prepareForStoppedGuest(root, img.settings.virtualWifi)
+            }, failure = { e ->
+                log("wifi: prototype preparation failed (${e.javaClass.simpleName}); Ethernet retained")
+            })
+        ltePrepared = networkMode.prepareLte(
+            runtimeReady = true,
+            target = TargetRadioArtifacts.applies(img.api, img.model, img.abi, engine),
+            radio = img.settings.radio,
+        )
+        if (wifiTarget) TargetNetworkGate.prepare(root, wifiPrepared || ltePrepared)
         miuiSdkFiles()
         makeUserZeroLink()
         makeDevNodes()
@@ -730,6 +769,9 @@ class TreeFixer(
         if (kernel.treble && !ownVendor) layers += kernel.gsiAssets
         val files = LinkedHashMap<String, String>()         // file name to the asset it comes from: later layers win
         for (dir in layers) for (n in runCatching { EngineAssets.list(ctx, dir) }.getOrNull().orEmpty()) files[n] = "$dir/$n"
+        files[TargetRefreshComposer.FILE]?.let { original ->
+            files[TargetRefreshComposer.FILE] = TargetRefreshComposer.select(original, img.api, img.model, img.abi, engine)
+        }
         // a whole 32-bit firmware on this kernel (open32) runs every program through qemu-arm: arm64 files would replace its own
         if (img.abi != "arm64-v8a") files.keys.removeAll { "#lib64#" in it || it == "system#bin#surfaceflinger" }
         // A GSI gets the codec store stand-in (aemu-omxstore: IOmxStore with no IOmx, what main_codecservice.cpp does
@@ -778,7 +820,9 @@ class TreeFixer(
         // a file this kernel no longer ships (the kernels part ways: 7.x keeps the firmware's own SurfaceFlinger)
         // goes back from where it was kept aside
         val shipped = files.keys
-        val anyKernel = Kernel64.entries.flatMap { k -> listOf("engines/n64-${k.tag}", k.ownVendorAssets).flatMap { runCatching { EngineAssets.list(ctx, it) }.getOrNull().orEmpty().asList() } }.toSet()
+        fun historicalNames(file: String): Set<String> = EngineAssets.open(ctx, "engines/history/$file").bufferedReader().use { LegacyN64Names.parse(it.readText()) }
+        val currentKernel = Kernel64.entries.flatMap { k -> listOf("engines/n64-${k.tag}", k.ownVendorAssets).flatMap { runCatching { EngineAssets.list(ctx, it) }.getOrNull().orEmpty().asList() } }.toSet()
+        val anyKernel = LegacyN64Names.kernel(currentKernel, historicalNames("n64-kernel-names.txt"))
         for (parked in File(root, "system/.aemu-parked").listFiles().orEmpty()) {
             if (!parked.isFile || parked.name !in anyKernel || parked.name in shipped) continue
             val dst = File(root, parked.name.replace('#', '/'))
@@ -788,7 +832,8 @@ class TreeFixer(
         // On a GSI the whole vendor side is the engine's: a vendor file some kernel ships but this one no longer does
         // (an earlier app build put it there) goes, else its service keeps starting from the stale .rc
         if (kernel.treble && !ownVendor && img.abi == "arm64-v8a") {
-            val anyLayer = anyKernel + Kernel64.entries.flatMap { k -> runCatching { EngineAssets.list(ctx, k.gsiAssets) }.getOrNull().orEmpty().asList() }
+            val currentGsi = Kernel64.entries.flatMap { k -> runCatching { EngineAssets.list(ctx, k.gsiAssets) }.getOrNull().orEmpty().asList() }
+            val anyLayer = LegacyN64Names.layer(anyKernel + currentGsi, historicalNames("n64-gsi-names.txt"))
             for (n in anyLayer) {
                 if (!n.startsWith("vendor#") || n in shipped) continue
                 val f = File(root, n.replace('#', '/'))
@@ -1321,26 +1366,6 @@ class TreeFixer(
                 }
             }
         }.onFailure { log("GPU: 1.x driver not installed: ${it.message}") }
-        // Qualcomm's OMX video encoder drives the Q6 DSP (/dev/q6venc, which returns run-length data the library packs
-        // itself): the emulator's component of the same name and factory (native/omxvenc, encoding on the phone)
-        // takes its place wherever libOmxCore.so loads libOmxVidEnc.so and that library opens /dev/q6venc
-        if (img.api <= 10) runCatching {
-            val enc = File(root, "system/lib/libOmxVidEnc.so")
-            val parked = File(root, "system/.aemu-parked/system#lib#libOmxVidEnc.so")
-            val orig = if (parked.isFile) parked else enc
-            val core = File(root, "system/lib/libOmxCore.so")
-            if (orig.isFile && core.isFile &&
-                String(core.readBytes(), Charsets.ISO_8859_1).contains("libOmxVidEnc.so") &&
-                String(orig.readBytes(), Charsets.ISO_8859_1).contains("/dev/q6venc")) {
-                val fresh = EngineAssets.open(ctx, "engines/common/libOmxVidEnc.aemu.so").use { it.readBytes() }
-                if (!fresh.contentEquals(enc.readBytes())) {
-                    if (!parked.exists()) { parked.parentFile?.mkdirs(); enc.copyTo(parked) }
-                    enc.writeBytes(fresh); enc.setReadable(true, false)
-                    log("video encoder: the emulator's OMX encoder installed")
-                    copied++
-                }
-            }
-        }.onFailure { log("video encoder: not replaced: ${it.message}") }
         // 2.x: the emulator's libaudio.so (legacy_audio.c) instead of the firmware's (which drives the vendor's sound
         // chip, or with ro.kernel.qemu gives AudioHardwareGeneric: microphone at 8 kHz only) — when nothing but the
         // factory is taken from libaudio.so; its virtual tables follow the firmware's own (LegacyAudio.map).

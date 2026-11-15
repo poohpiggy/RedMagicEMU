@@ -8,24 +8,21 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.offset
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.rounded.ScreenRotation
 import androidx.compose.material.icons.rounded.Label
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.BatteryStd
 import androidx.compose.material.icons.rounded.Cast
-import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.InstallMobile
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.RestartAlt
+import androidx.compose.material.icons.rounded.CenterFocusStrong
+import androidx.compose.material.icons.rounded.ViewCompact
 import androidx.compose.material.icons.rounded.Screenshot
 import androidx.compose.material.icons.rounded.Settings
-import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.Sms
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.Lan
@@ -133,8 +130,14 @@ import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.aemu.core.Engine
+import app.aemu.core.GuestBatteryControl
+import app.aemu.core.GuestBatteryState
+import app.aemu.core.BatteryModeIntent
+import app.aemu.core.BatteryModeRequest
 import app.aemu.core.GuestLog
 import app.aemu.core.GuestVm
+import app.aemu.core.HostBatteryBridge
+import app.aemu.core.HostBatteryProtocol
 import app.aemu.core.ImageStore
 import app.aemu.core.InputService
 import kotlinx.coroutines.delay
@@ -173,11 +176,17 @@ class VmActivity : ComponentActivity() {
     private var stopPending by mutableStateOf(false)
     private var stopError by mutableStateOf<String?>(null)
     private var openLog by mutableStateOf(false)
-    /** the guest's notification LED and where the guest screen starts (the LED sits just above it) */
-    private var led by mutableStateOf<app.aemu.core.Lights.Led?>(null)
-    /** this system's setting "Notification light" (the settings sheet changes it while the system runs) */
-    private var showLed by mutableStateOf(true)
-    private var guestTopPx by mutableStateOf(0)
+    private var sensorBridgeOn by mutableStateOf(true)
+    private var sensorBridgeBusy by mutableStateOf(false)
+    private var hostBattery: HostBatteryBridge? = null
+    private var batteryModeRx: android.content.BroadcastReceiver? = null
+    private var batterySyncOn by mutableStateOf(true)
+    @Volatile private var runtimeCustomBattery: GuestBatteryState? = null
+    private var lastAppliedRuntimeBattery: GuestBatteryState? = null
+    private var batteryModeBusy by mutableStateOf(false)
+    private val batterySyncRuntime = java.util.concurrent.atomic.AtomicBoolean(true)
+    private var navBarOn by mutableStateOf(true)
+    private var navBarBusy by mutableStateOf(false)
     private val logLines = mutableStateListOf<String>()
 
     @SuppressLint("ClickableViewAccessibility")
@@ -212,6 +221,14 @@ class VmActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // the overlay pads itself (status bar, navigation bar, keyboard): the terminal stays above the keyboard
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+        if (android.os.Build.VERSION.SDK_INT >= 28) {
+            val attrs = window.attributes
+            attrs.layoutInDisplayCutoutMode = if (android.os.Build.VERSION.SDK_INT >= 30)
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            else WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            window.attributes = attrs
+        }
+        hideHostSystemBars()
         lockOrientation()
         loadBadge()
         loadHud()
@@ -253,7 +270,18 @@ class VmActivity : ComponentActivity() {
         poweredOff = VmHost.poweredOff
         vm.onPower = { reboot, reason -> if (!reboot) VmHost.poweredOff = true; runOnUiThread { if (reboot) rebootVm(reason == "recovery") else { poweredOff = true; requestStop { } } } }
         val s = vm.settings
-        showLed = s.showLed
+        sensorBridgeOn = vm.sensors.bridgeEnabled
+        batterySyncOn = s.batterySync
+        batterySyncRuntime.set(s.batterySync)
+        if (!s.batterySync) runtimeCustomBattery = GuestBatteryState(100, GuestBatteryControl.AC)
+        hostBattery = HostBatteryBridge(
+            this,
+            { vm.state == GuestVm.State.RUNNING && batterySyncRuntime.get() },
+            { command, timeout -> vm.guestShell(command, timeout) },
+            vm::log,
+        ).also { it.start() }
+        registerBatteryModeReceiver()
+        navBarOn = s.showNavBar
         if (s.keepScreenOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         askTopRefresh()
 
@@ -289,39 +317,14 @@ class VmActivity : ComponentActivity() {
         root.addView(overlay, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
 
-        // экран гостя вписываем с сохранением пропорций над панелью кнопок
-        val navDp = if (!s.showNavBar) 0 else if (s.navSize == 0) 46 else 64
-        // the window draws edge to edge (for the overlay's keyboard padding): the guest screen keeps out of the
-        // camera cutout and system bars; the keyboard is not counted, so the screen does not jump when it opens
-        var safeTop = 0
-        var safeBottom = 0
-        var safeLeft = 0
-        var safeRight = 0
-        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root) { v, ins ->
-            val bars = ins.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars() or androidx.core.view.WindowInsetsCompat.Type.displayCutout())
-            if (bars.top != safeTop || bars.bottom != safeBottom || bars.left != safeLeft || bars.right != safeRight) {
-                safeTop = bars.top; safeBottom = bars.bottom; safeLeft = bars.left; safeRight = bars.right; v.requestLayout()
-            }
-            ins
-        }
+        // The guest uses the whole window; controls are overlaid instead of shrinking its viewport.
         root.addOnLayoutChangeListener { v, l, t, r, b, _, _, _, _ ->
-            val navPx = (navDp * resources.displayMetrics.density).toInt()
-            // landscape: the button bar stands at the right edge, so the screen keeps the full height
-            val land = r - l > b - t
-            val aw = r - l - safeLeft - safeRight - if (land) navPx else 0
-            val ah = b - t - safeTop - safeBottom - if (land) 0 else navPx
-            if (aw <= 0 || ah <= 0) return@addOnLayoutChangeListener
-            val scale = minOf(aw.toFloat() / gw, ah.toFloat() / gh)
-            val w = (gw * scale).toInt()
-            val h = (gh * scale).toInt()
+            val viewport = fitGuestViewport(r - l, b - t, gw, gh) ?: return@addOnLayoutChangeListener
             val lp = box.layoutParams as FrameLayout.LayoutParams
-            val top = safeTop + (ah - h) / 2
-            if (guestTopPx != top) guestTopPx = top
-            val left = safeLeft + (aw - w) / 2
-            if (lp.width != w || lp.height != h || lp.topMargin != top || lp.leftMargin != left) {
-                lp.width = w; lp.height = h
+            if (lp.width != viewport.width || lp.height != viewport.height || lp.topMargin != viewport.top || lp.leftMargin != viewport.left) {
+                lp.width = viewport.width; lp.height = viewport.height
                 lp.gravity = Gravity.LEFT or Gravity.TOP
-                lp.topMargin = top; lp.leftMargin = left
+                lp.topMargin = viewport.top; lp.leftMargin = viewport.left
                 v.post { box.layoutParams = lp }
             }
         }
@@ -331,6 +334,10 @@ class VmActivity : ComponentActivity() {
         unsubscribeState = vm.observeState { st ->
             runOnUiThread {
                 state = st
+                if (st == GuestVm.State.RUNNING) {
+                    if (batterySyncOn) hostBattery?.vmRunning()
+                    else runtimeCustomBattery?.let(::applyRuntimeCustomBattery)
+                } else lastAppliedRuntimeBattery = null
                 if (st == GuestVm.State.PREPARING || st == GuestVm.State.FAILED) retryPending = false
                 if (VmHost.historyRecorder?.error != null) {
                     previousBootMessage = getString(R.string.boot_history_error)
@@ -343,8 +350,6 @@ class VmActivity : ComponentActivity() {
         }
         vm.mic.onPermissionNeeded = { runOnUiThread { askMic.launch(android.Manifest.permission.RECORD_AUDIO) } }
         vm.camera.onPermissionNeeded = { runOnUiThread { askCamera.launch(android.Manifest.permission.CAMERA) } }
-        led = vm.lights.current
-        vm.lights.onChange { l -> runOnUiThread { led = l } }
         unsubscribeLog = vm.onLog { line -> runOnUiThread { logLines.add(line); if (logLines.size > 400) logLines.removeRange(0, logLines.size - 400) } }
         guest.start()
         loadMenuOffset()
@@ -354,6 +359,12 @@ class VmActivity : ComponentActivity() {
         })
 
         registerShell()
+        if (shouldSyncHostLocation() && !hasLocationPermission()) {
+            askLocation.launch(arrayOf(
+                android.Manifest.permission.ACCESS_COARSE_LOCATION,
+                android.Manifest.permission.ACCESS_FINE_LOCATION,
+            ))
+        }
         if (shouldBootOnAttach(vm.state, previousBootMessage != null, VmHost.poweredOff)) startBoot()
     }
 
@@ -387,13 +398,7 @@ class VmActivity : ComponentActivity() {
                     return
                 }
                 i.getStringExtra("sms")?.let { body ->
-                    // The exported debug receiver retains its legacy RIL-only behavior.
-                    thread {
-                        val sent = try { vm.ril.sms("+15550001234", body) } catch (error: Exception) {
-                            android.util.Log.w("aemu-radio", "Legacy debug SMS failed", error); false
-                        }
-                        toast(getString(if (sent) R.string.m_sms_submitted else R.string.m_radio_submit_failed))
-                    }
+                    sendSms("+15550001234", body)
                     return
                 }
                 if (i.getBooleanExtra("shot", false)) { runOnUiThread { screenshot() }; return }
@@ -468,12 +473,174 @@ class VmActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (::vm.isInitialized) vm.sensors.resume(true)
+        hideHostSystemBars()
+        if (::vm.isInitialized) {
+            ImageStore.get(this, vm.img.id)?.settings?.let { settings ->
+                if (!sensorBridgeBusy) {
+                    vm.sensors.setBridgeEnabled(settings.accelerometerBridge)
+                    vm.location.setBridgeEnabled(settings.accelerometerBridge)
+                    sensorBridgeOn = settings.accelerometerBridge
+                }
+                if (!batteryModeBusy) {
+                    batterySyncOn = settings.batterySync
+                    batterySyncRuntime.set(settings.batterySync)
+                }
+                if (!navBarBusy) navBarOn = settings.showNavBar
+            }
+            vm.sensors.resume(true)
+            vm.location.resume(true)
+        }
+    }
+
+    private fun hideHostSystemBars() {
+        androidx.core.view.WindowCompat.getInsetsController(window, window.decorView).apply {
+            systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
+    private fun setNavBarVisible(on: Boolean) {
+        if (navBarBusy || navBarOn == on) return
+        navBarBusy = true
+        thread {
+            val result = runCatching {
+                var found = false
+                ImageStore.update(applicationContext, vm.img.id) {
+                    found = true
+                    it.copy(settings = it.settings.copy(showNavBar = on))
+                }
+                check(found) { "instance not found" }
+            }
+            runOnUiThread {
+                navBarBusy = false
+                if (result.isSuccess) {
+                    navBarOn = on
+                    Toast.makeText(this, if (on) R.string.nav_bar_shown else R.string.nav_bar_hidden, Toast.LENGTH_SHORT).show()
+                } else Toast.makeText(this, R.string.nav_bar_save_failed, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun setSensorBridge(on: Boolean) {
+        if (sensorBridgeBusy || sensorBridgeOn == on) return
+        sensorBridgeBusy = true
+        thread {
+            val result = runCatching {
+                var found = false
+                ImageStore.update(applicationContext, vm.img.id) {
+                    found = true
+                    it.copy(settings = it.settings.copy(accelerometerBridge = on))
+                }
+                check(found) { "instance not found" }
+                vm.sensors.setBridgeEnabled(on)
+                vm.location.setBridgeEnabled(on)
+            }
+            runOnUiThread {
+                sensorBridgeBusy = false
+                if (result.isSuccess) {
+                    sensorBridgeOn = on
+                    Toast.makeText(this, if (on) R.string.sensor_bridge_on else R.string.sensor_bridge_off, Toast.LENGTH_SHORT).show()
+                } else Toast.makeText(this, R.string.sensor_bridge_save_failed, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun applyBatteryMode(host: Boolean, custom: GuestBatteryState?, onDone: (Boolean) -> Unit) {
+        if (batteryModeBusy || (!host && custom == null)) return
+        batteryModeBusy = true
+        thread {
+            val saved = runCatching {
+                var found = false
+                ImageStore.update(applicationContext, vm.img.id) {
+                    found = true
+                    it.copy(settings = it.settings.copy(batterySync = host))
+                }
+                check(found) { "instance not found" }
+            }
+            runOnUiThread {
+                if (saved.isFailure) {
+                    batteryModeBusy = false
+                    Toast.makeText(this, R.string.battery_mode_save_failed, Toast.LENGTH_LONG).show()
+                    onDone(false)
+                    return@runOnUiThread
+                }
+                batterySyncOn = host
+                batterySyncRuntime.set(host)
+                if (host) {
+                    runtimeCustomBattery = null
+                    lastAppliedRuntimeBattery = null
+                    hostBattery?.forceRefresh()
+                    batteryModeBusy = false
+                    onDone(true)
+                } else {
+                    runtimeCustomBattery = custom
+                    lastAppliedRuntimeBattery = custom
+                    guestAsync(GuestBatteryControl.command(custom!!)) {
+                        runOnUiThread {
+                            BatteryModeIntent.publishSnapshot(this, custom)
+                            batteryModeBusy = false
+                            onDone(true)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     override fun onPause() {
-        if (::vm.isInitialized) vm.sensors.resume(false)
+        if (::vm.isInitialized) {
+            vm.sensors.resume(false)
+            vm.location.resume(false)
+        }
         super.onPause()
+    }
+
+    private fun registerBatteryModeReceiver() {
+        if (batteryModeRx != null) return
+        val rx = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                when (intent.action) {
+                    BatteryModeIntent.action -> BatteryModeIntent.read(intent)?.let(::applyRuntimeBatteryMode)
+                    BatteryModeIntent.queryAction -> thread {
+                        val state = runtimeCustomBattery ?: return@thread
+                        BatteryModeIntent.publishSnapshot(this@VmActivity, state)
+                    }
+                }
+            }
+        }
+        val filter = android.content.IntentFilter().apply {
+            addAction(BatteryModeIntent.action)
+            addAction(BatteryModeIntent.queryAction)
+        }
+        androidx.core.content.ContextCompat.registerReceiver(
+            this,
+            rx,
+            filter,
+            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        batteryModeRx = rx
+    }
+
+    private fun applyRuntimeBatteryMode(request: BatteryModeRequest) {
+        batterySyncOn = request.host
+        batterySyncRuntime.set(request.host)
+        if (request.host) {
+            runtimeCustomBattery = null
+            hostBattery?.forceRefresh()
+        } else if (vm.state == GuestVm.State.RUNNING) {
+            request.custom?.let { custom ->
+                runtimeCustomBattery = custom
+                applyRuntimeCustomBattery(custom)
+            }
+        }
+    }
+
+    private fun applyRuntimeCustomBattery(custom: GuestBatteryState) {
+        if (vm.state != GuestVm.State.RUNNING || lastAppliedRuntimeBattery == custom) return
+        lastAppliedRuntimeBattery = custom
+        guestAsync(GuestBatteryControl.command(custom)) {
+            runOnUiThread { BatteryModeIntent.publishSnapshot(this, custom) }
+        }
     }
 
     override fun onDestroy() {
@@ -481,6 +648,10 @@ class VmActivity : ComponentActivity() {
         unsubscribeState = null
         unsubscribeLog?.invoke()
         unsubscribeLog = null
+        hostBattery?.stop()
+        hostBattery = null
+        batteryModeRx?.let { runCatching { unregisterReceiver(it) } }
+        batteryModeRx = null
         vnc?.stop(); vnc = null
         recorder?.let { r -> thread { r.stop() } }; recorder = null
         if (::guest.isInitialized) guest.stop()
@@ -515,10 +686,11 @@ class VmActivity : ComponentActivity() {
             }
         }
     }
-    private enum class Dlg { NONE, SMS, CALL, BATTERY, ADB, DEVICE, APPS, BADGE, HUD, CAMERA }
+    private enum class Dlg { NONE, SMS, CALL, BATTERY, ADB, DEVICE, APPS, BADGE, HUD, CAMERA, NETWORK_MODE }
 
     // position of the floating menu button, kept across launches
     private val uiPrefs by lazy { getSharedPreferences("vm_ui", MODE_PRIVATE) }
+
     private var menuOffset by mutableStateOf(Offset.Zero)
     private fun loadMenuOffset() { menuOffset = Offset(uiPrefs.getFloat("menu_x", 0f), uiPrefs.getFloat("menu_y", 0f)) }
     /**
@@ -535,7 +707,7 @@ class VmActivity : ComponentActivity() {
             else android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
     }
     /** A label over the screen (default "RedMagicEMU <version> beta") so testers can post screenshots; menu → Badge. */
-    private val defaultBadge get() = "RedMagicEMU ${app.aemu.BuildConfig.VERSION_NAME} beta"
+    private val defaultBadge get() = "RedMagicEMU ${app.aemu.BuildConfig.VERSION_NAME}"
     private var badgeOn by mutableStateOf(false)
     private var badgeText by mutableStateOf("")
     private fun loadBadge() { badgeOn = uiPrefs.getBoolean("badge_on", false); badgeText = uiPrefs.getString("badge_text", null) ?: defaultBadge }
@@ -657,6 +829,23 @@ class VmActivity : ComponentActivity() {
     private val askMic = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok -> if (ok) vm.mic.permissionGranted() }
 
     private val askCamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    private val askLocation = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        if (::vm.isInitialized) vm.location.permissionChanged()
+    }
+
+    private fun shouldSyncHostLocation(): Boolean =
+        vm.img.api == 36 && vm.img.model == "NX809J" && vm.img.abi == "arm64-v8a" && vm.engine == Engine.N64
+
+    private fun hasLocationPermission(): Boolean =
+        androidx.core.content.ContextCompat.checkSelfPermission(
+            this,
+            android.Manifest.permission.ACCESS_COARSE_LOCATION,
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED ||
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                this,
+                android.Manifest.permission.ACCESS_FINE_LOCATION,
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
 
     private fun toast(msg: String) = runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
 
@@ -988,52 +1177,85 @@ class VmActivity : ComponentActivity() {
 
     @Composable
     private fun BatteryDialog(onDone: () -> Unit) {
+        val context = androidx.compose.ui.platform.LocalContext.current
+        var host by remember { mutableStateOf(batterySyncOn) }
         var level by remember { mutableStateOf(80f) }
-        var charging by remember { mutableStateOf(true) }
-        // start from the guest's own battery state (sysfs or dumpsys)
-        LaunchedEffect(Unit) {
-            val cmd = "cat /sys/class/power_supply/battery/capacity 2>/dev/null; " +
-                "cat /sys/class/power_supply/ac/online 2>/dev/null; " +
-                "dumpsys battery 2>/dev/null"
-            guestAsync(cmd) { out ->
-                val lines = out.lines().map { it.trim() }
-                val sysCap = lines.getOrNull(0)?.toFloatOrNull()
-                val sysAc = lines.getOrNull(1)?.toIntOrNull()
-                fun field(n: String) = out.lineSequence().map { it.trim() }.firstOrNull { it.startsWith("$n:") }?.substringAfter(':')?.trim()
-                val l = sysCap ?: field("level")?.toFloatOrNull()
-                val ac = if (sysAc != null) sysAc == 1 else (field("AC powered") == "true" || field("USB powered") == "true")
-                runOnUiThread {
-                    if (l != null) level = l.coerceIn(0f, 100f)
-                    charging = ac
-                }
+        var source by remember { mutableStateOf(GuestBatteryControl.NONE) }
+        var reading by remember { mutableStateOf(false) }
+        val hostReading = remember {
+            val intent = context.registerReceiver(null, android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            intent?.let {
+                HostBatteryProtocol.reading(
+                    it.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1),
+                    it.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, android.os.BatteryManager.BATTERY_STATUS_UNKNOWN),
+                    it.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, -1),
+                )
             }
         }
-        AlertDialog(onDismissRequest = onDone,
+
+        LaunchedEffect(Unit) {
+            reading = true
+            val current = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching {
+                    GuestBatteryControl.read(vm.guestShell("dumpsys battery 2>/dev/null", 30_000))
+                }.getOrNull()
+            }
+            if (current != null) {
+                level = current.level.toFloat()
+                source = current.source
+            }
+            reading = false
+        }
+
+        val busy = reading || batteryModeBusy
+        AlertDialog(
+            onDismissRequest = { if (!busy) onDone() },
             title = { Text(stringResource(R.string.m_battery)) },
             text = {
-                Column {
-                    Text("${level.toInt()}%")
-                    Slider(level, { level = it }, valueRange = 0f..100f)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(stringResource(R.string.m_charging), Modifier.weight(1f)); Switch(charging, { charging = it })
+                Column(
+                    Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    BatteryModeFields(
+                        host = host,
+                        onHostChange = { host = it },
+                        level = level,
+                        onLevelChange = { level = it },
+                        source = source,
+                        onSourceChange = { source = it },
+                        hostReading = hostReading,
+                        busy = busy,
+                        onReset = if (host) null else ({
+                            reading = true
+                            guestAsync(GuestBatteryControl.RESET_COMMAND) {
+                                runOnUiThread { reading = false }
+                            }
+                        }),
+                    )
+                    if (!host) {
+                        Text(
+                            stringResource(R.string.battery_controls_hint),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
             },
-            confirmButton = { Button(onClick = {
-                val lvl = level.toInt()
-                val ac = if (charging) 1 else 0
-                val cmd = "echo $lvl > /sys/class/power_supply/battery/capacity 2>/dev/null; " +
-                    "echo $ac > /sys/class/power_supply/ac/online 2>/dev/null; " +
-                    "dumpsys battery set level $lvl 2>/dev/null; " +
-                    "dumpsys battery set ac $ac 2>/dev/null; " +
-                    "dumpsys battery set usb 0 2>/dev/null"
-                guestAsync(cmd)
-                onDone()
-            }) { Text(stringResource(R.string.m_apply)) } },
-            dismissButton = { OutlinedButton(onClick = {
-                guestAsync("dumpsys battery reset 2>/dev/null")
-                onDone()
-            }) { Text(stringResource(R.string.m_reset)) } })
+            confirmButton = {
+                Button(
+                    enabled = !busy,
+                    onClick = {
+                        val custom = GuestBatteryState(level.toInt(), source)
+                        applyBatteryMode(host, if (host) null else custom) { applied ->
+                            if (applied) onDone()
+                        }
+                    },
+                ) { Text(stringResource(R.string.m_apply)) }
+            },
+            dismissButton = {
+                OutlinedButton(enabled = !busy, onClick = onDone) { Text(stringResource(R.string.cancel)) }
+            },
+        )
     }
 
     private fun rebootVm(recovery: Boolean = false) {
@@ -1082,7 +1304,6 @@ class VmActivity : ComponentActivity() {
             val rtl = androidx.compose.ui.platform.LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl
             fun clamp(o: Offset) = Offset(if (rtl) o.x.coerceIn(0f, maxX) else o.x.coerceIn(-maxX, 0f), o.y.coerceIn(0f, maxY))
             LaunchedEffect(maxX, maxY) { menuOffset = clamp(menuOffset) }
-            led?.takeIf { it.lit && showLed }?.let { LedIndicator(it, Modifier.align(Alignment.TopCenter)) }
             // карточка загрузки
             AnimatedVisibility(
                 visible = state != GuestVm.State.RUNNING && !showLog && (!(drawing && state == GuestVm.State.BOOTING) || unconfirmed),
@@ -1154,10 +1375,21 @@ class VmActivity : ComponentActivity() {
                         onClick = { vm.input.press(InputService.KEY_VOLUMEDOWN) })
                     DropdownMenuItem(text = { Text(stringResource(R.string.power)) }, leadingIcon = { Icon(Icons.Rounded.PowerSettingsNew, null) },
                         onClick = { menu = false; vm.input.press(InputService.KEY_POWER) })
-                    DropdownMenuItem(text = { Text(stringResource(R.string.m_power_menu)) }, leadingIcon = { Icon(Icons.Rounded.PowerSettingsNew, null) },
+                    DropdownMenuItem(text = { Text(stringResource(R.string.m_power_menu)) }, leadingIcon = { Icon(Icons.Rounded.Menu, null) },
                         onClick = { menu = false; vm.input.press(InputService.KEY_POWER, 1500) })
+                    DropdownMenuItem(text = { Text(stringResource(R.string.nav_bar_toggle)) },
+                        leadingIcon = { Icon(Icons.Rounded.ViewCompact, null) }, enabled = !navBarBusy,
+                        onClick = { menu = false; setNavBarVisible(!navBarOn) })
                     // long-press Menu makes 2.x–4.x call InputMethodManager.toggleSoftInput: the firmware's own keyboard
                     if (!vm.recoveryMode) {
+                        if (app.aemu.core.TargetWifiArtifacts.applies(vm.img.api, vm.img.model, vm.img.abi, vm.engine)) {
+                            DropdownMenuItem(text = { Text(stringResource(R.string.m_network_mode)) },
+                                leadingIcon = { Icon(Icons.Rounded.Lan, null) },
+                                onClick = { menu = false; dialog = Dlg.NETWORK_MODE })
+                        }
+                        DropdownMenuItem(text = { Text(stringResource(R.string.sensor_bridge_toggle)) },
+                            leadingIcon = { Icon(Icons.Rounded.ScreenRotation, null) },
+                            enabled = running && !sensorBridgeBusy, onClick = { menu = false; setSensorBridge(!sensorBridgeOn) })
                         DropdownMenuItem(text = { Text(stringResource(R.string.m_keyboard)) }, leadingIcon = { Icon(Icons.Rounded.Keyboard, null) },
                             enabled = running, onClick = {
                                 menu = false
@@ -1176,16 +1408,12 @@ class VmActivity : ComponentActivity() {
                             enabled = running, onClick = { menu = false; dialog = Dlg.BATTERY })
                         DropdownMenuItem(text = { Text(stringResource(R.string.m_install_apk)) }, leadingIcon = { Icon(Icons.Rounded.InstallMobile, null) },
                             enabled = running, onClick = { menu = false; pickApkForGuest() })
-                        DropdownMenuItem(text = { Text(stringResource(R.string.m_camera)) }, leadingIcon = { Icon(Icons.Rounded.PhotoCamera, null) },
-                            onClick = { menu = false; dialog = Dlg.CAMERA })
                         DropdownMenuItem(text = { Text(stringResource(R.string.m_device)) }, leadingIcon = { Icon(Icons.Rounded.Tune, null) },
                             enabled = running, onClick = { menu = false; dialog = Dlg.DEVICE })
                         DropdownMenuItem(text = { Text(stringResource(R.string.m_adb)) }, leadingIcon = { Icon(Icons.Rounded.Lan, null) },
                             enabled = running, onClick = { menu = false; dialog = Dlg.ADB })
                         DropdownMenuItem(text = { Text(stringResource(R.string.m_settings)) }, leadingIcon = { Icon(Icons.Rounded.Settings, null) },
                             enabled = running, onClick = { menu = false; guestAsync("am start -a android.settings.SETTINGS") })
-                        DropdownMenuItem(text = { Text(stringResource(R.string.m_apps)) }, leadingIcon = { Icon(Icons.Rounded.Apps, null) },
-                            enabled = running, onClick = { menu = false; dialog = Dlg.APPS })
                     }
                     DropdownMenuItem(text = { Text(stringResource(R.string.m_screenshot)) }, leadingIcon = { Icon(Icons.Rounded.Screenshot, null) },
                         enabled = state == GuestVm.State.RUNNING, onClick = { menu = false; screenshot() })
@@ -1195,7 +1423,7 @@ class VmActivity : ComponentActivity() {
                     DropdownMenuItem(text = { Text(stringResource(if (vncOn.value) R.string.m_vnc_stop else R.string.m_vnc)) },
                         leadingIcon = { Icon(Icons.Rounded.Cast, null) },
                         onClick = { menu = false; toggleVnc() })
-                    DropdownMenuItem(text = { Text(stringResource(R.string.m_reset_menu_pos)) }, leadingIcon = { Icon(Icons.Rounded.RestartAlt, null) },
+                    DropdownMenuItem(text = { Text(stringResource(R.string.m_reset_menu_pos)) }, leadingIcon = { Icon(Icons.Rounded.CenterFocusStrong, null) },
                         onClick = { menu = false; menuOffset = Offset.Zero; saveMenuOffset() })
                     HorizontalDivider()
                     DropdownMenuItem(text = { Text(stringResource(R.string.m_reboot)) }, leadingIcon = { Icon(Icons.Rounded.RestartAlt, null) },
@@ -1215,13 +1443,14 @@ class VmActivity : ComponentActivity() {
                 Dlg.APPS -> AppsDialog { dialog = Dlg.NONE }
                 Dlg.BADGE -> BadgeDialog { dialog = Dlg.NONE }
                 Dlg.HUD -> HudDialog { dialog = Dlg.NONE }
+                Dlg.NETWORK_MODE -> NetworkModeDialog(vm.img.id) { dialog = Dlg.NONE }
                 Dlg.NONE -> {}
             }
 
             // pre-1.0 builds (Sooner/M3/M5) target phones driven by keys: their own keypad instead of the nav bar
             if (hasDeviceKeys && !showLog && !showTerm) {
                 DeviceKeypad(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 4.dp))
-            } else if (vm.settings.showNavBar && !showLog && !showTerm) {
+            } else if (navBarOn && !showLog && !showTerm) {
                 val pad = if (vm.settings.navSize == 0) 3.dp else 6.dp
                 if (androidx.compose.ui.platform.LocalConfiguration.current.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE)
                     NavBar(Modifier.align(Alignment.CenterEnd).navigationBarsPadding().displayCutoutPadding().padding(end = pad), vertical = true)
@@ -1385,50 +1614,6 @@ class VmActivity : ComponentActivity() {
                 "power" -> Icon(Icons.Rounded.PowerSettingsNew, d, m)
                 else -> Icon(Icons.Rounded.Gamepad, d, m)
             }
-        }
-    }
-
-    /**
-     * The guest's LED above its screen: Sony's illumination bar as a glowing strip, other phones' notification LED as
-     * a dot. Blinks with the guest's on/off times.
-     */
-    @Composable
-    private fun LedIndicator(l: app.aemu.core.Lights.Led, modifier: Modifier) {
-        var on by remember(l) { mutableStateOf(true) }
-        LaunchedEffect(l) {
-            if (l.onMs > 0 && l.offMs > 0) while (true) { on = true; delay(l.onMs.toLong()); on = false; delay(l.offMs.toLong()) }
-        }
-        val alpha by androidx.compose.animation.core.animateFloatAsState(if (on) 1f else 0.08f,
-            androidx.compose.animation.core.tween(if (on) 120 else 260), label = "led")
-        val c = Color(0xff000000.toInt() or (l.color and 0xffffff))
-        val sony = vm.img.skin.contains("Xperia", true) || vm.img.brand.contains("Sony", true)
-        val density = androidx.compose.ui.platform.LocalDensity.current
-        val y = with(density) { (guestTopPx.toDp() - 10.dp).coerceAtLeast(4.dp) }
-        if (sony) {
-            Box(
-                modifier.offset(y = y)
-                    .width(160.dp)
-                    .height(6.dp)
-                    .alpha(alpha)
-                    .clip(RoundedCornerShape(3.dp))
-                    .background(
-                        androidx.compose.ui.graphics.Brush.horizontalGradient(
-                            listOf(
-                                Color.Transparent,
-                                c.copy(alpha = 0.4f),
-                                c,
-                                c.copy(alpha = 0.4f),
-                                Color.Transparent
-                            )
-                        )
-                    )
-            )
-        } else {
-            Box(
-                modifier.offset(y = y).size(14.dp)
-                    .alpha(alpha)
-                    .background(androidx.compose.ui.graphics.Brush.radialGradient(listOf(c, c.copy(alpha = 0.55f), Color.Transparent)), CircleShape)
-            )
         }
     }
 

@@ -1,0 +1,10 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="app.redmagicemu.wifiprobe">
+    <uses-sdk android:minSdkVersion="36" android:targetSdkVersion="36" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <application android:label="RedMagicEMU Wi-Fi diagnostic" android:allowBackup="false">
+        <activity android:name=".ProbeActivity" android:exported="true" android:noHistory="true" android:excludeFromRecents="true" />
+        <receiver android:name=".ProbeReceiver" android:exported="true" />
+    </application>
+</manifest>

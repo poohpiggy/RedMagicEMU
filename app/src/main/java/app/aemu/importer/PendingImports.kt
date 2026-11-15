@@ -234,6 +234,33 @@ internal object PendingImports {
          */
         internal fun markGuestQuarantine() = markGuestQuarantineInternal(null)
 
+        /**
+         * Run a short preparation before publication while the cooperative import
+         * lease and image-manager lock are held. The callback must not start a
+         * Guest or retain the path for later writes. As with SafeTreeWriter this
+         * does not defend against a non-cooperating process with the same UID.
+         */
+        internal fun <T> withUnpublishedRoot(id: String, action: (File) -> T): T = locked(images) {
+            requireLiveQuarantineLease()
+            if (preserveOnClose || quarantinePresent(dir.toPath()) ||
+                Files.exists(dir.toPath().resolve(PUBLISH), LinkOption.NOFOLLOW_LINKS) ||
+                Files.exists(dir.toPath().resolve(CLOSING), LinkOption.NOFOLLOW_LINKS))
+                throw IOException("Import is no longer a private unstarted instance")
+            if (!ImageId.valid(id)) throw IOException("Invalid instance ID")
+            val instance = dir.toPath().resolve(id)
+            val root = instance.resolve("root")
+            if (!Files.isDirectory(instance, LinkOption.NOFOLLOW_LINKS) ||
+                !Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) throw IOException("Incomplete pending instance")
+            val instanceKey = fileKey(instance) ?: throw IOException("Pending instance identity unavailable")
+            val rootKey = fileKey(root) ?: throw IOException("Pending root identity unavailable")
+            val result = action(root.toFile())
+            requireLiveQuarantineLease()
+            if (!Files.isDirectory(instance, LinkOption.NOFOLLOW_LINKS) || fileKey(instance) != instanceKey ||
+                !Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS) || fileKey(root) != rootKey)
+                throw IOException("Pending instance changed during preparation")
+            result
+        }
+
         /** Each injected fault throws; tests cannot use this to replace a sync with a successful no-op. */
         internal fun markGuestQuarantineFailingAtForTests(fault: QuarantineFault): Nothing {
             markGuestQuarantineInternal(fault)

@@ -14,6 +14,9 @@ import java.util.NoSuchElementException;
 
 /** Unregistered slot1 contract; never accesses host hardware. */
 public final class RadioModemService extends IRadioModem.Stub {
+  // Synthetic software version; not a version obtained from host hardware.
+  private static final String SOFTWARE_VERSION = "01";
+  private static final String BASEBAND_VERSION = "RedMagic Virtual Baseband";
   private volatile RadioRequestCounter requestCounter;
   void setRequestCounterForExperiment(RadioRequestCounter counter) { requestCounter = counter; }
   @Override public boolean onTransact(int code, android.os.Parcel data, android.os.Parcel reply, int flags) throws RemoteException {
@@ -24,16 +27,30 @@ public final class RadioModemService extends IRadioModem.Stub {
   private final Object lock = new Object();
   private final Object powerDispatchLock = new Object();
   private final SyntheticSingleSlot syntheticSlot;
+  private final String virtualImei;
   private final SyntheticSingleSlot.Listener stateListener;
   private Callbacks callbacks;
   private volatile RuntimeException powerNotificationFailure;
   RuntimeException getPowerNotificationFailure() { return powerNotificationFailure; }
   public RadioModemService(String slot) { this(slot, null); }
-  RadioModemService(String slot, SyntheticSingleSlot model) {
+  RadioModemService(String slot, SyntheticSingleSlot model) { this(slot,model,null); }
+  RadioModemService(String slot, SyntheticSingleSlot model, String imei) {
     if (!"slot1".equals(slot)) throw new IllegalArgumentException("only slot1 is supported");
+    if (imei!=null && (model==null || !validImei(imei))) throw new IllegalArgumentException("invalid virtual IMEI");
     syntheticSlot=model;
+    virtualImei=imei;
     stateListener=syntheticSlot==null ? null : this::notifyUnavailable;
     if (stateListener!=null) syntheticSlot.addListener(stateListener);
+  }
+  static boolean validImei(String imei) {
+    if (imei==null || imei.length()!=15) return false;
+    int sum=0;
+    for (int i=0;i<15;i++) {
+      char c=imei.charAt(i); if (c<'0' || c>'9') return false;
+      int n=c-'0'; if ((i&1)==1) { n*=2; if (n>9) n-=9; }
+      sum+=n;
+    }
+    return sum%10==0;
   }
   /** Removes the model listener; an already captured notification may still run. */
   void detachStateListener() {
@@ -102,8 +119,17 @@ public final class RadioModemService extends IRadioModem.Stub {
   @Override public int getInterfaceVersion() { return IRadioModem.VERSION; }
   @Override public String getInterfaceHash() { return IRadioModem.HASH; }
   @Override public void enableModem(int serial, boolean on) throws RemoteException { response().enableModemResponse(result(serial,RadioError.REQUEST_NOT_SUPPORTED)); }
-  @Override public void getBasebandVersion(int serial) throws RemoteException { response().getBasebandVersionResponse(result(serial,RadioError.REQUEST_NOT_SUPPORTED), ""); }
-  @Override public void getDeviceIdentity(int serial) throws RemoteException { response().getDeviceIdentityResponse(result(serial,RadioError.REQUEST_NOT_SUPPORTED), "", "", "", ""); }
+  @Override public void getBasebandVersion(int serial) throws RemoteException {
+    int error=syntheticSlot==null ? RadioError.REQUEST_NOT_SUPPORTED :
+        (syntheticSlot.isConnected() ? RadioError.NONE : RadioError.RADIO_NOT_AVAILABLE);
+    response().getBasebandVersionResponse(result(serial,error), error==RadioError.NONE ? BASEBAND_VERSION : "");
+  }
+  @Override public void getDeviceIdentity(int serial) throws RemoteException {
+    int error=virtualImei==null ? RadioError.REQUEST_NOT_SUPPORTED :
+        (syntheticSlot.isConnected() ? RadioError.NONE : RadioError.RADIO_NOT_AVAILABLE);
+    response().getDeviceIdentityResponse(result(serial,error), error==RadioError.NONE ? virtualImei : "",
+        error==RadioError.NONE ? SOFTWARE_VERSION : "", "", "");
+  }
   @Override public void getHardwareConfig(int serial) throws RemoteException { response().getHardwareConfigResponse(result(serial,RadioError.REQUEST_NOT_SUPPORTED), new android.hardware.radio.modem.HardwareConfig[0]); }
   @Override public void getModemActivityInfo(int serial) throws RemoteException { response().getModemActivityInfoResponse(result(serial,RadioError.REQUEST_NOT_SUPPORTED), new android.hardware.radio.modem.ActivityStatsInfo()); }
   @Override public void getModemStackStatus(int serial) throws RemoteException {
@@ -147,5 +173,15 @@ public final class RadioModemService extends IRadioModem.Stub {
       }
     }
   }
-  @Override public void getImei(int serial) throws RemoteException { response().getImeiResponse(result(serial,RadioError.REQUEST_NOT_SUPPORTED), new android.hardware.radio.modem.ImeiInfo()); }
+  @Override public void getImei(int serial) throws RemoteException {
+    int error=virtualImei==null ? RadioError.REQUEST_NOT_SUPPORTED :
+        (syntheticSlot.isConnected() ? RadioError.NONE : RadioError.RADIO_NOT_AVAILABLE);
+    android.hardware.radio.modem.ImeiInfo info=new android.hardware.radio.modem.ImeiInfo();
+    if (error==RadioError.NONE) {
+      info.type=android.hardware.radio.modem.ImeiInfo.ImeiType.PRIMARY;
+      info.imei=virtualImei;
+      info.svn=SOFTWARE_VERSION;
+    }
+    response().getImeiResponse(result(serial,error), info);
+  }
 }

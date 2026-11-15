@@ -46,7 +46,7 @@
     <string name="vs_proxy_sub">Stare przeglądarki i aplikacje otwierają dzisiejsze strony HTTPS.</string>
     <string name="vs_controls">Sterowanie</string>
     <string name="vs_nav">Pasek przycisków Androida</string>
-    <string name="vs_nav_sub">Wstecz, Ekran główny, Ostatnie i Menu pod ekranem.</string>
+    <string name="vs_nav_sub">Wstecz, Ekran główny i Ostatnie pod ekranem.</string>
     <string name="vs_awake">Nie wygaszaj ekranu</string>
     <string name="vs_awake_sub">Dopóki system jest otwarty.</string>
     <string name="vs_vsync">VSync</string>
@@ -59,7 +59,7 @@
     <string name="vol_up">Głośność +</string>
     <string name="vol_down">Głośność −</string>
     <string name="power">Przycisk zasilania</string>
-    <string name="shutdown">Wyłącz system</string>
+    <string name="shutdown">Wyłącz maszynę wirtualną</string>
     <string name="back">Wstecz</string>
     <string name="home">Ekran główny</string>
     <string name="recents">Ostatnie</string>
@@ -113,14 +113,14 @@
     <string name="vs_advanced">Advanced</string>
     <string name="vs_qemu_args">Extra qemu options</string>
     <string name="vs_qemu_args_sub">Example: -d unimp DHD_TBFLUSH=2 (NAME=value becomes an environment variable)</string>
-    <string name="m_power_menu">Power menu</string>
+    <string name="m_power_menu">Menu zasilania</string>
     <string name="m_keyboard">Pokaż/ukryj klawiaturę</string>
-    <string name="m_paste">Paste text from clipboard</string>
-    <string name="m_sms">Fake SMS</string>
-    <string name="m_battery">Battery</string>
-    <string name="m_screenshot">Screenshot</string>
-    <string name="m_settings">Open Android settings</string>
-    <string name="m_reboot">Reboot</string>
+    <string name="m_paste">Wklej tekst ze schowka</string>
+    <string name="m_sms">Wirtualny SMS</string>
+    <string name="m_battery">Bateria</string>
+    <string name="m_screenshot">Zrzut ekranu</string>
+    <string name="m_settings">Otwórz ustawienia Androida</string>
+    <string name="m_reboot">Uruchom ponownie maszynę wirtualną</string>
     <string name="m_clip_empty">Clipboard is empty</string>
     <string name="m_screenshot_saved">Saved: %1$s</string>
     <string name="m_failed">Failed</string>
@@ -131,7 +131,7 @@
     <string name="m_charging">Charging</string>
     <string name="m_apply">Apply</string>
     <string name="m_reset">Reset</string>
-    <string name="m_call">Połączenie przychodzące</string>
+    <string name="m_call">Wirtualne połączenie przychodzące</string>
     <string name="m_call_ring">Zadzwoń</string>
     <string name="fw_folder_title">Oprogramowanie w folderze</string>
     <string name="fw_folder_import">Importuj</string>
@@ -175,21 +175,6 @@
     <string name="m_device">Stan urządzenia</string>
     <string name="m_airplane">Tryb samolotowy</string>
     <string name="m_stay_awake">Nie wygaszaj ekranu</string>
-    <string name="as_updates">Aktualizacje</string>
-    <string name="as_auto_updates">Automatycznie sprawdzaj aktualizacje</string>
-    <string name="as_auto_updates_sub">Sprawdzaj nowe wersje na GitHubie przy starcie</string>
-    <string name="as_check_updates">Sprawdź aktualizacje</string>
-    <string name="as_check_updates_sub">Obecna wersja: %1$s</string>
-    <string name="update_available_title">Dostępna aktualizacja</string>
-    <string name="update_available_msg">Dostępna jest wersja %1$s. Zaktualizować?</string>
-    <string name="update_latest">Masz najnowszą wersję (%1$s)</string>
-    <string name="update_checking">Sprawdzanie aktualizacji…</string>
-    <string name="update_btn">Aktualizuj</string>
-    <string name="update_later">Później</string>
-    <string name="update_downloading">Pobieranie aktualizacji…</string>
-    <string name="update_install">Zainstaluj</string>
-    <string name="update_error">Nie udało się sprawdzić aktualizacji: %1$s</string>
-    <string name="update_open_github">Otwórz na GitHubie</string>
     <string name="lib_title">Biblioteka firmware</string>
     <string name="lib_empty">Brak firmware: zaimportuj plik firmware, aby utworzyć pierwszą maszynę.</string>
     <string name="new_machine">Nowa maszyna</string>
@@ -212,4 +197,9 @@
     <string name="m_vnc">Uruchom serwer VNC</string>
     <string name="m_vnc_stop">Zatrzymaj serwer VNC</string>
     <string name="m_vnc_started">VNC: %1$s, hasło %2$s</string>
+    <string name="m_hud">Nakładka wydajności</string>
+    <string name="m_network_mode">Tryb sieci</string>
+    <string name="vs_disk_hint">Ustawia pojemność widoczną w systemie gościa; dostępne miejsce zależy od telefonu.</string>
+    <string name="instance_settings">Ustawienia instancji</string>
+    <string name="about_title">Informacje</string>
 </resources>

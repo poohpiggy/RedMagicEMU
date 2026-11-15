@@ -46,7 +46,7 @@
     <string name="vs_proxy_sub">오래된 브라우저와 앱으로 오늘날의 HTTPS 사이트를 엽니다.</string>
     <string name="vs_controls">조작</string>
     <string name="vs_nav">Android 버튼 바</string>
-    <string name="vs_nav_sub">화면 아래 뒤로, 홈, 최근, 메뉴.</string>
+    <string name="vs_nav_sub">화면 아래 뒤로, 홈, 최근 앱.</string>
     <string name="vs_awake">화면 켜짐 유지</string>
     <string name="vs_awake_sub">시스템이 열려 있는 동안.</string>
     <string name="vs_vsync">VSync</string>
@@ -59,7 +59,7 @@
     <string name="vol_up">볼륨 +</string>
     <string name="vol_down">볼륨 −</string>
     <string name="power">전원 버튼</string>
-    <string name="shutdown">시스템 종료</string>
+    <string name="shutdown">가상 머신 종료</string>
     <string name="back">뒤로</string>
     <string name="home">홈</string>
     <string name="recents">최근</string>
@@ -113,14 +113,14 @@
     <string name="vs_advanced">Advanced</string>
     <string name="vs_qemu_args">Extra qemu options</string>
     <string name="vs_qemu_args_sub">Example: -d unimp DHD_TBFLUSH=2 (NAME=value becomes an environment variable)</string>
-    <string name="m_power_menu">Power menu</string>
+    <string name="m_power_menu">전원 메뉴</string>
     <string name="m_keyboard">키보드 표시/숨기기</string>
-    <string name="m_paste">Paste text from clipboard</string>
-    <string name="m_sms">Fake SMS</string>
-    <string name="m_battery">Battery</string>
-    <string name="m_screenshot">Screenshot</string>
-    <string name="m_settings">Open Android settings</string>
-    <string name="m_reboot">Reboot</string>
+    <string name="m_paste">클립보드에서 텍스트 붙여넣기</string>
+    <string name="m_sms">가상 문자</string>
+    <string name="m_battery">배터리</string>
+    <string name="m_screenshot">스크린샷</string>
+    <string name="m_settings">Android 설정 열기</string>
+    <string name="m_reboot">가상 머신 다시 시작</string>
     <string name="m_clip_empty">Clipboard is empty</string>
     <string name="m_screenshot_saved">Saved: %1$s</string>
     <string name="m_failed">Failed</string>
@@ -131,7 +131,7 @@
     <string name="m_charging">Charging</string>
     <string name="m_apply">Apply</string>
     <string name="m_reset">Reset</string>
-    <string name="m_call">수신 전화</string>
+    <string name="m_call">가상 수신 전화</string>
     <string name="m_call_ring">전화 걸기</string>
     <string name="fw_folder_title">폴더의 펌웨어</string>
     <string name="fw_folder_import">가져오기</string>
@@ -175,21 +175,6 @@
     <string name="m_device">기기 상태</string>
     <string name="m_airplane">비행기 모드</string>
     <string name="m_stay_awake">화면 켜짐 유지</string>
-    <string name="as_updates">업데이트</string>
-    <string name="as_auto_updates">업데이트 자동 확인</string>
-    <string name="as_auto_updates_sub">시작할 때 GitHub에서 새 버전 확인</string>
-    <string name="as_check_updates">업데이트 확인</string>
-    <string name="as_check_updates_sub">현재 버전: %1$s</string>
-    <string name="update_available_title">업데이트 있음</string>
-    <string name="update_available_msg">새 버전 %1$s이(가) 있습니다. 업데이트할까요?</string>
-    <string name="update_latest">최신 버전입니다(%1$s)</string>
-    <string name="update_checking">업데이트 확인 중…</string>
-    <string name="update_btn">업데이트</string>
-    <string name="update_later">나중에</string>
-    <string name="update_downloading">업데이트 다운로드 중…</string>
-    <string name="update_install">설치</string>
-    <string name="update_error">업데이트 확인 실패: %1$s</string>
-    <string name="update_open_github">GitHub에서 보기</string>
     <string name="lib_title">펌웨어 라이브러리</string>
     <string name="lib_empty">아직 펌웨어가 없습니다. 펌웨어 파일을 가져와 첫 머신을 만드세요.</string>
     <string name="new_machine">새 머신</string>
@@ -212,4 +197,9 @@
     <string name="m_vnc">VNC 서버 시작</string>
     <string name="m_vnc_stop">VNC 서버 중지</string>
     <string name="m_vnc_started">VNC: %1$s, 비밀번호 %2$s</string>
+    <string name="m_hud">성능 표시</string>
+    <string name="m_network_mode">네트워크 모드</string>
+    <string name="vs_disk_hint">게스트에 표시할 용량을 설정합니다. 사용 가능한 공간은 휴대전화에 따라 달라집니다.</string>
+    <string name="instance_settings">인스턴스 설정</string>
+    <string name="about_title">정보</string>
 </resources>

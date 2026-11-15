@@ -46,7 +46,7 @@
     <string name="vs_proxy_sub">Browser dan aplikasi lama bisa membuka situs HTTPS masa kini.</string>
     <string name="vs_controls">Kontrol</string>
     <string name="vs_nav">Bilah tombol Android</string>
-    <string name="vs_nav_sub">Kembali, Beranda, Terbaru, dan Menu di bawah layar.</string>
+    <string name="vs_nav_sub">Kembali, Beranda, dan Terbaru di bawah layar.</string>
     <string name="vs_awake">Layar tetap menyala</string>
     <string name="vs_awake_sub">Selama sistem terbuka.</string>
     <string name="vs_vsync">VSync</string>
@@ -59,7 +59,7 @@
     <string name="vol_up">Volume +</string>
     <string name="vol_down">Volume −</string>
     <string name="power">Tombol daya</string>
-    <string name="shutdown">Matikan sistem</string>
+    <string name="shutdown">Matikan mesin virtual</string>
     <string name="back">Kembali</string>
     <string name="home">Beranda</string>
     <string name="recents">Terbaru</string>
@@ -113,14 +113,14 @@
     <string name="vs_advanced">Advanced</string>
     <string name="vs_qemu_args">Extra qemu options</string>
     <string name="vs_qemu_args_sub">Example: -d unimp DHD_TBFLUSH=2 (NAME=value becomes an environment variable)</string>
-    <string name="m_power_menu">Power menu</string>
+    <string name="m_power_menu">Menu daya</string>
     <string name="m_keyboard">Tampilkan/sembunyikan keyboard</string>
-    <string name="m_paste">Paste text from clipboard</string>
-    <string name="m_sms">Fake SMS</string>
-    <string name="m_battery">Battery</string>
-    <string name="m_screenshot">Screenshot</string>
-    <string name="m_settings">Open Android settings</string>
-    <string name="m_reboot">Reboot</string>
+    <string name="m_paste">Tempel teks dari papan klip</string>
+    <string name="m_sms">SMS virtual</string>
+    <string name="m_battery">Baterai</string>
+    <string name="m_screenshot">Tangkapan layar</string>
+    <string name="m_settings">Buka setelan Android</string>
+    <string name="m_reboot">Mulai ulang mesin virtual</string>
     <string name="m_clip_empty">Clipboard is empty</string>
     <string name="m_screenshot_saved">Saved: %1$s</string>
     <string name="m_failed">Failed</string>
@@ -131,7 +131,7 @@
     <string name="m_charging">Charging</string>
     <string name="m_apply">Apply</string>
     <string name="m_reset">Reset</string>
-    <string name="m_call">Panggilan masuk</string>
+    <string name="m_call">Panggilan masuk virtual</string>
     <string name="m_call_ring">Panggil</string>
     <string name="fw_folder_title">Firmware di folder</string>
     <string name="fw_folder_import">Impor</string>
@@ -175,21 +175,6 @@
     <string name="m_device">Status perangkat</string>
     <string name="m_airplane">Mode pesawat</string>
     <string name="m_stay_awake">Biarkan layar menyala</string>
-    <string name="as_updates">Pembaruan</string>
-    <string name="as_auto_updates">Periksa pembaruan otomatis</string>
-    <string name="as_auto_updates_sub">Periksa versi baru di GitHub saat aplikasi dibuka</string>
-    <string name="as_check_updates">Periksa pembaruan</string>
-    <string name="as_check_updates_sub">Versi saat ini: %1$s</string>
-    <string name="update_available_title">Pembaruan tersedia</string>
-    <string name="update_available_msg">Versi baru %1$s tersedia. Perbarui sekarang?</string>
-    <string name="update_latest">Anda memakai versi terbaru (%1$s)</string>
-    <string name="update_checking">Memeriksa pembaruan…</string>
-    <string name="update_btn">Perbarui</string>
-    <string name="update_later">Nanti</string>
-    <string name="update_downloading">Mengunduh pembaruan…</string>
-    <string name="update_install">Pasang</string>
-    <string name="update_error">Gagal memeriksa pembaruan: %1$s</string>
-    <string name="update_open_github">Lihat di GitHub</string>
     <string name="lib_title">Pustaka firmware</string>
     <string name="lib_empty">Belum ada firmware: impor file firmware untuk membuat mesin pertama.</string>
     <string name="new_machine">Mesin baru</string>
@@ -212,4 +197,9 @@
     <string name="m_vnc">Mulai server VNC</string>
     <string name="m_vnc_stop">Hentikan server VNC</string>
     <string name="m_vnc_started">VNC: %1$s, kata sandi %2$s</string>
+    <string name="m_hud">Tampilan performa</string>
+    <string name="m_network_mode">Mode jaringan</string>
+    <string name="vs_disk_hint">Mengatur kapasitas yang ditampilkan ke sistem tamu; ruang yang tersedia bergantung pada ponsel.</string>
+    <string name="instance_settings">Setelan instans</string>
+    <string name="about_title">Tentang</string>
 </resources>

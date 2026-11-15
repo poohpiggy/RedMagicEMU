@@ -205,6 +205,9 @@ static const struct ent STATIC[] = {
     B(CONTROL_AE_LOCK_AVAILABLE, 0),
     B(CONTROL_AWB_LOCK_AVAILABLE, 0),
     B(CONTROL_AVAILABLE_MODES, 1),
+    /* Nubia Camera dereferences this even without RAW. A fixed unit gain is a
+     * compatibility value; the API normally specifies null without RAW. */
+    I(CONTROL_POST_RAW_SENSITIVITY_BOOST_RANGE, 100, 100),
     B(EDGE_AVAILABLE_EDGE_MODES, 0, 1),
     B(FLASH_INFO_AVAILABLE, 0),
     B(HOT_PIXEL_AVAILABLE_HOT_PIXEL_MODES, 1),
@@ -224,6 +227,9 @@ static const struct ent STATIC[] = {
     B(REQUEST_PIPELINE_MAX_DEPTH, 4),
     I(REQUEST_PARTIAL_RESULT_COUNT, 1),
     B(REQUEST_AVAILABLE_CAPABILITIES, 0),
+    /* No session parameters are supported. Keep the empty entry present for
+     * clients that do not handle a null session-key list. */
+    { REQUEST_AVAILABLE_SESSION_KEYS, 0, (const int32_t[]){0} },
     F(SCALER_AVAILABLE_MAX_DIGITAL_ZOOM, 1.0f),
     I(SCALER_AVAILABLE_STREAM_CONFIGURATIONS, SIZES(FORMAT_IMPLEMENTATION_DEFINED), SIZES(FORMAT_YCBCR_420_888),
       FORMAT_BLOB, 640, 480, 0),
@@ -266,13 +272,15 @@ static const struct ent STATIC[] = {
       LENS_FOCUS_DISTANCE, LENS_OPTICAL_STABILIZATION_MODE, NOISE_REDUCTION_MODE, SCALER_CROP_REGION, SHADING_MODE,
       STATISTICS_FACE_DETECT_MODE, STATISTICS_LENS_SHADING_MAP_MODE, TONEMAP_MODE,
       CONTROL_AE_STATE, CONTROL_AF_STATE, CONTROL_AWB_STATE, FLASH_STATE, LENS_STATE, REQUEST_PIPELINE_DEPTH,
-      SENSOR_TIMESTAMP, SENSOR_ROLLING_SHUTTER_SKEW, STATISTICS_SCENE_FLICKER),
+      SENSOR_TIMESTAMP, SENSOR_ROLLING_SHUTTER_SKEW, SENSOR_EXPOSURE_TIME, SENSOR_SENSITIVITY,
+      CONTROL_POST_RAW_SENSITIVITY_BOOST, STATISTICS_SCENE_FLICKER),
     I(REQUEST_AVAILABLE_CHARACTERISTICS_KEYS,
       COLOR_CORRECTION_AVAILABLE_ABERRATION_MODES, CONTROL_AE_AVAILABLE_ANTIBANDING_MODES, CONTROL_AE_AVAILABLE_MODES,
       CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES, CONTROL_AE_COMPENSATION_RANGE, CONTROL_AE_COMPENSATION_STEP,
       CONTROL_AF_AVAILABLE_MODES, CONTROL_AVAILABLE_EFFECTS, CONTROL_AVAILABLE_SCENE_MODES,
       CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES, CONTROL_AWB_AVAILABLE_MODES, CONTROL_MAX_REGIONS,
-      CONTROL_AE_LOCK_AVAILABLE, CONTROL_AWB_LOCK_AVAILABLE, CONTROL_AVAILABLE_MODES, EDGE_AVAILABLE_EDGE_MODES,
+      CONTROL_AE_LOCK_AVAILABLE, CONTROL_AWB_LOCK_AVAILABLE, CONTROL_AVAILABLE_MODES,
+      CONTROL_POST_RAW_SENSITIVITY_BOOST_RANGE, EDGE_AVAILABLE_EDGE_MODES,
       FLASH_INFO_AVAILABLE, HOT_PIXEL_AVAILABLE_HOT_PIXEL_MODES, JPEG_AVAILABLE_THUMBNAIL_SIZES, JPEG_MAX_SIZE,
       LENS_FACING, LENS_INFO_AVAILABLE_APERTURES, LENS_INFO_AVAILABLE_FILTER_DENSITIES,
       LENS_INFO_AVAILABLE_FOCAL_LENGTHS, LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION, LENS_INFO_HYPERFOCAL_DISTANCE,
@@ -280,6 +288,7 @@ static const struct ent STATIC[] = {
       NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES, REQUEST_MAX_NUM_OUTPUT_STREAMS, REQUEST_MAX_NUM_INPUT_STREAMS,
       REQUEST_PIPELINE_MAX_DEPTH, REQUEST_PARTIAL_RESULT_COUNT, REQUEST_AVAILABLE_CAPABILITIES,
       REQUEST_AVAILABLE_REQUEST_KEYS, REQUEST_AVAILABLE_RESULT_KEYS, REQUEST_AVAILABLE_CHARACTERISTICS_KEYS,
+      REQUEST_AVAILABLE_SESSION_KEYS,
       SCALER_AVAILABLE_MAX_DIGITAL_ZOOM, SCALER_AVAILABLE_STREAM_CONFIGURATIONS, SCALER_AVAILABLE_MIN_FRAME_DURATIONS,
       SCALER_AVAILABLE_STALL_DURATIONS, SCALER_CROPPING_TYPE, SENSOR_INFO_ACTIVE_ARRAY_SIZE,
       SENSOR_INFO_SENSITIVITY_RANGE, SENSOR_INFO_EXPOSURE_TIME_RANGE, SENSOR_INFO_MAX_FRAME_DURATION,
@@ -463,6 +472,10 @@ static void *result_metadata(struct camera3 *d, uint64_t ts) {
     if (s) md_append(m, s);
     static const uint8_t converged = 2, zero = 0, depth = 1;
     static const int64_t skew = 0;
+    /* Nominal values of this virtual camera, not measurements from the host.
+     * Exposure is one 30 fps frame; ISO and boost match the advertised ranges. */
+    static const int64_t virtual_exposure_ns = 33333333;
+    static const int32_t virtual_iso = 100, virtual_boost = 100;
     int64_t t = (int64_t)ts;
     md_add(m, SENSOR_TIMESTAMP, &t, 1);
     md_add(m, REQUEST_PIPELINE_DEPTH, &depth, 1);
@@ -473,23 +486,68 @@ static void *result_metadata(struct camera3 *d, uint64_t ts) {
     md_add(m, LENS_STATE, &zero, 1);
     md_add(m, STATISTICS_SCENE_FLICKER, &zero, 1);
     md_add(m, SENSOR_ROLLING_SHUTTER_SKEW, &skew, 1);
+    md_add(m, SENSOR_EXPOSURE_TIME, &virtual_exposure_ns, 1);
+    md_add(m, SENSOR_SENSITIVITY, &virtual_iso, 1);
+    md_add(m, CONTROL_POST_RAW_SENSITIVITY_BOOST, &virtual_boost, 1);
     return m;
+}
+
+/* Both image pointers and their sequence numbers are published under lock. */
+static int has_new_frame(struct camera3 *d, unsigned fseq, unsigned jseq, int preview, int blob) {
+    pthread_mutex_lock(d->lock);
+    int ready = (!preview || (d->frame && d->frame_seq != fseq)) &&
+                (!blob || (d->jpeg && d->jpeg_seq != jseq));
+    pthread_mutex_unlock(d->lock);
+    return ready;
+}
+
+static void fail_no_frame(struct camera3 *d, struct request *r) {
+    struct notify_msg n = {0};
+    n.type = 1; /* CAMERA3_MSG_ERROR */
+    n.m.error.frame = r->frame;
+    n.m.error.code = 2; /* CAMERA3_MSG_ERROR_REQUEST */
+    d->cb->notify(d->cb, &n);
+    for (int i = 0; i < r->nbuf; i++) {
+        struct stream_buffer *b = &r->bufs[i];
+        b->status = 1; /* CAMERA3_BUFFER_STATUS_ERROR */
+        /* No write or fence wait occurred; framework must wait before reuse. */
+        b->release_fence = b->acquire_fence;
+        b->acquire_fence = -1;
+    }
+    struct capture_result res = { r->frame, 0, (uint32_t)r->nbuf, r->bufs, 0, 0 };
+    d->cb->result(d->cb, &res);
 }
 
 static void answer(struct camera3 *d, struct request *r) {
     const struct gralloc_module *g = gralloc();
-    int blob = 0;
-    for (int i = 0; i < r->nbuf; i++) if (r->bufs[i].stream->format == FORMAT_BLOB) blob = 1;
+    int blob = 0, preview = 0;
+    for (int i = 0; i < r->nbuf; i++) {
+        if (r->bufs[i].stream->format == FORMAT_BLOB) blob = 1;
+        else preview = 1;
+    }
     if (r->settings) { if (d->last) md_free(d->last); d->last = r->settings; r->settings = 0; }
 
     /* the picture: the host compresses the next frame; otherwise the next preview frame (a third of a second at
      * most: nothing comes while the phone's camera permission is being asked) */
+    pthread_mutex_lock(d->lock);
     unsigned jseq = d->jpeg_seq, fseq = d->frame_seq;
+    pthread_mutex_unlock(d->lock);
     if (blob) {
         say(d, "shot\n");
-        for (int i = 0; i < 1500 && d->running && d->jpeg_seq == jseq; i++) usleep(2000);
+        for (int i = 0; i < 1500 && d->running && !has_new_frame(d, fseq, jseq, 0, 1); i++) usleep(2000);
+        /* The host stops preview for JPEG. Frames received before that JPEG
+         * cannot satisfy a preview output of this mixed request. */
+        pthread_mutex_lock(d->lock);
+        fseq = d->frame_seq;
+        pthread_mutex_unlock(d->lock);
         say(d, "start\n");      /* a picture stops the host's preview */
-    } else for (int i = 0; i < 150 && d->running && d->frame_seq == fseq; i++) usleep(2000);
+    }
+    if (preview && (!blob || has_new_frame(d, fseq, jseq, 0, 1)))
+        for (int i = 0; i < 150 && d->running && !has_new_frame(d, fseq, jseq, 1, blob); i++) usleep(2000);
+    if (!d->running || !has_new_frame(d, fseq, jseq, preview, blob)) {
+        fail_no_frame(d, r);
+        return;
+    }
 
     uint64_t ts = now_ns();
     struct notify_msg n;
@@ -523,12 +581,6 @@ static void answer(struct camera3 *d, struct request *r) {
         } else if (d->frame) {
             if (s->format == FORMAT_YCBCR_420_888) put_nv21(va, (int)s->width, (int)s->height, d->frame + W * H * 4);
             else put_rgba(va, (int)s->width, (int)s->height, d->frame);
-            b->status = 0;
-        } else {
-            /* no frame yet: black */
-            unsigned long len = s->format == FORMAT_YCBCR_420_888 ? (unsigned long)s->width * s->height : (unsigned long)s->width * s->height * 4;
-            for (unsigned long k = 0; k < len; k++) ((unsigned char *)va)[k] = s->format == FORMAT_YCBCR_420_888 ? 16 : 0;
-            if (s->format == FORMAT_YCBCR_420_888) for (unsigned long k = 0; k < len / 2; k++) ((unsigned char *)va)[len + k] = 128;
             b->status = 0;
         }
         g->unlock(g, *b->buffer);
@@ -582,14 +634,20 @@ static const void *d_template(struct camera3 *d, int type) {
 }
 
 static int d_request(struct camera3 *d, struct capture_request *q) {
-    if (!q || !q->num_out || q->num_out > MAX_BUFS || q->input) return -22;
+    if (!q || !q->num_out || q->num_out > MAX_BUFS || !q->out || q->input) return -22;
+    for (uint32_t i = 0; i < q->num_out; i++)
+        if (!q->out[i].stream || !q->out[i].buffer || !*q->out[i].buffer) return -22;
     if (!q->settings && !d->last && !d_template(d, 1)) return -22;
     for (int i = 0; i < 2000 && d->tail - d->head >= QUEUE - 1; i++) usleep(2000);
     if (d->tail - d->head >= QUEUE - 1) return -19;
     struct request *r = &d->queue[d->tail % QUEUE];
     r->frame = q->frame;
     r->nbuf = (int)q->num_out;
-    for (int i = 0; i < r->nbuf; i++) r->bufs[i] = q->out[i];
+    for (int i = 0; i < r->nbuf; i++) {
+        r->handles[i] = *q->out[i].buffer;
+        r->bufs[i] = q->out[i];
+        r->bufs[i].buffer = &r->handles[i];
+    }
     r->settings = 0;
     if (q->settings) {
         r->settings = md_alloc(md_entries(q->settings) + 2, md_data(q->settings) + 16);
@@ -682,14 +740,28 @@ struct vendor_tag_ops {
     int (*get_tag_type)(const struct vendor_tag_ops *o, uint32_t tag);
     void *reserved[8];
 };
-static int vt_count(const struct vendor_tag_ops *o) { (void)o; return NVTAGS; }
-static void vt_all(const struct vendor_tag_ops *o, uint32_t *tags) { (void)o; for (int i = 0; i < NVTAGS; i++) tags[i] = VTAG0 + (uint32_t)i; }
-static const char *vt_section(const struct vendor_tag_ops *o, uint32_t tag) { (void)o; return tag - VTAG0 < (uint32_t)NVTAGS ? g_vtags[tag - VTAG0].section : 0; }
-static const char *vt_name(const struct vendor_tag_ops *o, uint32_t tag) { (void)o; return tag - VTAG0 < (uint32_t)NVTAGS ? g_vtags[tag - VTAG0].name : 0; }
-static int vt_type(const struct vendor_tag_ops *o, uint32_t tag) { (void)o; return tag - VTAG0 < (uint32_t)NVTAGS ? g_vtags[tag - VTAG0].type : -1; }
 static int same(const char *a, const char *b) { while (*a && *a == *b) a++, b++; return *a == *b; }
+/* Android resolves the longest section prefix first. This unused Xiaomi key
+ * has the same full name as another section and cannot be resolved by name. */
+static int vt_visible(uint32_t tag) {
+    uint32_t i = tag - VTAG0;
+    return i < (uint32_t)NVTAGS &&
+        !(same(g_vtags[i].section, "xiaomi.hdr") && same(g_vtags[i].name, "hdrChecker"));
+}
+static int vt_count(const struct vendor_tag_ops *o) {
+    (void)o; int n = 0;
+    for (int i = 0; i < NVTAGS; i++) if (vt_visible(VTAG0 + (uint32_t)i)) n++;
+    return n;
+}
+static void vt_all(const struct vendor_tag_ops *o, uint32_t *tags) {
+    (void)o; int n = 0;
+    for (int i = 0; i < NVTAGS; i++) if (vt_visible(VTAG0 + (uint32_t)i)) tags[n++] = VTAG0 + (uint32_t)i;
+}
+static const char *vt_section(const struct vendor_tag_ops *o, uint32_t tag) { (void)o; return vt_visible(tag) ? g_vtags[tag - VTAG0].section : 0; }
+static const char *vt_name(const struct vendor_tag_ops *o, uint32_t tag) { (void)o; return vt_visible(tag) ? g_vtags[tag - VTAG0].name : 0; }
+static int vt_type(const struct vendor_tag_ops *o, uint32_t tag) { (void)o; return vt_visible(tag) ? g_vtags[tag - VTAG0].type : -1; }
 static uint32_t vendor_tag(const char *section, const char *name) {
-    for (int i = 0; i < NVTAGS; i++) if (same(g_vtags[i].section, section) && same(g_vtags[i].name, name)) return VTAG0 + (uint32_t)i;
+    for (int i = 0; i < NVTAGS; i++) if (vt_visible(VTAG0 + (uint32_t)i) && same(g_vtags[i].section, section) && same(g_vtags[i].name, name)) return VTAG0 + (uint32_t)i;
     return 0;
 }
 static void mod_vendor_tag_ops(struct vendor_tag_ops *o) {

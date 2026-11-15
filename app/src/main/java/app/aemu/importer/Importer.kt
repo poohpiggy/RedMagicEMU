@@ -10,6 +10,7 @@ import app.aemu.core.VmPaths
 import app.aemu.core.RecoveryImage
 import app.aemu.core.InstanceAdmission
 import app.aemu.core.FirstRingtoneInitStore
+import app.aemu.core.EngineAssets
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
@@ -29,6 +30,43 @@ import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 import java.nio.file.StandardOpenOption
 import java.util.zip.GZIPInputStream
+
+private const val AOD_PROXY_ASSET = "engines/redmagic/aod_fixed_proxy.so"
+private const val AOD_PROXY_SHA256 = "1cd4020a07a0f34929a501ca9b56ac0a9fca9ea6ce97ca93ff3fd6e29a48a936"
+
+internal fun aodTargetForImport(image: GuestImage): TargetAodImportStage.Target =
+    TargetAodImportStage.Target(image.api, image.model, image.abi, image.effective().engine)
+
+/** A prepared runtime copy is not a claim that Guest startup or animation has been verified. */
+internal fun applyAodImportPreparation(image: GuestImage, prepare: () -> TargetAodImportStage.Result,
+                                       log: (String) -> Unit): GuestImage = when (val result = prepare()) {
+    TargetAodImportStage.Result.Prepared -> {
+        log("AOD compatibility files prepared; guest not yet verified")
+        image
+    }
+    is TargetAodImportStage.Result.NotApplicable -> image
+    is TargetAodImportStage.Result.Unavailable -> {
+        val warning = "AOD compatibility unavailable: ${result.reason}"
+        log(warning)
+        image.copy(warnings = image.warnings + warning)
+    }
+}
+
+private fun readAodProxyAsset(ctx: Context): ByteArray {
+    val size = EngineAssets.size(ctx, AOD_PROXY_ASSET)
+    if (size !in 1..(4L * 1024 * 1024)) throw IOException("AOD proxy asset missing or too large")
+    return EngineAssets.open(ctx, AOD_PROXY_ASSET).use { input ->
+        val bytes = ByteArray(size.toInt())
+        var offset = 0
+        while (offset < bytes.size) {
+            val n = input.read(bytes, offset, bytes.size - offset)
+            if (n < 0) throw IOException("AOD proxy asset truncated")
+            if (n > 0) offset += n
+        }
+        if (input.read() != -1) throw IOException("AOD proxy asset exceeds indexed size")
+        bytes
+    }
+}
 
 /** Mark a validated private import before it can be published to the instance library. */
 internal fun publishWithFreshRingtoneMarker(
@@ -90,7 +128,7 @@ class Importer(
                 StagedInput.use(lease.dir, source, { cancelled }, maxBytes = TargetArchive.MAX_PACKAGE_SIZE) { staged ->
                     onProgress("Checking firmware package", -1f)
                     TargetArchive.validate(staged)
-                    importVerifiedSnapshot(staged, name, lease.dir)
+                    importVerifiedSnapshot(staged, name, lease)
                 }
             }
             if (cancelled) throw ImportCancelledException()
@@ -113,8 +151,10 @@ class Importer(
     }
 
     /** Parse and verify the same private snapshot that is used for extraction. */
-    private fun importVerifiedSnapshot(staged: File, name: String, pending: File): GuestImage {
-        return TargetArchive.withExtracted(staged, pending, names = setOf("super.img", "ramdisk.img"), cancelled = { cancelled }) { extracted ->
+    private fun importVerifiedSnapshot(staged: File, name: String, lease: PendingImports.Lease): GuestImage {
+        val pending = lease.dir
+        return TargetArchive.withExtracted(staged, pending, names = setOf("super.img", "ramdisk.img"), cancelled = { cancelled },
+            optionalNames = setOf("ztecfg.img")) { extracted ->
             if (cancelled) throw ImportCancelledException()
             val id = ImageStore.newId(ctx)
             paths = VmPaths(ctx, id, File(pending, id))
@@ -123,6 +163,7 @@ class Importer(
             if (!root.mkdir()) throw IOException("Cannot create the firmware tree")
             onProgress("Extracting firmware", -1f)
             ramdisk = TargetPackageTree.extract(extracted.getValue("super.img"), extracted.getValue("ramdisk.img"), root) { cancelled }
+            extracted["ztecfg.img"]?.let { TargetZtecfg.install(root, it) { cancelled } }
             if (cancelled) throw ImportCancelledException()
             val bootFingerprint = TargetMetadata.readFingerprint(ramdisk.orEmpty())
             log("Firmware bootimage fingerprint: ${bootFingerprint ?: "unavailable"}; target system fingerprint: ${TargetMetadata.HISTORY_FINGERPRINT}")
@@ -132,10 +173,17 @@ class Importer(
             if (cancelled) throw ImportCancelledException()
             onProgress("Analyzing firmware", -1f)
             val analyzed = Analyzer(ctx, paths, ramdisk).analyze(id, name)
-            val img = analyzed.copy(fingerprint = fingerprint, settings = analyzed.settings.withNx809jDisplay())
+            val img = analyzed.copy(fingerprint = fingerprint, settings = analyzed.settings.withNx809jDefaultDisplay())
             TreeFixer(ctx, paths, img, log).sanitize()
             if (cancelled) throw ImportCancelledException()
-            val result = img.copy(sizeBytes = ImageStore.du(paths.dir))
+            val prepared = applyAodImportPreparation(img, {
+                val target = aodTargetForImport(img)
+                TargetAodImportStage.prepare(lease, id, target, cancelled = { cancelled }) {
+                    TargetAodImportStage.Inputs(readAodProxyAsset(ctx), AOD_PROXY_SHA256,
+                        TargetAodMaskResource.readAsset(ctx))
+                }
+            }, log)
+            val result = prepared.copy(sizeBytes = ImageStore.du(paths.dir))
             if (cancelled) throw ImportCancelledException()
             ImageStore.saveAt(paths.dir, result)
             result

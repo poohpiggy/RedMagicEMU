@@ -951,16 +951,16 @@ static void buf_read(uint64_t id, uint64_t frame, int w, int h) {
         if (b && b->frame >= frame) break;
         if (pthread_cond_timedwait(&g_cond, &g_lock, &until) != 0) break;
     }
-    if (b && b->gpu && b->w == w && b->h == h && C->px) {
+    if (b && b->frame >= frame && b->gpu && b->w == w && b->h == h && C->px &&
+        (b->sync == EGL_NO_SYNC_KHR ||
+         eglClientWaitSyncKHR(g_dpy, b->sync, 0, 200 * 1000000LL) == EGL_CONDITION_SATISFIED_KHR)) {
         AHardwareBuffer_Desc d;
         uint8_t *va = 0;
-        if (b->sync != EGL_NO_SYNC_KHR) eglClientWaitSyncKHR(g_dpy, b->sync, 0, 200 * 1000000LL);
         AHardwareBuffer_describe(b->ahb, &d);
-        if (AHardwareBuffer_lock(b->ahb, AHARDWAREBUFFER_USAGE_CPU_READ_RARELY, -1, 0, (void **)&va) == 0 && va) {
-            for (int y = 0; y < h; y++) memcpy(C->px + (size_t)y * w * 4, va + (size_t)y * d.stride * 4, (size_t)w * 4);
-            AHardwareBuffer_unlock(b->ahb, 0);
-            b->gpu = 0;
-            ok = 1;
+        if (AHardwareBuffer_lock(b->ahb, AHARDWAREBUFFER_USAGE_CPU_READ_RARELY, -1, 0, (void **)&va) == 0) {
+            if (va) for (int y = 0; y < h; y++) memcpy(C->px + (size_t)y * w * 4, va + (size_t)y * d.stride * 4, (size_t)w * 4);
+            int unlocked = AHardwareBuffer_unlock(b->ahb, 0) == 0;
+            if (va && unlocked) { b->gpu = 0; ok = 1; }
         }
     }
     pthread_mutex_unlock(&g_lock);

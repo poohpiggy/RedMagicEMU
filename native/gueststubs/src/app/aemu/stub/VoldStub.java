@@ -37,6 +37,7 @@ public class VoldStub extends Binder {
      *  follows the announcement could be sent after that mount's "mounted", and the volume stayed unmounted. */
     private final Object order = new Object();
     private static boolean atUserStart;
+    private static boolean primaryUserVolume;
 
     VoldStub() throws Exception {
         for (Field f : Class.forName("android.os.IVold$Stub").getDeclaredFields()) {
@@ -79,14 +80,16 @@ public class VoldStub extends Binder {
                 listener = b == null ? null : Class.forName("android.os.IVoldListener$Stub").getMethod("asInterface", IBinder.class).invoke(null, b);
             } else if (name.equals("reset")) {
                 synchronized (order) {
-                    tell("onVolumeCreated", "emulated", TYPE_EMULATED, "", "");
-                    tell("onVolumeStateChanged", "emulated", UNMOUNTED);
+                    String id = primaryUserVolume ? "emulated;0" : "emulated";
+                    tell("onVolumeCreated", id, TYPE_EMULATED, "", "");
+                    tell("onVolumeStateChanged", id, UNMOUNTED);
                 }
             } else if (name.equals("onUserStarted") && atUserStart) {
                 // 13+: the volume announced at reset was dropped, the user's media provider was not known yet
                 synchronized (order) {
-                    tell("onVolumeCreated", "emulated", TYPE_EMULATED, "", "");
-                    tell("onVolumeStateChanged", "emulated", UNMOUNTED);
+                    String id = primaryUserVolume ? "emulated;0" : "emulated";
+                    tell("onVolumeCreated", id, TYPE_EMULATED, "", "");
+                    tell("onVolumeStateChanged", id, UNMOUNTED);
                 }
             } else if (name.equals("mount")) {
                 String id = data.readString();
@@ -124,7 +127,8 @@ public class VoldStub extends Binder {
     public String getInterfaceDescriptor() { return DESCRIPTOR; }
 
     public static void main(String[] args) throws Exception {
-        atUserStart = args.length > 0 && args[0].equals("userstart");
+        primaryUserVolume = args.length > 0 && args[0].equals("userstart36");
+        atUserStart = primaryUserVolume || args.length > 0 && args[0].equals("userstart");
         Class<?> sm = Class.forName("android.os.ServiceManager");
         if (sm.getMethod("checkService", String.class).invoke(null, "vold") != null) {
             System.out.println("aemu-vold: the firmware's own vold is running");

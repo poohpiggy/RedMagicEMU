@@ -23,15 +23,21 @@ val packEngines = tasks.register("packEngines") {
     inputs.dir(engineSrc)
     outputs.dir(engineOut)
     doLast {
+        // API 36 supplies the same destination in its later layer. Keep the old source for legacy builds.
+        val overriddenGl = "n64-gl/system#lib64#egl#libGLESv2_swiftshader.so"
+        check(File(engineSrc, "n64-36/system#lib64#egl#libGLESv2_swiftshader.so").isFile) {
+            "API 36 SwiftShader asset is missing"
+        }
         val o = engineOut.get().asFile
         o.deleteRecursively()
         File(o, "blobs").mkdirs()
         val idx = StringBuilder()
         engineSrc.walkTopDown().filter { it.isFile }.sortedBy { it.invariantSeparatorsPath }.forEach { f ->
+            val rel = f.relativeTo(engineSrc).path.replace('\\', '/')
+            if (rel == overriddenGl) return@forEach
             val sha = MessageDigest.getInstance("SHA-1").digest(f.readBytes()).joinToString("") { "%02x".format(it) }
             val b = File(o, "blobs/$sha")
             if (!b.exists()) f.copyTo(b)
-            val rel = f.relativeTo(engineSrc).path.replace('\\', '/')
             idx.append("engines/$rel\t$sha\t${f.length()}\n")
         }
         File(o, "engines.idx").writeText(idx.toString())
@@ -48,8 +54,8 @@ android {
         // 28: гостевые бинарники запускаются из каталога данных приложения (W^X для targetSdk>=29)
         //noinspection ExpiredTargetSdkVersion
         targetSdk = 28
-        versionCode = 7
-        versionName = "0.3.0-beta"
+        versionCode = 8
+        versionName = "0.5.0-beta"
         ndk { abiFilters += listOf("arm64-v8a") }
     }
 

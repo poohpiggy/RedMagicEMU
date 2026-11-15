@@ -12,10 +12,10 @@ class TargetRadioLaunchTest {
     @Test fun onlyEnabledTargetUsesAidl() {
         assertEquals("AIDL", select(36, "NX809J", "arm64-v8a", Engine.N64, true))
         assertEquals("DISABLED", select(36, "NX809J", "arm64-v8a", Engine.N64, false))
-        assertEquals("LEGACY", select(35, "NX809J", "arm64-v8a", Engine.N64, true))
-        assertEquals("LEGACY", select(36, "other", "arm64-v8a", Engine.N64, true))
-        assertEquals("LEGACY", select(36, "NX809J", "armeabi-v7a", Engine.N64, true))
-        assertEquals("LEGACY", select(36, "NX809J", "arm64-v8a", Engine.KK, true))
+        assertEquals("DISABLED", select(35, "NX809J", "arm64-v8a", Engine.N64, true))
+        assertEquals("DISABLED", select(36, "other", "arm64-v8a", Engine.N64, true))
+        assertEquals("DISABLED", select(36, "NX809J", "armeabi-v7a", Engine.N64, true))
+        assertEquals("DISABLED", select(36, "NX809J", "arm64-v8a", Engine.KK, true))
         assertEquals("DISABLED", select(35, "other", "arm64-v8a", Engine.N64, false))
     }
 
@@ -28,7 +28,7 @@ class TargetRadioLaunchTest {
         val missing = mutableMapOf<String, String>()
         TargetRadioLaunch.applyBootProperties(TargetRadioLaunch.Backend.AIDL, missing)
         assertEquals("", missing[key])
-        for (backend in listOf(TargetRadioLaunch.Backend.LEGACY, TargetRadioLaunch.Backend.DISABLED)) {
+        for (backend in listOf(TargetRadioLaunch.Backend.DISABLED)) {
             val properties = mutableMapOf(key to "dsda", "unrelated" to "preserve")
             val before = properties.toMap()
             TargetRadioLaunch.applyBootProperties(backend, properties)
@@ -94,20 +94,27 @@ class TargetRadioLaunchTest {
         } finally { root.deleteRecursively() }
     }
 
+    @Test fun lteDataIsAnExplicitRadioProcessCapability() {
+        val root = Files.createTempDirectory("target-radio-lte").toFile()
+        try {
+            val jar = root.resolve("system/framework/redmagic-radio.jar")
+            checkNotNull(jar.parentFile).mkdirs()
+            jar.writeBytes(byteArrayOf(1))
+            assertEquals(listOf("--experimental-slot1", "--lte-data"), TargetRadioLaunch.service(root, lteData = true).argv.takeLast(2))
+            val service = TargetRadioLaunch.service(root, "rme-test", 1234, 10042, 42, lteData = true)
+            assertEquals(listOf("--experimental-slot1", "--lte-data", "--event-socket", "rme-test", "1234", "10042", "42"),
+                service.argv.takeLast(7))
+        } finally { root.deleteRecursively() }
+    }
+
     @Test fun inputRoutesOnlyToSelectedBackend() {
         var aidl = 0
-        var legacy = 0
-        fun send(backend: TargetRadioLaunch.Backend) = TargetRadioLaunch.routeEvent(backend,
-            { aidl++; RadioSubmitResult.SUBMITTED }, { legacy++; true })
+        fun send(backend: TargetRadioLaunch.Backend) = TargetRadioLaunch.routeEvent(backend) {
+            aidl++; RadioSubmitResult.SUBMITTED
+        }
         assertEquals(RadioSubmitResult.SUBMITTED, send(TargetRadioLaunch.Backend.AIDL))
         assertEquals(1, aidl)
-        assertEquals(0, legacy)
-        assertEquals(RadioSubmitResult.SUBMITTED, send(TargetRadioLaunch.Backend.LEGACY))
-        assertEquals(1, legacy)
         assertEquals(RadioSubmitResult.UNAVAILABLE, send(TargetRadioLaunch.Backend.DISABLED))
         assertEquals(1, aidl)
-        assertEquals(1, legacy)
-        assertEquals(RadioSubmitResult.REJECTED,
-            TargetRadioLaunch.routeEvent(TargetRadioLaunch.Backend.LEGACY, { error("wrong backend") }, { false }))
     }
 }

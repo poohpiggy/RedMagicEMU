@@ -64,9 +64,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import app.aemu.update.AppUpdateManager
-import app.aemu.update.ReleaseInfo
-import app.aemu.update.UpdateState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -106,7 +103,6 @@ private fun AppSettings(onBack: () -> Unit, onRestyle: () -> Unit) {
     val ctx = LocalContext.current
     val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     var langDialog by remember { mutableStateOf(false) }
-    var defaults by remember { mutableStateOf(AppPrefs.defaults(ctx)) }
     var theme by remember { mutableStateOf(AppPrefs.theme(ctx)) }
     var dynamic by remember { mutableStateOf(AppPrefs.dynamicColor(ctx)) }
     val langTag = AppPrefs.language(ctx)
@@ -116,7 +112,7 @@ private fun AppSettings(onBack: () -> Unit, onRestyle: () -> Unit) {
         modifier = Modifier.nestedScroll(scroll.nestedScrollConnection),
         topBar = {
             LargeFlexibleTopAppBar(
-                title = { Text(stringResource(R.string.settings)) },
+                title = { Text(stringResource(R.string.about_title)) },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, stringResource(R.string.back)) } },
                 scrollBehavior = scroll,
             )
@@ -160,19 +156,6 @@ private fun AppSettings(onBack: () -> Unit, onRestyle: () -> Unit) {
                     }
                 }
             }
-
-            item {
-                Section(stringResource(R.string.as_defaults), stringResource(R.string.as_defaults_sub)) {
-                    fun set(s: app.aemu.core.VmSettings) { defaults = s; AppPrefs.setDefaults(ctx, s) }
-                    Toggle(stringResource(R.string.vs_gpu), stringResource(R.string.vs_gpu_sub), defaults.gpu) { set(defaults.copy(gpu = it)) }
-                    Toggle(stringResource(R.string.vs_jit), stringResource(R.string.vs_jit_sub), defaults.jit) { set(defaults.copy(jit = it)) }
-                    Toggle(stringResource(R.string.vs_proxy), stringResource(R.string.vs_proxy_sub), defaults.netProxy) { set(defaults.copy(netProxy = it)) }
-                    Toggle(stringResource(R.string.vs_nav), stringResource(R.string.vs_nav_sub), defaults.showNavBar) { set(defaults.copy(showNavBar = it)) }
-                    Toggle(stringResource(R.string.vs_awake), stringResource(R.string.vs_awake_sub), defaults.keepScreenOn) { set(defaults.copy(keepScreenOn = it)) }
-                    Toggle(stringResource(R.string.as_led), stringResource(R.string.as_led_sub), defaults.showLed) { set(defaults.copy(showLed = it)) }
-                }
-            }
-
 
         }
     }

@@ -58,4 +58,50 @@ class TargetArchiveTest {
             catch (_: IOException) { }
         } finally { file.delete() }
     }
+    private fun productionArchive(zteSize: Int?, zteMode: Int = 0x81a4): File {
+        val file = Files.createTempFile("target-ztecfg", ".zip").toFile()
+        ZipArchiveOutputStream(file).use { out ->
+            for (name in listOf("super.img", "ramdisk.img", "boot.img", "init_boot.img", "vendor_boot.img", "README.txt")) {
+                out.putArchiveEntry(ZipArchiveEntry(name)); out.write(1); out.closeArchiveEntry()
+            }
+            if (zteSize != null) {
+                val entry = ZipArchiveEntry("ztecfg.img"); entry.unixMode = zteMode
+                out.putArchiveEntry(entry); out.write(ByteArray(zteSize)); out.closeArchiveEntry()
+            }
+        }
+        return file
+    }
+
+    @Test fun acceptsOptionalZtecfgWithExactSize() {
+        for (size in listOf(null, 524288)) {
+            val file = productionArchive(size)
+            try { TargetArchive.validate(file) } finally { file.delete() }
+        }
+    }
+
+    @Test fun rejectsZtecfgWrongSizeAndLink() {
+        for ((size, mode) in listOf(524287 to 0x81a4, 524289 to 0x81a4, 524288 to 0xa1ff)) {
+            val file = productionArchive(size, mode)
+            try {
+                try { TargetArchive.validate(file); fail("accepted invalid ztecfg") }
+                catch (_: IOException) { }
+            } finally { file.delete() }
+        }
+    }
+
+    @Test fun rejectsDuplicateZtecfg() {
+        val file = Files.createTempFile("target-duplicate", ".zip").toFile()
+        try {
+            ZipArchiveOutputStream(file).use { out ->
+                for (name in listOf("super.img", "ramdisk.img", "boot.img", "init_boot.img", "vendor_boot.img", "README.txt", "ztecfg.img", "ztecfg.img")) {
+                    out.putArchiveEntry(ZipArchiveEntry(name))
+                    out.write(if (name == "ztecfg.img") ByteArray(524288) else byteArrayOf(1))
+                    out.closeArchiveEntry()
+                }
+            }
+            try { TargetArchive.validate(file); fail("accepted duplicate ztecfg") }
+            catch (_: IOException) { }
+        } finally { file.delete() }
+    }
+
 }

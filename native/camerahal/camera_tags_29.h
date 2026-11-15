@@ -290,4 +290,10 @@ static const struct { const char *section, *name; int type; } g_vtags[] = {
     { "xiaomi.watermark", "time", 0 },
     { "xiaomi.watermark", "typeApplied", 0 },
     { "xiaomi.yuv", "format", 1 },
+    /* Nubia reads this optional characteristic and handles an absent value. */
+    { "org.codeaurora.qcamera3.iso_exp_priority", "iso_available_modes", 1 },
+    /* Nubia checks this optional result and handles an absent value. */
+    { "org.quic.camera2.objectTrackingResults", "TrackerStatus", 1 },
+    /* Nubia accepts a missing lux result, but its key must resolve. */
+    { "org.quic.camera2.statsconfigs", "AECLuxIndex", 2 },
 };

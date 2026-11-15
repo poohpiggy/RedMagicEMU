@@ -46,7 +46,7 @@
     <string name="vs_proxy_sub">Les anciens navigateurs et applis ouvrent les sites HTTPS actuels.</string>
     <string name="vs_controls">Commandes</string>
     <string name="vs_nav">Barre de boutons Android</string>
-    <string name="vs_nav_sub">Retour, Accueil, Récents et Menu sous l’écran.</string>
+    <string name="vs_nav_sub">Retour, Accueil et Récents sous l’écran.</string>
     <string name="vs_awake">Garder l’écran allumé</string>
     <string name="vs_awake_sub">Tant que le système est ouvert.</string>
     <string name="vs_vsync">VSync</string>
@@ -59,7 +59,7 @@
     <string name="vol_up">Volume +</string>
     <string name="vol_down">Volume −</string>
     <string name="power">Bouton marche</string>
-    <string name="shutdown">Éteindre le système</string>
+    <string name="shutdown">Éteindre la machine virtuelle</string>
     <string name="back">Retour</string>
     <string name="home">Accueil</string>
     <string name="recents">Récents</string>
@@ -113,14 +113,14 @@
     <string name="vs_advanced">Advanced</string>
     <string name="vs_qemu_args">Extra qemu options</string>
     <string name="vs_qemu_args_sub">Example: -d unimp DHD_TBFLUSH=2 (NAME=value becomes an environment variable)</string>
-    <string name="m_power_menu">Power menu</string>
+    <string name="m_power_menu">Menu marche-arrêt</string>
     <string name="m_keyboard">Afficher/masquer le clavier</string>
-    <string name="m_paste">Paste text from clipboard</string>
-    <string name="m_sms">Fake SMS</string>
-    <string name="m_battery">Battery</string>
-    <string name="m_screenshot">Screenshot</string>
-    <string name="m_settings">Open Android settings</string>
-    <string name="m_reboot">Reboot</string>
+    <string name="m_paste">Coller le texte du presse-papiers</string>
+    <string name="m_sms">SMS virtuel</string>
+    <string name="m_battery">Batterie</string>
+    <string name="m_screenshot">Capture d’écran</string>
+    <string name="m_settings">Ouvrir les paramètres Android</string>
+    <string name="m_reboot">Redémarrer la machine virtuelle</string>
     <string name="m_clip_empty">Clipboard is empty</string>
     <string name="m_screenshot_saved">Saved: %1$s</string>
     <string name="m_failed">Failed</string>
@@ -131,7 +131,7 @@
     <string name="m_charging">Charging</string>
     <string name="m_apply">Apply</string>
     <string name="m_reset">Reset</string>
-    <string name="m_call">Appel entrant</string>
+    <string name="m_call">Appel entrant virtuel</string>
     <string name="m_call_ring">Appeler</string>
     <string name="fw_folder_title">Firmwares dans le dossier</string>
     <string name="fw_folder_import">Importer</string>
@@ -175,21 +175,6 @@
     <string name="m_device">État de l’appareil</string>
     <string name="m_airplane">Mode avion</string>
     <string name="m_stay_awake">Garder l’écran allumé</string>
-    <string name="as_updates">Mises à jour</string>
-    <string name="as_auto_updates">Vérifier automatiquement</string>
-    <string name="as_auto_updates_sub">Chercher les nouvelles versions sur GitHub au démarrage</string>
-    <string name="as_check_updates">Rechercher des mises à jour</string>
-    <string name="as_check_updates_sub">Version actuelle : %1$s</string>
-    <string name="update_available_title">Mise à jour disponible</string>
-    <string name="update_available_msg">La version %1$s est disponible. Mettre à jour ?</string>
-    <string name="update_latest">Vous avez la dernière version (%1$s)</string>
-    <string name="update_checking">Recherche de mises à jour…</string>
-    <string name="update_btn">Mettre à jour</string>
-    <string name="update_later">Plus tard</string>
-    <string name="update_downloading">Téléchargement de la mise à jour…</string>
-    <string name="update_install">Installer</string>
-    <string name="update_error">Échec de la recherche de mises à jour : %1$s</string>
-    <string name="update_open_github">Voir sur GitHub</string>
     <string name="lib_title">Bibliothèque de ROM</string>
     <string name="lib_empty">Aucune ROM pour l’instant : importez un fichier de ROM pour créer la première machine.</string>
     <string name="new_machine">Nouvelle machine</string>
@@ -212,4 +197,9 @@
     <string name="m_vnc">Démarrer le serveur VNC</string>
     <string name="m_vnc_stop">Arrêter le serveur VNC</string>
     <string name="m_vnc_started">VNC : %1$s, mot de passe %2$s</string>
+    <string name="m_hud">Indicateur de performances</string>
+    <string name="m_network_mode">Mode réseau</string>
+    <string name="vs_disk_hint">Définit la capacité affichée dans le système invité ; l’espace disponible dépend du téléphone.</string>
+    <string name="instance_settings">Paramètres de l’instance</string>
+    <string name="about_title">À propos</string>
 </resources>

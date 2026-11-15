@@ -53,13 +53,17 @@ object ImageStore {
     fun save(ctx: Context, img: GuestImage) {
         val images = imagesDir(ctx)
         app.aemu.importer.PendingImports.withImagesLock(images) {
-            val paths = VmPaths(ctx, img.id)
-            if (!InstancePathSafety.safeInstance(images, img.id) ||
-                app.aemu.importer.PendingImports.isPublishing(paths.dir) ||
-                !java.nio.file.Files.isRegularFile(paths.meta.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS))
-                throw java.io.IOException("Cannot update missing or unfinished instance")
-            saveAt(paths.dir, img)
+            saveExisting(images, img)
         }
+    }
+
+    private fun saveExisting(images: File, img: GuestImage) {
+        val dir = File(images, img.id)
+        if (!InstancePathSafety.safeInstance(images, img.id) ||
+            app.aemu.importer.PendingImports.isPublishing(dir) ||
+            !java.nio.file.Files.isRegularFile(File(dir, "image.json").toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS))
+            throw java.io.IOException("Cannot update missing or unfinished instance")
+        saveAt(dir, img)
     }
 
     internal fun saveAt(dir: File, img: GuestImage) {
@@ -75,11 +79,6 @@ object ImageStore {
         }
     }
 
-    /** Deletion is unavailable until it is coordinated with the VM process. */
-    @Suppress("UNUSED_PARAMETER")
-    fun delete(ctx: Context, id: String): Nothing =
-        throw IllegalStateException("Instance deletion is unavailable while VM coordination is incomplete")
-
     /** Reset is unavailable until it is coordinated with the VM process. */
     @Suppress("UNUSED_PARAMETER")
     fun resetData(ctx: Context, id: String): Nothing =
@@ -88,7 +87,14 @@ object ImageStore {
     /** Changes the stored image from its current state (not from a copy read earlier: the machine updates boot counters). */
     @Synchronized
     fun update(ctx: Context, id: String, f: (GuestImage) -> GuestImage) {
-        get(ctx, id)?.let { save(ctx, f(it)) }
+        val images = imagesDir(ctx)
+        updateLocked(images, { get(ctx, id) }, { saveExisting(images, it) }, f)
+    }
+
+    internal fun <T> updateLocked(images: File, read: () -> T?, write: (T) -> Unit, transform: (T) -> T) {
+        app.aemu.importer.PendingImports.withImagesLock(images) {
+            read()?.let { write(transform(it)) }
+        }
     }
 
     fun wipe(f: File) {

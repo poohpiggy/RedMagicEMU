@@ -46,7 +46,7 @@
     <string name="vs_proxy_sub">مرورگرها و برنامه‌های قدیمی سایت‌های HTTPS امروزی را باز می‌کنند.</string>
     <string name="vs_controls">کنترل‌ها</string>
     <string name="vs_nav">نوار دکمه‌های اندروید</string>
-    <string name="vs_nav_sub">بازگشت، خانه، اخیر و منو زیر صفحه.</string>
+    <string name="vs_nav_sub">بازگشت، خانه و اخیر زیر صفحه.</string>
     <string name="vs_awake">روشن ماندن صفحه</string>
     <string name="vs_awake_sub">تا وقتی سیستم باز است.</string>
     <string name="vs_vsync">VSync</string>
@@ -59,7 +59,7 @@
     <string name="vol_up">صدا +</string>
     <string name="vol_down">صدا −</string>
     <string name="power">دکمهٔ پاور</string>
-    <string name="shutdown">خاموش کردن سیستم</string>
+    <string name="shutdown">خاموش کردن ماشین مجازی</string>
     <string name="back">بازگشت</string>
     <string name="home">خانه</string>
     <string name="recents">اخیر</string>
@@ -113,14 +113,14 @@
     <string name="vs_advanced">Advanced</string>
     <string name="vs_qemu_args">Extra qemu options</string>
     <string name="vs_qemu_args_sub">Example: -d unimp DHD_TBFLUSH=2 (NAME=value becomes an environment variable)</string>
-    <string name="m_power_menu">Power menu</string>
+    <string name="m_power_menu">منوی روشن و خاموش</string>
     <string name="m_keyboard">نمایش/پنهان کردن صفحه‌کلید</string>
-    <string name="m_paste">Paste text from clipboard</string>
-    <string name="m_sms">Fake SMS</string>
-    <string name="m_battery">Battery</string>
-    <string name="m_screenshot">Screenshot</string>
-    <string name="m_settings">Open Android settings</string>
-    <string name="m_reboot">Reboot</string>
+    <string name="m_paste">چسباندن متن از کلیپ‌بورد</string>
+    <string name="m_sms">پیامک مجازی</string>
+    <string name="m_battery">باتری</string>
+    <string name="m_screenshot">عکس صفحه</string>
+    <string name="m_settings">باز کردن تنظیمات Android</string>
+    <string name="m_reboot">راه‌اندازی مجدد ماشین مجازی</string>
     <string name="m_clip_empty">Clipboard is empty</string>
     <string name="m_screenshot_saved">Saved: %1$s</string>
     <string name="m_failed">Failed</string>
@@ -131,7 +131,7 @@
     <string name="m_charging">Charging</string>
     <string name="m_apply">Apply</string>
     <string name="m_reset">Reset</string>
-    <string name="m_call">تماس ورودی</string>
+    <string name="m_call">تماس ورودی مجازی</string>
     <string name="m_call_ring">تماس</string>
     <string name="fw_folder_title">فریمور در پوشه</string>
     <string name="fw_folder_import">وارد کردن</string>
@@ -175,21 +175,6 @@
     <string name="m_device">وضعیت دستگاه</string>
     <string name="m_airplane">حالت پرواز</string>
     <string name="m_stay_awake">روشن ماندن صفحه</string>
-    <string name="as_updates">به‌روزرسانی‌ها</string>
-    <string name="as_auto_updates">بررسی خودکار به‌روزرسانی</string>
-    <string name="as_auto_updates_sub">بررسی نسخه‌های جدید در GitHub هنگام اجرا</string>
-    <string name="as_check_updates">بررسی به‌روزرسانی</string>
-    <string name="as_check_updates_sub">نسخهٔ فعلی: %1$s</string>
-    <string name="update_available_title">به‌روزرسانی موجود است</string>
-    <string name="update_available_msg">نسخهٔ %1$s موجود است. به‌روزرسانی شود؟</string>
-    <string name="update_latest">آخرین نسخه را دارید (%1$s)</string>
-    <string name="update_checking">در حال بررسی به‌روزرسانی…</string>
-    <string name="update_btn">به‌روزرسانی</string>
-    <string name="update_later">بعداً</string>
-    <string name="update_downloading">در حال دریافت به‌روزرسانی…</string>
-    <string name="update_install">نصب</string>
-    <string name="update_error">بررسی به‌روزرسانی ناموفق بود: %1$s</string>
-    <string name="update_open_github">مشاهده در GitHub</string>
     <string name="lib_title">کتابخانهٔ فرم‌ویر</string>
     <string name="lib_empty">هنوز فرم‌ویری نیست: برای ساخت اولین ماشین یک فایل فرم‌ویر وارد کنید.</string>
     <string name="new_machine">ماشین جدید</string>
@@ -212,4 +197,9 @@
     <string name="m_vnc">راه‌اندازی سرور VNC</string>
     <string name="m_vnc_stop">توقف سرور VNC</string>
     <string name="m_vnc_started">VNC: %1$s، گذرواژه %2$s</string>
+    <string name="m_hud">نمایش عملکرد</string>
+    <string name="m_network_mode">حالت شبکه</string>
+    <string name="vs_disk_hint">ظرفیت نمایش‌داده‌شده به سیستم مهمان را تعیین می‌کند؛ فضای قابل استفاده به گوشی بستگی دارد.</string>
+    <string name="instance_settings">تنظیمات نمونه</string>
+    <string name="about_title">درباره</string>
 </resources>

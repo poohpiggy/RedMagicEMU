@@ -91,7 +91,7 @@ public final class RadioModemSimContractTest {
     check(mi.received.equals(Arrays.asList("rilConnected", "radioStateChanged")),"initial modem notifications missing or out of order");
     check(((Integer)mi.args[1])==RadioState.OFF,"initial radio state should be OFF");
     sim.setResponseFunctions((IRadioSimResponse)sr.proxy(IRadioSimResponse.class),(IRadioSimIndication)si.proxy(IRadioSimIndication.class));
-    int mc=unsupported(modem,IRadioModem.class,mr,new HashSet<>(Arrays.asList("getModemStackStatus", "setRadioPower")));
+    int mc=unsupported(modem,IRadioModem.class,mr,new HashSet<>(Arrays.asList("getModemStackStatus", "setRadioPower", "getBasebandVersion")));
     int sc=unsupported(sim,IRadioSim.class,sr,Collections.singleton("getIccCardStatus"));
     sim.getIccCardStatus(501); sr.expect("getIccCardStatusResponse",501,RadioError.NONE);
     CardStatus card=(CardStatus)sr.args[1];
@@ -226,6 +226,7 @@ public final class RadioModemSimContractTest {
     defaultModem.setResponseFunctions((IRadioModemResponse)dm.proxy(IRadioModemResponse.class),(IRadioModemIndication)di.proxy(IRadioModemIndication.class));
     defaultSim.setResponseFunctions((IRadioSimResponse)ds.proxy(IRadioSimResponse.class),(IRadioSimIndication)dsi.proxy(IRadioSimIndication.class));
     defaultModem.getModemStackStatus(505); dm.expect("getModemStackStatusResponse",505,RadioError.REQUEST_NOT_SUPPORTED);
+    defaultModem.getBasebandVersion(515); dm.expect("getBasebandVersionResponse",515,RadioError.REQUEST_NOT_SUPPORTED);
     defaultModem.setRadioPower(506,true,false,false); dm.expect("setRadioPowerResponse",506,RadioError.REQUEST_NOT_SUPPORTED);
     check(di.name==null,"default modem emitted a synthetic indication");
     defaultSim.getIccCardStatus(507); ds.expect("getIccCardStatusResponse",507,RadioError.REQUEST_NOT_SUPPORTED);

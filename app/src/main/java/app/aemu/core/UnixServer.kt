@@ -16,8 +16,12 @@ import java.io.FileDescriptor
 class UnixServer(
     val file: File,
     private val name: String,
+    private val maxClients: Int = 0,
     private val onClient: (LocalSocket) -> Unit,
 ) {
+    private val admission = if (maxClients > 0) DnsClientAdmission(maxClients) { error ->
+        android.util.Log.w("UnixServer", "$name: client close failed", error)
+    } else null
     @Volatile private var server: LocalServerSocket? = null
     @Volatile private var bound: LocalSocket? = null
     @Volatile var clients = 0
@@ -39,22 +43,32 @@ class UnixServer(
             bound = ls
             val s = LocalServerSocket(ls.fileDescriptor)
             server = s
+            val generation = admission?.start()
             Thread({
                 while (true) {
                     val c = try { s.accept() } catch (e: Exception) { break }
                     cloexec(c.fileDescriptor)
+                    val lease = admission?.tryAdmit(java.io.Closeable { c.close() }, generation!!)
+                    if (admission != null && lease == null) continue
                     clients++
-                    Thread({
-                        try { onClient(c) } catch (_: Throwable) {
-                        } finally {
-                            clients--
-                            runCatching { c.close() }
-                        }
-                    }, "$name-client").apply { isDaemon = true; start() }
+                    try {
+                        Thread({
+                            try { onClient(c) } catch (_: Throwable) {
+                            } finally {
+                                clients--
+                                if (lease != null) lease.close() else runCatching { c.close() }
+                            }
+                        }, "$name-client").apply { isDaemon = true; start() }
+                    } catch (failure: Throwable) {
+                        clients--
+                        if (lease != null) lease.close() else runCatching { c.close() }
+                        throw failure
+                    }
                 }
             }, "$name-accept").apply { isDaemon = true; start() }
             true
         } catch (e: Throwable) {
+            admission?.stop()
             log("$name: socket failed: $e")
             false
         }
@@ -66,6 +80,7 @@ class UnixServer(
         runCatching { bound?.close() }
         server = null
         bound = null
+        admission?.stop()
         clients = 0
     }
 

@@ -88,7 +88,8 @@ class PropService(private val paths: VmPaths, private val log: (String) -> Unit)
 
     /** Разворачивает область из шаблона образа и подмешивает сохранённые persist.*. */
     @Synchronized
-    fun prepare(overrides: Map<String, String>, defaults: Map<String, String> = emptyMap(), size: Int = PropArea.SIZE): Boolean {
+    fun prepare(overrides: Map<String, String>, defaults: Map<String, String> = emptyMap(), size: Int = PropArea.SIZE,
+                carrier: Map<String, String> = emptyMap()): Boolean {
         close()
         val tpl = paths.propsTemplate
         val f = paths.props
@@ -108,15 +109,13 @@ class PropService(private val paths: VmPaths, private val log: (String) -> Unit)
         }
         area = a
         val pd = File(paths.root, "data/property").apply { mkdirs() }
-        var n = 0
+        val persistent = LinkedHashMap<String, String>()
         pd.listFiles()?.forEach { p ->
             if (p.isFile && p.name.startsWith("persist.")) {
-                if (a.put(p.name, runCatching { p.readText().trim() }.getOrDefault(""))) n++
+                persistent[p.name] = runCatching { p.readText().trim() }.getOrDefault("")
             }
         }
-        for ((k, v) in defaults) if (a.get(k) == null) a.put(k, v)
-        // наши значения важнее сохранённых гостем
-        for ((k, v) in overrides) a.put(k, v)
+        val n = applyBootPropertyLayers(a, defaults, carrier, persistent, overrides)
         writes = 0; rejects = 0
         log("props: ${a.count} entries, ${a.room()} free" + if (n > 0) ", saved persist.* $n" else "")
         return true

@@ -24,4 +24,20 @@ class GuestVmEngineTest {
             assertEquals(Engine.KK, image.engine)
         } finally { dir.deleteRecursively() }
     }
+    @Test fun arm64LegacyGbUsesNativeRunnerWithoutLegacyExecutable() {
+        val dir = Files.createTempDirectory("guest-vm-gb-engine").toFile()
+        try {
+            val ctx = object : ContextWrapper(null) {
+                override fun getFilesDir(): File = dir
+                override fun getApplicationInfo(): ApplicationInfo = ApplicationInfo().apply { nativeLibraryDir = dir.absolutePath }
+            }
+            val image = GuestImage(id="abcdef", name="test", release="16", api=36, brand="REDMAGIC", model="NX809J", skin="AOSP", engine=Engine.GB, abi="arm64-v8a", bootclasspath="", exports=emptyMap(), dirs=emptyList(), services=emptyList(), sdcardPath="/sdcard", settings=VmSettings(), createdAt=0, fingerprint=InstanceAdmission.SYSTEM_FINGERPRINT)
+            assertFalse(File(dir, "libqemu_gb.so").exists())
+            val vm = GuestVm(ctx, image)
+            assertEquals(Engine.N64, vm.engine)
+            assertEquals(Engine.N64, vm.runner.engine)
+            assertEquals("libaemu64_36.so", vm.runner.qemu.name)
+            assertEquals(Engine.GB, image.engine)
+        } finally { dir.deleteRecursively() }
+    }
 }

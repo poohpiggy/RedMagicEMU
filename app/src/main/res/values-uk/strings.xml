@@ -46,7 +46,7 @@
     <string name="vs_proxy_sub">Старі браузери й застосунки відкривають сучасні HTTPS-сайти.</string>
     <string name="vs_controls">Керування</string>
     <string name="vs_nav">Панель кнопок Android</string>
-    <string name="vs_nav_sub">Назад, Додому, Недавні, Меню під екраном.</string>
+    <string name="vs_nav_sub">Назад, Додому та Недавні під екраном.</string>
     <string name="vs_awake">Не вимикати екран</string>
     <string name="vs_awake_sub">Поки система відкрита.</string>
     <string name="vs_vsync">Вертикальна синхронізація (VSync)</string>
@@ -59,7 +59,7 @@
     <string name="vol_up">Гучність +</string>
     <string name="vol_down">Гучність −</string>
     <string name="power">Кнопка живлення</string>
-    <string name="shutdown">Вимкнути систему</string>
+    <string name="shutdown">Вимкнути віртуальну машину</string>
     <string name="back">Назад</string>
     <string name="home">Додому</string>
     <string name="recents">Недавні</string>
@@ -116,11 +116,11 @@
     <string name="m_power_menu">Меню живлення</string>
     <string name="m_keyboard">Показати/сховати клавіатуру</string>
     <string name="m_paste">Вставити текст з буфера</string>
-    <string name="m_sms">Фейкове SMS</string>
+    <string name="m_sms">Віртуальне SMS</string>
     <string name="m_battery">Батарея</string>
     <string name="m_screenshot">Знімок екрана</string>
     <string name="m_settings">Відкрити налаштування Android</string>
-    <string name="m_reboot">Перезавантаження</string>
+    <string name="m_reboot">Перезавантажити віртуальну машину</string>
     <string name="m_clip_empty">Буфер обміну порожній</string>
     <string name="m_screenshot_saved">Збережено: %1$s</string>
     <string name="m_failed">Не вдалося</string>
@@ -131,7 +131,7 @@
     <string name="m_charging">Заряджання</string>
     <string name="m_apply">Застосувати</string>
     <string name="m_reset">Скинути</string>
-    <string name="m_call">Вхідний дзвінок</string>
+    <string name="m_call">Віртуальний вхідний дзвінок</string>
     <string name="m_call_ring">Подзвонити</string>
     <string name="fw_folder_title">Прошивки в теці</string>
     <string name="fw_folder_import">Імпорт</string>
@@ -175,21 +175,6 @@
     <string name="m_device">Стан пристрою</string>
     <string name="m_airplane">Режим польоту</string>
     <string name="m_stay_awake">Не гасити екран</string>
-    <string name="as_updates">Оновлення</string>
-    <string name="as_auto_updates">Автоперевірка оновлень</string>
-    <string name="as_auto_updates_sub">Перевіряти нові версії на GitHub під час запуску</string>
-    <string name="as_check_updates">Перевірити оновлення</string>
-    <string name="as_check_updates_sub">Поточна версія: %1$s</string>
-    <string name="update_available_title">Доступне оновлення</string>
-    <string name="update_available_msg">Доступна нова версія %1$s. Оновити застосунок?</string>
-    <string name="update_latest">У вас актуальна версія (%1$s)</string>
-    <string name="update_checking">Перевірка оновлень…</string>
-    <string name="update_btn">Оновити</string>
-    <string name="update_later">Пізніше</string>
-    <string name="update_downloading">Завантаження оновлення…</string>
-    <string name="update_install">Встановити</string>
-    <string name="update_error">Не вдалося перевірити оновлення: %1$s</string>
-    <string name="update_open_github">Відкрити на GitHub</string>
     <string name="lib_title">Бібліотека прошивок</string>
     <string name="lib_empty">Прошивок поки немає: імпортуйте файл прошивки, щоб створити першу машину.</string>
     <string name="new_machine">Нова машина</string>
@@ -228,4 +213,8 @@
     <string name="vs_disk">Внутрішня пам’ять</string>
     <string name="m_apps_search">Пошук застосунків</string>
     <string name="powered_off">Гостя вимкнено</string>
+    <string name="m_network_mode">Режим мережі</string>
+    <string name="vs_disk_hint">Задає обсяг, який бачить гостьова система; доступне місце залежить від пам’яті телефону.</string>
+    <string name="instance_settings">Налаштування екземпляра</string>
+    <string name="about_title">Про застосунок</string>
 </resources>

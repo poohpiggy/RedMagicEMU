@@ -7,6 +7,12 @@ import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
 
+/** Android 16 raw-DNS clients expect a big-endian negative errno, not a text status. */
+internal fun unsupportedTargetRawDns(api: Int, args: List<String>): ByteArray? =
+    if (api == 36 && args.size == 4 && args[0] == "resnsend")
+        byteArrayOf(-1, -1, -1, -95) // -ENOTSUP
+    else null
+
 /**
  * Host-side stand-in for netd's dnsproxyd (Android 5.0–7.x). Guest libc sends every getaddrinfo/gethostbyname
  * there; the real netd resolves through a per-network interface and marks that do not exist in the sandbox, so
@@ -15,12 +21,13 @@ import java.net.InetAddress
  * whenever netd (re)starts.
  */
 class DnsProxy(private val paths: VmPaths, private val api: Int, private val probe: Boolean, private val log: (String) -> Unit) {
+    @Volatile internal var targetRawResolver: TargetDnsResolver? = null
     /** Whether the firmware's libc takes struct addrinfo as one block (the layout of 5.0, which some vendors kept in
      *  5.1: TouchWiz) and not field by field. Nothing in the request tells, so with [probe] the first reply stops
      *  after "one more entry follows": a libc of the old layout takes that word for a block length, finds it too
      *  short and hangs up at once (that one lookup fails), a libc of the new layout waits for the rest. */
     @Volatile private var block: Boolean? = if (probe) null else false
-    private val server = UnixServer(paths.socket("dnsproxyd"), "dnsproxy") { c -> serve(c) }
+    private val server = UnixServer(paths.socket("dnsproxyd"), "dnsproxy", maxClients = if (api == 36) 64 else 0) { c -> serve(c) }
     private var inode = -1L
     private var failures = 0
     @Volatile var queries = 0L
@@ -38,17 +45,21 @@ class DnsProxy(private val paths: VmPaths, private val api: Int, private val pro
     fun stop() { server.stop(); inode = -1 }
 
     private fun serve(c: LocalSocket) {
-        val req = ByteArrayOutputStream()
         val inp = c.inputStream
-        while (req.size() < 1024) {
-            val b = inp.read()
-            if (b <= 0) break
-            req.write(b)
+        val request = if (api == 36) DnsCommandReader.read(inp, 5000, { c.soTimeout = it }) else {
+            val req = ByteArrayOutputStream()
+            var terminated = false
+            while (req.size() < 1024) {
+                val b = inp.read()
+                if (b <= 0) { terminated = b == 0; break }
+                req.write(b)
+            }
+            DnsCommandReader.Request(req.toByteArray(), terminated)
         }
-        val t = req.toString("UTF-8").trim().split(' ').filter { it.isNotEmpty() }
+        val t = request.bytes.toString(Charsets.UTF_8).trim().split(' ').filter { it.isNotEmpty() }
         if (t.isEmpty()) return
         queries++
-        if (queries <= 12) log("dns: " + t.joinToString(" "))
+        if (queries <= 12) log("dns: " + if (t[0] == "resnsend") "resnsend" else t.joinToString(" "))
         val sock = c.outputStream
         val out = ByteArrayOutputStream()
         val t0 = System.currentTimeMillis()
@@ -56,11 +67,20 @@ class DnsProxy(private val paths: VmPaths, private val api: Int, private val pro
             when (t[0]) {
                 "getaddrinfo" -> if (t.size >= 6) getaddrinfo(out, t) else fail(out)
                 "gethostbyname" -> hostByName(out, t)
+                "resnsend" -> {
+                    val resolver = targetRawResolver
+                    val response = targetRawDnsReply(api, t, request.terminated, resolver?.let { active ->
+                        { id, packet, flags -> active.query(id, packet, flags) }
+                    })
+                    response?.let(out::write) ?: fail(out)
+                }
                 else -> fail(out)
             }
         } catch (e: Throwable) {
-            if (queries <= 40 || failures++ < 200) log("dns: " + t.joinToString(" ") + " failed: " + e)
-            runCatching { fail(out) }
+            if (queries <= 40 || failures++ < 200) log("dns: " + (if (t[0] == "resnsend") "resnsend" else t.joinToString(" ")) + " failed: " + e)
+            if (t[0] == "resnsend" && api == 36) {
+                out.reset(); out.write(DnsRawProtocol.error(5 /* EIO */))
+            } else runCatching { fail(out) }
         }
         val bytes = out.toByteArray()
         var sent = 0
@@ -75,8 +95,8 @@ class DnsProxy(private val paths: VmPaths, private val api: Int, private val pro
             }
             while (sent < bytes.size) { val n = minOf(4, bytes.size - sent); sock.write(bytes, sent, n); sock.flush(); sent += n; if (DEBUG_SLOW) Thread.sleep(20) }
         } catch (e: java.io.IOException) { log("dns: client closed after $sent of ${bytes.size} bytes") }
-        if (queries <= 6) log("dns: reply " + out.toByteArray().take(96).joinToString("") { "%02x".format(it) })
-        if (queries <= 40) log("dns: " + t.getOrElse(1) { "" } + " answered in " + (System.currentTimeMillis() - t0) + " ms")
+        if (queries <= 6 && t[0] != "resnsend") log("dns: reply " + out.toByteArray().take(96).joinToString("") { "%02x".format(it) })
+        if (queries <= 40) log("dns: " + (if (t[0] == "resnsend") "resnsend" else t.getOrElse(1) { "" }) + " answered in " + (System.currentTimeMillis() - t0) + " ms")
     }
 
     private fun fail(o: java.io.OutputStream) {

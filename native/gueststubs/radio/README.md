@@ -1,6 +1,6 @@
 # Isolated Android 16 Radio voice prototype
 
-This is an unregistered, single-slot prototype. It is not launched by RedMagicEMU and does not register a HAL or connect to the host. It does not make real calls. The SMS service, private host bridge, other radio interfaces, initialization, and end-to-end acceptance are separate unfinished work.
+This is a single-slot synthetic Radio implementation for the target Guest. It does not register a physical HAL or connect to the host cellular stack, and it does not make real calls. An opt-in `--lte-data` mode exposes the existing host-backed guest route as a synthetic LTE data call; the default mode retains the no-bearer data contract. Device-level telephony, APN, default-network and mobile-data UI acceptance remain separate.
 
 `aidl/base` and `aidl/voice` contain the required compile-time subset of the Android Open Source Project frozen AIDL v4 snapshots from `platform/hardware/interfaces`, tag `android-16.0.0_r1`, paths `radio/aidl/aidl_api/android.hardware.radio/4` and `radio/aidl/aidl_api/android.hardware.radio.voice/4`. Their original copyright notices and the Apache License 2.0 are preserved in the files and `aidl/LICENSE-2.0.txt`. The `.hash` files are the official hashes of the complete frozen interfaces, not checksums of this subset. These sources are pinned; building must not automatically fetch or update upstream.
 

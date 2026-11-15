@@ -22,7 +22,7 @@
 - `./gradlew.bat :app:assembleStandardDebug --no-daemon`：下载 wrapper 指定的 Gradle 8.14.2 后失败，项目指定的 Android Studio JBR 不存在。
 - `./gradlew.bat :app:assembleStandardDebug --no-daemon '-Dorg.gradle.java.home=C:\Program Files\Java\jdk-21.0.10'`：退出码 1；配置编译任务依赖时报告找不到 Android SDK。临时参数没有修改项目配置。未完成编译，原生构建也未验证。
 
-随后按用户要求使用本机 JDK 21.0.10，安装 Google Android 命令行工具及 SDK 到 `<用户目录>/.redmagicemu-tools/android-sdk`：Android 36 平台修订版 2、Build Tools 35.0.0 和 36.0.0、platform-tools、NDK 28.2.13676358（r28c）。命令行工具下载包 SHA-256 与 Google 公布值一致；项目根目录被忽略的 `local.properties` 指向此 SDK，不修改机器全局环境变量。README 原要求 JDK 17，此处是用户指定的 JDK 21 基线。
+构建基线改用本机 JDK 21.0.10，并将 Google Android 命令行工具及 SDK 安装到 `<用户目录>/.redmagicemu-tools/android-sdk`：Android 36 平台修订版 2、Build Tools 35.0.0 和 36.0.0、platform-tools、NDK 28.2.13676358（r28c）。命令行工具下载包 SHA-256 与 Google 公布值一致；项目根目录被忽略的 `local.properties` 指向此 SDK，不修改机器全局环境变量。README 原要求 JDK 17，当前项目构建基线使用 JDK 21。
 
 PowerShell 中设置 `$env:JAVA_HOME='C:\Program Files\Java\jdk-21.0.10'` 和 `$env:ANDROID_HOME='<用户目录>\.redmagicemu-tools\android-sdk'`，然后运行 `./gradlew.bat :app:assembleStandardDebug --no-daemon '-Dorg.gradle.java.home=C:\Program Files\Java\jdk-21.0.10'`，退出码 0，`BUILD SUCCESSFUL`，40 项任务执行。输出为 `app/build/outputs/apk/standard/debug/app-standard-debug.apk`（92,313,038 字节）。该命令覆盖项目中无效的 JBR 路径；输出和 `local.properties` 都不纳入 Git。
 
@@ -38,7 +38,7 @@ PowerShell 中设置 `$env:JAVA_HOME='C:\Program Files\Java\jdk-21.0.10'` 和 `$
 
 仓库已跟踪四份历史 `hs_err` JVM 崩溃日志及一份 replay 日志，前者记录历史原生内存分配失败及本地环境信息；它们不是 Guest 启动日志，无法说明当前构建失败或 Guest 根因。忽略规则不影响已跟踪文件，须注意现有历史资料的隐私风险；本轮未删除或改写它们。
 
-2026-11-04 审阅用户提供的历史导出日志。用户说明它来自过去修改过的 AE 版本，不能视为当前 checkout 的实测；原文件保留在用户下载目录，不纳入仓库。日志标签显示 NX809J、Android 16/API 36 和 ARM64 引擎，但标签不能证明固件的唯一身份。
+2026-11-04 审阅历史导出日志。日志说明它来自过去修改过的 AE 版本，不能视为当前 checkout 的实测；原文件保留在下载目录，不纳入仓库。日志标签显示 NX809J、Android 16/API 36 和 ARM64 引擎，但标签不能证明固件的唯一身份。
 
 - 可观察事实：Guest main 日志记录 health 服务进入 charger mode；宿主记录 ztecharger 启动后出现 `guest requested power off (unplug)`。日志还记录一些 vendor 服务退出或 HAL 故障。Guest 日志只保留末尾 4 MiB，不能由缺少某条启动记录断定该事件从未发生。
 - 待验证假设：充电/关机路径可能与此次提前停止有关；触发者、因果关系及与 HAL 报错的关系都未确定，需核对当时版本并在当前代码上复现。不能把所有 HAL 报错当作根因。

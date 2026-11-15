@@ -83,9 +83,6 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import app.aemu.BuildConfig
-import app.aemu.update.AppUpdateManager
-import app.aemu.update.ReleaseInfo
-import app.aemu.update.UpdateState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -93,9 +90,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.aemu.core.GuestImage
+import app.aemu.core.BatteryModeIntent
 import app.aemu.R
 import androidx.compose.ui.res.stringResource
-import androidx.compose.material.icons.rounded.Settings
 import android.content.Context
 
 val ACTION_BOOT = BuildConfig.APPLICATION_ID + ".BOOT"
@@ -174,7 +171,7 @@ fun Library(model: LibraryModel) {
     Scaffold(topBar = {
         LargeFlexibleTopAppBar(title = { Text(stringResource(R.string.app_name)) }, actions = {
             IconButton(onClick = { ctx.startActivity(Intent(ctx, AppSettingsActivity::class.java)) }) {
-                Icon(Icons.Rounded.Settings, stringResource(R.string.settings))
+                Icon(Icons.Rounded.Info, stringResource(R.string.about_title))
             }
         })
     }) { pad ->
@@ -215,13 +212,17 @@ fun Library(model: LibraryModel) {
                     Text(stringResource(R.string.single_ready), style = MaterialTheme.typography.titleLarge)
                     Text(stringResource(R.string.single_target))
                     Button(onClick = { VmActivity.start(ctx, img.id) }) { Text(stringResource(R.string.start)) }
-                    TextButton(onClick = { settingsFor = img }) { Text(stringResource(R.string.settings)) }
+                    TextButton(onClick = { settingsFor = img }) { Text(stringResource(R.string.instance_settings)) }
                 }
             }
         }
     }
     settingsFor?.let { img ->
-        SettingsSheet(img, onDismiss = { settingsFor = null }, onSave = { s -> model.updateSettings(img, s); settingsFor = null })
+        SettingsSheet(img, onDismiss = { settingsFor = null }, onSave = { s, customBattery ->
+            model.updateSettings(img, s) {
+                BatteryModeIntent.publish(ctx, s.batterySync, customBattery)
+            }
+        })
     }
 
 }

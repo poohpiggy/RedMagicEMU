@@ -26,7 +26,7 @@ class ServiceArtifactBoundaryTest(unittest.TestCase):
         paths = builder.service_sources()
         expected = {"RadioServiceMain", "RadioSlot1Registry", "RadioVoiceService", "RadioRequestCounter",
                     "RadioConfigService", "SyntheticSingleSlot", "SyntheticSimProfile", "RadioModemService",
-                    "RadioSimService", "RadioNetworkService", "RadioDataService", "RadioMessagingService",
+                    "RadioSimService", "RadioNetworkService", "RadioDataService", "RadioNetworkGate", "RadioMessagingService",
                     "RadioEventEndpoint", "RadioEventSession", "RadioEventSessionManager", "RadioGuestPeerCredentials",
                     "RadioEventSessionPump", "RadioEventSocketTransport"}
         self.assertEqual({path.stem for path in paths}, expected)

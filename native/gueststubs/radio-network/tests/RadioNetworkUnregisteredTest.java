@@ -45,7 +45,7 @@ public final class RadioNetworkUnregisteredTest {
             throw new AssertionError("unexpected response "+m.getName());
         });
         IRadioNetworkIndication indication=(IRadioNetworkIndication)Proxy.newProxyInstance(IRadioNetworkIndication.class.getClassLoader(),new Class<?>[]{IRadioNetworkIndication.class},(p,m,a)->{
-            if(m.getName().equals("asBinder")) return ib; throw new AssertionError("unexpected indication");
+            if(m.getName().equals("asBinder")) return ib; if(m.getName().equals("currentSignalStrength")) return null; throw new AssertionError("unexpected indication");
         });
         service.setResponseFunctions(response,indication);
         service.getVoiceRegistrationState(701);

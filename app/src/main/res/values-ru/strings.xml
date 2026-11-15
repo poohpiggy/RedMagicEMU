@@ -49,7 +49,7 @@
     <string name="vs_proxy_sub">Старые браузеры и приложения открывают современные HTTPS-сайты.</string>
     <string name="vs_controls">Управление</string>
     <string name="vs_nav">Панель кнопок Android</string>
-    <string name="vs_nav_sub">Назад, Домой, Недавние, Меню под экраном.</string>
+    <string name="vs_nav_sub">Назад, Домой и Недавние под экраном.</string>
     <string name="vs_awake">Не гасить экран</string>
     <string name="vs_awake_sub">Пока система открыта.</string>
     <string name="vs_vsync">Вертикальная синхронизация (VSync)</string>
@@ -62,7 +62,7 @@
     <string name="vol_up">Громкость +</string>
     <string name="vol_down">Громкость −</string>
     <string name="power">Кнопка питания</string>
-    <string name="shutdown">Выключить систему</string>
+    <string name="shutdown">Выключить виртуальную машину</string>
     <string name="back">Назад</string>
     <string name="home">Домой</string>
     <string name="recents">Недавние</string>
@@ -119,11 +119,11 @@
     <string name="m_power_menu">Меню питания</string>
     <string name="m_keyboard">Показать/скрыть клавиатуру</string>
     <string name="m_paste">Вставить текст из буфера</string>
-    <string name="m_sms">Фейковое SMS</string>
+    <string name="m_sms">Виртуальное SMS</string>
     <string name="m_battery">Батарея</string>
     <string name="m_screenshot">Скриншот</string>
     <string name="m_settings">Открыть настройки Android</string>
-    <string name="m_reboot">Перезагрузка</string>
+    <string name="m_reboot">Перезагрузить виртуальную машину</string>
     <string name="m_clip_empty">Буфер обмена пуст</string>
     <string name="m_screenshot_saved">Сохранено: %1$s</string>
     <string name="m_failed">Не удалось</string>
@@ -134,7 +134,7 @@
     <string name="m_charging">Зарядка</string>
     <string name="m_apply">Применить</string>
     <string name="m_reset">Сбросить</string>
-    <string name="m_call">Входящий звонок</string>
+    <string name="m_call">Виртуальный входящий звонок</string>
     <string name="m_call_ring">Позвонить</string>
     <string name="fw_folder_title">Прошивки в папке</string>
     <string name="fw_folder_import">Импорт</string>
@@ -173,21 +173,6 @@
     <string name="m_device">Состояние устройства</string>
     <string name="m_airplane">Режим полёта</string>
     <string name="m_stay_awake">Не гасить экран</string>
-    <string name="as_updates">Обновления</string>
-    <string name="as_auto_updates">Автопроверка обновлений</string>
-    <string name="as_auto_updates_sub">Проверять наличие новых версий на GitHub при запуске</string>
-    <string name="as_check_updates">Проверить обновления</string>
-    <string name="as_check_updates_sub">Текущая версия: %1$s</string>
-    <string name="update_available_title">Доступно обновление</string>
-    <string name="update_available_msg">Доступна новая версия %1$s. Хотите обновить приложение?</string>
-    <string name="update_latest">У вас установлена актуальная версия (%1$s)</string>
-    <string name="update_checking">Проверка обновлений…</string>
-    <string name="update_btn">Обновить</string>
-    <string name="update_later">Позже</string>
-    <string name="update_downloading">Загрузка обновления…</string>
-    <string name="update_install">Установить</string>
-    <string name="update_error">Не удалось проверить обновления: %1$s</string>
-    <string name="update_open_github">Открыть на GitHub</string>
     <string name="lib_title">Библиотека прошивок</string>
     <string name="lib_empty">Прошивок пока нет: импортируйте файл прошивки, чтобы создать первую машину.</string>
     <string name="new_machine">Новая машина</string>
@@ -256,4 +241,8 @@
     <string name="cam_value">Значение</string>
     <string name="cam_add">Добавить</string>
     <string name="cam_save">Сохранить</string>
+    <string name="m_network_mode">Режим сети</string>
+    <string name="vs_disk_hint">Задаёт отображаемый гостевой системой объём; доступное место зависит от свободной памяти телефона.</string>
+    <string name="instance_settings">Настройки экземпляра</string>
+    <string name="about_title">О приложении</string>
 </resources>

@@ -170,6 +170,48 @@ class TargetRingtoneIndexTest {
         assertTrue(events.any { it.contains("cancelled") })
     }
 
+    @Test fun stopBetweenScanAndVerificationCancelsWithoutReportingSuccess() {
+        val lifecycle = VmLifecycle()
+        assertTrue(lifecycle.begin())
+        lifecycle.endBoot()
+        val events = mutableListOf<String>()
+        var commands = 0
+        val result = TargetRingtoneIndex.ensureWithRetry(36, "NX809J", "arm64-v8a", Engine.N64,
+            { true }, events::add) { _, _ ->
+            lifecycle.run {
+                commands++
+                when (commands) {
+                    1 -> row(paths[0])
+                    2 -> 0 to "Result: Bundle[{android.intent.extra.STREAM=content://media/internal/audio/media/5}]"
+                    else -> throw AssertionError("verification must not start after stop")
+                }
+            }.also { if (commands == 2) lifecycle.stop({}) {} }
+        }
+        assertEquals(TargetRingtoneIndex.Result.CANCELLED, result)
+        assertEquals(2, commands)
+        assertTrue(events.contains("cancelled"))
+    }
+
+    @Test fun stopBeforeStartingACommandInsideAnExistingWorkerCancels() {
+        val lifecycle = VmLifecycle()
+        assertTrue(lifecycle.begin())
+        lifecycle.endBoot()
+        val requested = java.util.concurrent.CountDownLatch(1)
+        var stopper: Thread? = null
+        val result = try {
+            TargetRingtoneIndex.ensureWithRetry(36, "NX809J", "arm64-v8a", Engine.N64,
+                { true }, {}) { _, _ ->
+                lifecycle.run {
+                    stopper = Thread { lifecycle.stop({ requested.countDown() }) {} }.apply { start() }
+                    assertTrue(requested.await(3, java.util.concurrent.TimeUnit.SECONDS))
+                    lifecycle.create { throw AssertionError("process started after stop") }
+                }
+            }
+        } finally { stopper?.join(3000) }
+        assertEquals(TargetRingtoneIndex.Result.CANCELLED, result)
+        assertFalse(stopper!!.isAlive)
+    }
+
     @Test fun queryFailureReportsItsStageAndDoesNotPretendSuccess() {
         val events = mutableListOf<String>()
         val outputs = ArrayDeque(listOf(

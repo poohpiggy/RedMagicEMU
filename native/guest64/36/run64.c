@@ -90,6 +90,7 @@ static char g_exe[PATH_MAX];    // guest view of the running program
 static int g_selinux;           // this program is shown a (permissive) SELinux: see /sys/fs/selinux/status
 static int g_uid, g_gid;        // the ids the guest believes it has (the effective ones)
 static int g_ruid, g_rgid;      // ...and its real ones
+static int g_suid;              // saved user ID, used for unprivileged UID transitions
 static u32 g_real_uid;
 static char g_qemu[512];        // qemu-arm for the firmware's 32-bit programs (AEMU64_QEMU)
 static int g_crash;
@@ -807,6 +808,51 @@ static int bpf_perm(const char *p, u32 *mode, u32 *uid, u32 *gid, char *ctx /* 9
 }
 
 
+#define AEMU_NETWORK_GATE_PATH "/dev/aemu_network_gate"
+
+static int network_gate_allows_byte(long count, unsigned char value) {
+    return count == 1 && value == '1';
+}
+
+static int network_gate_external_address(const void *address, u64 length) {
+    if (!address || length < 2) return 0;
+    u16 family;
+    memcpy(&family, address, sizeof family);
+    const u8 *bytes = (const u8 *)address;
+    if (family == 2 /*AF_INET*/ && length >= 8) {
+        return bytes[4] != 127;
+    }
+    if (family == 10 /*AF_INET6*/ && length >= 24) {
+        for (int i = 8; i < 23; i++) if (bytes[i]) return 1;
+        return bytes[23] != 1;
+    }
+    return 0;
+}
+
+/* Missing means Ethernet mode. Once virtual Wi-Fi has created the file, only
+ * the exact byte "1" permits Internet traffic; truncation and malformed state
+ * fail closed. */
+static int network_gate_blocked(void) {
+    char path[600];
+    const char suffix[] = AEMU_NETWORK_GATE_PATH;
+    if (g_rootlen + sizeof suffix > sizeof path) return 1;
+    memcpy(path, g_root, g_rootlen);
+    memcpy(path + g_rootlen, suffix, sizeof suffix);
+    int fd = (int)S4(NR_openat, AT_FDCWD, path, 02000000 /*O_RDONLY|O_CLOEXEC*/, 0);
+    if (fd < 0) return 0;
+    unsigned char value = 0;
+    long count = S4(NR_pread64, fd, &value, 1, 0);
+    S1(NR_close, fd);
+    return !network_gate_allows_byte(count, value);
+}
+
+static int network_gate_internet_fd(int fd) {
+    unsigned char address[128];
+    u32 length = sizeof address;
+    if (S3(NR_getsockname, fd, address, &length) < 0) return 0;
+    return network_gate_external_address(address, length);
+}
+
 static long trap2(long nr, long *a, void *uc, char **pbp);
 
 static int g_trace;
@@ -1157,6 +1203,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
             long r = S3(nr, a[0], a[1], a[2]);
             return r < 0 && nr == NR_bind ? 0 : r;
         }
+        if (nr == NR_connect && network_gate_blocked() && network_gate_external_address((const void *)a[1], a[2])) return -1;
         return unix_addr(nr, a[0], (const struct sockaddr_un *)a[1], (u64)a[2], PB(0));
     case NR_getsockname: {
         long r = S3(nr, a[0], a[1], a[2]);
@@ -1344,13 +1391,42 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
     // (the real ids apart from the effective ones: zygote preloads its classes as "nobody" by the effective ids only,
     // and MIUI's checks its real one there - with one id for both it took itself for a stranger and reported that
     // over binder, which a zygote must not open)
-    case NR_setuid: g_uid = g_ruid = (int)a[0]; ids_put(); return 0;
+    case NR_setuid: {
+        int requested = (int)(u32)a[0];
+        if (requested == -1) return -EINVAL;
+        if (g_uid == 0) g_ruid = g_uid = g_suid = requested;
+        else if (requested == g_ruid || requested == g_suid) g_uid = requested;
+        else return -1; /* EPERM */
+        ids_put(); return 0;
+    }
     case NR_setgid: g_gid = g_rgid = (int)a[0]; return 0;
-    case NR_setreuid: case NR_setresuid: if ((int)a[0] != -1) g_ruid = (int)a[0]; if ((int)a[1] != -1) g_uid = (int)a[1]; ids_put(); return 0;
+    case NR_setreuid: {
+        int real = (int)(u32)a[0], effective = (int)(u32)a[1], old_real = g_ruid;
+        if (g_uid != 0) {
+            if (real != -1 && real != g_ruid && real != g_uid) return -1; /* EPERM */
+            if (effective != -1 && effective != g_ruid && effective != g_uid && effective != g_suid) return -1;
+        }
+        if (real != -1) g_ruid = real;
+        if (effective != -1) g_uid = effective;
+        if (real != -1 || (effective != -1 && effective != old_real)) g_suid = g_uid;
+        ids_put(); return 0;
+    }
+    case NR_setresuid: {
+        int real = (int)(u32)a[0], effective = (int)(u32)a[1], saved = (int)(u32)a[2];
+        if (g_uid != 0) {
+            if (real != -1 && real != g_ruid && real != g_uid && real != g_suid) return -1;
+            if (effective != -1 && effective != g_ruid && effective != g_uid && effective != g_suid) return -1;
+            if (saved != -1 && saved != g_ruid && saved != g_uid && saved != g_suid) return -1;
+        }
+        if (real != -1) g_ruid = real;
+        if (effective != -1) g_uid = effective;
+        if (saved != -1) g_suid = saved;
+        ids_put(); return 0;
+    }
     case NR_setregid: case NR_setresgid: if ((int)a[0] != -1) g_rgid = (int)a[0]; if ((int)a[1] != -1) g_gid = (int)a[1]; return 0;
     case NR_setfsuid: return g_uid;
     case NR_setfsgid: return g_gid;
-    case NR_getresuid: for (int i = 0; i < 3; i++) if (a[i]) *(u32 *)a[i] = (u32)(i ? g_uid : g_ruid); return 0;
+    case NR_getresuid: if (a[0]) *(u32 *)a[0] = (u32)g_ruid; if (a[1]) *(u32 *)a[1] = (u32)g_uid; if (a[2]) *(u32 *)a[2] = (u32)g_suid; return 0;
     case NR_getresgid: for (int i = 0; i < 3; i++) if (a[i]) *(u32 *)a[i] = (u32)(i ? g_gid : g_rgid); return 0;
     case NR_getgroups: return 0;
     case NR_rt_sigprocmask: {
@@ -1412,7 +1488,9 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
             S5(nr, a[0], 1, a[2] == 33 ? 8 : 7, a[3], a[4]);
             return 0;
         }
-        if (r < 0 && a[1] == 1 && a[2] == 36) return 0;             // SO_MARK (netd tags every app socket): CAP_NET_ADMIN too
+        // Keep the existing unprivileged-host compatibility for denied SO_MARK.
+        // Other failures (bad fd/arguments or policy denial) must remain visible.
+        if (r == -1 /* EPERM */ && a[1] == 1 && a[2] == 36) return 0;
         return r;
     }
     case NR_getsockopt: {
@@ -1443,16 +1521,22 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
             nl_handle_send((int)a[0], (const void *)a[1], (u64)a[2]);
             return a[2];
         }
+        if (network_gate_blocked() && ((a[4] && network_gate_external_address((const void *)a[4], a[5]))
+                || (!a[4] && network_gate_internet_fd((int)a[0])))) return -1;
         return S6(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
     }
     case NR_writev:                             // netd's socket queries (sock_diag) write their requests this way
         if (is_nl_fd((int)a[0])) return a[1] ? nl_handle_iov((int)a[0], (const struct iov *)a[1], (u64)a[2]) : 0;
+        if (network_gate_blocked() && network_gate_internet_fd((int)a[0])) return -1;
         return S3(nr, a[0], a[1], a[2]);
     case NR_sendmsg: {
         if (is_nl_fd((int)a[0])) {
             struct msgh *m = (struct msgh *)a[1];
             return m && m->iov ? nl_handle_iov((int)a[0], m->iov, m->iovlen) : 0;
         }
+        struct msgh *m = (struct msgh *)a[1];
+        if (network_gate_blocked() && m && ((m->name && network_gate_external_address(m->name, m->namelen))
+                || (!m->name && network_gate_internet_fd((int)a[0])))) return -1;
         return S3(nr, a[0], a[1], a[2]);
     }
     case NR_recvmsg: {
@@ -1828,7 +1912,7 @@ void aemu_main(u64 *sp) {
     if ((r = env_get(envp, "AEMU64_HWBINDER")) && slen(r) < sizeof g_hwbsock) memcpy(g_hwbsock, r, slen(r) + 1);
     if ((r = env_get(envp, "AEMU64_VNDBINDER")) && slen(r) < sizeof g_vndbsock) memcpy(g_vndbsock, r, slen(r) + 1);
     if ((r = env_get(envp, "AEMU64_ID"))) { g_uid = (int)atou(r); while (*r && *r != ',') r++; if (*r) g_gid = (int)atou(r + 1); }
-    g_ruid = g_uid; g_rgid = g_gid;
+    g_ruid = g_suid = g_uid; g_rgid = g_gid;
     if (g_root[0]) ids_put();
     if (g_rootlen < 500) {
         memcpy(g_tracelog, g_root, g_rootlen); memcpy(g_tracelog + g_rootlen, "/dev/.aemu-trace-all", 21);

@@ -1,4 +1,5 @@
 *.apk
+*.aab
 *_apktool/
 *_jadx/
 .gradle/
@@ -21,3 +22,8 @@ release-apks/
 # 本地固件、诊断资料和生成的日志；已跟踪文件不受忽略规则影响
 /local-data/
 *.log
+
+# 本地临时输出与构建测试产物
+/$null
+/step_test
+/gt-*.txt

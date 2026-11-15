@@ -4,6 +4,12 @@ import android.os.IBinder;
 import android.net.LocalSocket;
 import android.net.LocalSocketAddress;
 import java.io.IOException;
+import java.io.File;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.StandardOpenOption;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.util.concurrent.CountDownLatch;
@@ -18,28 +24,58 @@ public final class RadioServiceMain {
     static final class ServiceGroup {
         final IBinder[] services;
         final RadioEventEndpoint endpoint;
+        final RadioNetworkService network;
+        final RadioDataService data;
 
-        ServiceGroup(IBinder[] services, RadioEventEndpoint endpoint) {
+        ServiceGroup(IBinder[] services, RadioEventEndpoint endpoint, RadioNetworkService network,
+                RadioDataService data) {
             this.services=services;
             this.endpoint=endpoint;
+            this.network=network;
+            this.data=data;
         }
     }
 
-    static ServiceGroup createServiceGroup(SyntheticSingleSlot model) {
+    static ServiceGroup createServiceGroup(SyntheticSingleSlot model, String imei) {
+        return createServiceGroup(model, imei, false);
+    }
+
+    static ServiceGroup createServiceGroup(SyntheticSingleSlot model, String imei, boolean lteData) {
         if (model == null) throw new IllegalArgumentException("synthetic slot required");
+        RadioNetworkService network=new RadioNetworkService("slot1",model);
+        RadioDataService data=new RadioDataService("slot1",model,lteData);
         RadioMessagingService messaging=new RadioMessagingService("slot1",model);
         RadioVoiceService voice=new RadioVoiceService("slot1",64,5000,model);
         RadioEventEndpoint endpoint=new RadioEventEndpoint(model,voice,messaging);
         IBinder[] services=new IBinder[]{
             new RadioConfigService("slot1",model).asBinder(),
-            new RadioModemService("slot1",model).asBinder(),
+            new RadioModemService("slot1",model,imei).asBinder(),
             new RadioSimService("slot1",model).asBinder(),
-            new RadioNetworkService("slot1",model).asBinder(),
-            new RadioDataService("slot1",model).asBinder(),
+            network.asBinder(),
+            data.asBinder(),
             messaging.asBinder(),
             voice.asBinder()
         };
-        return new ServiceGroup(services,endpoint);
+        return new ServiceGroup(services,endpoint,network,data);
+    }
+
+    /** Reads only the synthetic identity prepared in this Guest's private tree. */
+    static String readImei(File file) throws IOException {
+        byte[] data=new byte[16];
+        int count=0;
+        try (InputStream in=Files.newInputStream(file.toPath(), StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+            while (count<data.length) {
+                int n=in.read(data,count,data.length-count);
+                if (n<0) break;
+                if (n==0) throw new IOException("cannot read virtual IMEI");
+                count+=n;
+            }
+        }
+        if (count!=15) throw new IOException("invalid virtual IMEI");
+        for (int i=0;i<count;i++) if (data[i]<'0' || data[i]>'9') throw new IOException("invalid virtual IMEI");
+        String imei=new String(data,0,count,StandardCharsets.US_ASCII);
+        if (!RadioModemService.validImei(imei)) throw new IOException("invalid virtual IMEI");
+        return imei;
     }
 
     static boolean validEventArguments(String name, int pid, int uid, long epoch) {
@@ -81,21 +117,28 @@ public final class RadioServiceMain {
     }
 
     public static void main(String[] args) {
-        if ((args.length != 1 && args.length != 6) || !"--experimental-slot1".equals(args[0]) ||
-                (args.length == 6 && !"--event-socket".equals(args[1]))) {
-            System.err.println("Radio service requires --experimental-slot1 and optional event connection");
-            System.exit(2);
-            return;
-        }
         try {
+            if (args.length < 1 || !"--experimental-slot1".equals(args[0]))
+                throw new IllegalArgumentException("missing --experimental-slot1");
+            int at=1;
+            boolean lteData=false;
+            if (at<args.length && "--lte-data".equals(args[at])) { lteData=true; at++; }
             String eventName=null; int hostPid=0, hostUid=0; long epoch=0;
-            if (args.length == 6) {
-                eventName=args[2];hostPid=Integer.parseInt(args[3]);hostUid=Integer.parseInt(args[4]);epoch=Long.parseLong(args[5]);
+            if (at<args.length) {
+                if (args.length-at != 5 || !"--event-socket".equals(args[at]))
+                    throw new IllegalArgumentException("invalid event connection");
+                eventName=args[at+1];hostPid=Integer.parseInt(args[at+2]);hostUid=Integer.parseInt(args[at+3]);epoch=Long.parseLong(args[at+4]);
                 if (!validEventArguments(eventName,hostPid,hostUid,epoch)) throw new IllegalArgumentException("invalid event connection");
+                at+=5;
             }
-            SyntheticSingleSlot model=new SyntheticSingleSlot();
-            ServiceGroup group=createServiceGroup(model);
+            if (at != args.length) throw new IllegalArgumentException("unexpected radio arguments");
+            SyntheticSingleSlot model=new SyntheticSingleSlot(lteData);
+            ServiceGroup group=createServiceGroup(model,readImei(new File("/data/vendor/radio/aemu-imei")),lteData);
             activeServices=group;
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                try { group.data.close(); }
+                finally { group.network.close(); }
+            }, "radio-network-close"));
             RadioSlot1Registry registry=new RadioSlot1Registry(new ServiceManagerBackend(),group.services);
             registry.start();
             System.out.println("RADIO_SLOT1_NAMES_OBSERVED");

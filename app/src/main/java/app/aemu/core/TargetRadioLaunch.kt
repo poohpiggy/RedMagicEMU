@@ -2,20 +2,19 @@ package app.aemu.core
 
 import java.io.File
 
-/** Selects the Android 16 target's AIDL Radio; other firmware keeps its existing backend. */
+/** Selects the Android 16 target's AIDL Radio. */
 internal object TargetRadioLaunch {
-    internal enum class Backend { DISABLED, LEGACY, AIDL }
+    internal enum class Backend { DISABLED, AIDL }
     private const val JAR = "/system/framework/redmagic-radio.jar"
 
     fun select(api: Int, model: String, abi: String, engine: Engine, enabled: Boolean): Backend = when {
         !enabled -> Backend.DISABLED
         api == 36 && model == "NX809J" && abi == "arm64-v8a" && engine == Engine.N64 -> Backend.AIDL
-        else -> Backend.LEGACY
+        else -> Backend.DISABLED
     }
 
-    fun routeEvent(backend: Backend, aidl: () -> RadioSubmitResult, legacy: () -> Boolean): RadioSubmitResult = when (backend) {
+    fun routeEvent(backend: Backend, aidl: () -> RadioSubmitResult): RadioSubmitResult = when (backend) {
         Backend.AIDL -> aidl()
-        Backend.LEGACY -> if (legacy()) RadioSubmitResult.SUBMITTED else RadioSubmitResult.REJECTED
         Backend.DISABLED -> RadioSubmitResult.UNAVAILABLE
     }
 
@@ -24,15 +23,17 @@ internal object TargetRadioLaunch {
         if (backend == Backend.AIDL) overrides["persist.radio.multisim.config"] = ""
     }
 
-    fun service(root: File): GuestService {
+    fun service(root: File, lteData: Boolean = false): GuestService {
         check(File(root, JAR.removePrefix("/")).isFile) { "Radio service JAR missing: $JAR" }
-        return GuestService("aemu-radio", listOf("/system/bin/app_process", "-Djava.class.path=$JAR",
-            "/system/bin", "app.aemu.stub.RadioServiceMain", "--experimental-slot1"))
+        val args = listOf("/system/bin/app_process", "-Djava.class.path=$JAR",
+            "/system/bin", "app.aemu.stub.RadioServiceMain", "--experimental-slot1") +
+            if (lteData) listOf("--lte-data") else emptyList()
+        return GuestService("aemu-radio", args)
     }
 
-    fun service(root: File, socketName: String, hostPid: Int, hostUid: Int, epoch: Long): GuestService {
+    fun service(root: File, socketName: String, hostPid: Int, hostUid: Int, epoch: Long, lteData: Boolean = false): GuestService {
         require(socketName.matches(Regex("[A-Za-z0-9_.-]{1,80}")) && hostPid > 0 && hostUid >= 0 && epoch > 0)
-        val base = service(root)
+        val base = service(root, lteData)
         return base.copy(argv = base.argv + listOf("--event-socket", socketName, hostPid.toString(), hostUid.toString(), epoch.toString()))
     }
 

@@ -1,6 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- создано app/l10n/gen.py, правьте langs/*.py -->
 <resources>
+    <string name="battery_sync">电池状态跟随宿主</string>
+    <string name="battery_sync_sub">客体运行期间，同步手机的电量、充电状态和供电来源。</string>
+    <string name="battery_mode_host">跟随宿主</string>
+    <string name="battery_mode_custom">自定义</string>
+    <string name="battery_host_unavailable">无法读取宿主电池状态。</string>
+    <string name="battery_mode_save_failed">无法保存电池模式。</string>
+    <string name="battery_level">电量</string>
+    <string name="battery_power_source">电源状态</string>
+    <string name="battery_source_none">未充电</string>
+    <string name="battery_source_ac">交流电</string>
+    <string name="battery_source_usb">USB</string>
+    <string name="battery_source_wireless">无线</string>
+    <string name="battery_controls_hint">此处修改会立即生效；开启宿主同步后，后续宿主状态变化可能再次覆盖。</string>
+    <string name="sensor_bridge">传感器桥接</string>
+    <string name="sensor_bridge_toggle">开/关传感器</string>
+    <string name="sensor_bridge_on">传感器已开启</string>
+    <string name="sensor_bridge_off">传感器已关闭</string>
+    <string name="sensor_bridge_sub">打开客体画面时，将手机的运动传感器和定位传给客体。</string>
+    <string name="sensor_bridge_save_failed">无法保存传感器桥接设置。</string>
     <string name="channel_vm">正在运行的系统</string>
     <string name="vm_running">%1$s 正在运行</string>
     <string name="vm_running_hint">点按返回系统界面</string>
@@ -36,6 +55,14 @@
     <string name="vs_fixed_2x">Android 2.x 使用固定的 480×800、240 dpi 屏幕。</string>
     <string name="vs_screen_hint">屏幕越小，系统越快。</string>
     <string name="vs_screen_stock">原厂显示 · %1$d × %2$d · %3$d DPI</string>
+    <string name="vs_screen_host">本机显示 · %1$d × %2$d · %3$d DPI</string>
+    <string name="vs_screen_host_unavailable">无法读取本机显示信息。</string>
+    <string name="vs_screen_choose">选择分辨率</string>
+    <string name="vs_screen_scaled">%1$d%% · %2$d × %3$d · %4$d DPI</string>
+    <string name="nav_bar_toggle">显示/隐藏按键栏</string>
+    <string name="nav_bar_shown">按键栏已显示</string>
+    <string name="nav_bar_hidden">按键栏已隐藏</string>
+    <string name="nav_bar_save_failed">无法保存按键栏设置。</string>
     <string name="vs_perf">性能</string>
     <string name="vs_gpu">手机 GPU</string>
     <string name="vs_gpu_sub">通过 GL 桥实现硬件图形。画面异常时请关闭。</string>
@@ -51,7 +78,7 @@
     <string name="vs_proxy_sub">让旧浏览器和应用打开如今的 HTTPS 网站。</string>
     <string name="vs_controls">操作</string>
     <string name="vs_nav">Android 按键栏</string>
-    <string name="vs_nav_sub">屏幕下方的返回、主页、最近和菜单键。</string>
+    <string name="vs_nav_sub">屏幕下方的返回、主页和最近任务键。</string>
     <string name="vs_awake">保持屏幕常亮</string>
     <string name="vs_awake_sub">系统打开期间。</string>
     <string name="vs_vsync">VSync</string>
@@ -64,7 +91,7 @@
     <string name="vol_up">音量 +</string>
     <string name="vol_down">音量 −</string>
     <string name="power">电源键</string>
-    <string name="shutdown">关闭系统</string>
+    <string name="shutdown">关闭虚拟机</string>
     <string name="back">返回</string>
     <string name="home">主页</string>
     <string name="recents">最近</string>
@@ -113,6 +140,7 @@
     <string name="vs_ram">虚拟机内存</string>
     <string name="vs_ram_auto">自动</string>
     <string name="vs_disk">内部存储</string>
+    <string name="vs_disk_hint">设置客体显示的容量；可用空间仍受手机剩余空间限制。</string>
     <string name="vs_radio_title">Radio</string>
     <string name="vs_radio">Emulate radio module</string>
     <string name="vs_radio_sub">Telephony, IMEI and signal. Off: the firmware behaves like a Wi-Fi tablet</string>
@@ -120,14 +148,14 @@
     <string name="vs_advanced">Advanced</string>
     <string name="vs_qemu_args">Extra qemu options</string>
     <string name="vs_qemu_args_sub">Example: -d unimp DHD_TBFLUSH=2 (NAME=value becomes an environment variable)</string>
-    <string name="m_power_menu">Power menu</string>
+    <string name="m_power_menu">电源菜单</string>
     <string name="m_keyboard">显示/隐藏键盘</string>
-    <string name="m_paste">Paste text from clipboard</string>
-    <string name="m_sms">Fake SMS</string>
-    <string name="m_battery">Battery</string>
-    <string name="m_screenshot">Screenshot</string>
-    <string name="m_settings">Open Android settings</string>
-    <string name="m_reboot">Reboot</string>
+    <string name="m_paste">粘贴剪贴板文本</string>
+    <string name="m_sms">虚拟短信</string>
+    <string name="m_battery">电池</string>
+    <string name="m_screenshot">截屏</string>
+    <string name="m_settings">打开 Android 设置</string>
+    <string name="m_reboot">重启虚拟机</string>
     <string name="m_clip_empty">Clipboard is empty</string>
     <string name="m_screenshot_saved">Saved: %1$s</string>
     <string name="m_failed">Failed</string>
@@ -138,10 +166,10 @@
     <string name="m_sms_body">Message</string>
     <string name="m_sms_too_long">短信最多 70 个文字单位，表情可能占 2 个。</string>
     <string name="m_send">Send</string>
-    <string name="m_charging">Charging</string>
-    <string name="m_apply">Apply</string>
-    <string name="m_reset">Reset</string>
-    <string name="m_call">来电</string>
+    <string name="m_charging">充电中</string>
+    <string name="m_apply">应用</string>
+    <string name="m_reset">恢复</string>
+    <string name="m_call">虚拟来电</string>
     <string name="m_call_ring">呼叫</string>
     <string name="fw_folder_title">文件夹中的固件</string>
     <string name="fw_folder_import">导入</string>
@@ -153,6 +181,21 @@
     <string name="vs_recovery_install">安装…</string>
     <string name="vs_recovery_failed">不是 recovery 镜像</string>
     <string name="m_adb">网络 ADB</string>
+    <string name="m_network_mode">网络模式</string>
+    <string name="m_network_ethernet">以太网</string>
+    <string name="m_network_wifi">虚拟 Wi-Fi</string>
+    <string name="m_network_lte">虚拟 LTE</string>
+    <string name="m_network_mode_note">选择将在下次启动客体时使用。虚拟 LTE 通过现有宿主网络通道联网，不连接宿主真实蜂窝网络。</string>
+    <string name="m_network_mode_test_note">选择将在下次启动客体时使用。虚拟 Wi-Fi 或 LTE 可能降级为以太网。</string>
+    <string name="m_network_mode_saved">已保存，请重启客体以应用选择。</string>
+    <string name="m_network_mode_save_failed">无法保存网络模式。</string>
+    <string name="vs_network_mode_separate">在网络模式弹窗中确认后单独保存，下次启动客体时生效。</string>
+    <string name="vs_virtual_wifi">虚拟 Wi-Fi</string>
+    <string name="vs_virtual_wifi_pending">设置会保存到开放式虚拟热点配置；Wi-Fi 服务尚未启用。</string>
+    <string name="vs_virtual_wifi_ready">这里配置开放式虚拟热点，下次启动客体时生效。</string>
+    <string name="vs_virtual_wifi_ssid">热点名称</string>
+    <string name="vs_virtual_wifi_signal">信号：%1$d dBm</string>
+    <string name="vs_virtual_wifi_invalid">热点名称须为 1–32 个 UTF-8 字节。</string>
     <string name="m_adb_enable">启用</string>
     <string name="m_adb_hint">同一 Wi-Fi 网络中的任何人都能获得固件的 root shell。在公共网络上请关闭。</string>
     <string name="add_import">导入固件文件</string>
@@ -185,21 +228,6 @@
     <string name="m_device">设备状态</string>
     <string name="m_airplane">飞行模式</string>
     <string name="m_stay_awake">保持屏幕常亮</string>
-    <string name="as_updates">更新</string>
-    <string name="as_auto_updates">自动检查更新</string>
-    <string name="as_auto_updates_sub">启动时在 GitHub 上检查新版本</string>
-    <string name="as_check_updates">检查更新</string>
-    <string name="as_check_updates_sub">当前版本：%1$s</string>
-    <string name="update_available_title">有可用更新</string>
-    <string name="update_available_msg">新版本 %1$s 已发布。要更新吗？</string>
-    <string name="update_latest">已是最新版本（%1$s）</string>
-    <string name="update_checking">正在检查更新…</string>
-    <string name="update_btn">更新</string>
-    <string name="update_later">稍后</string>
-    <string name="update_downloading">正在下载更新…</string>
-    <string name="update_install">安装</string>
-    <string name="update_error">检查更新失败：%1$s</string>
-    <string name="update_open_github">在 GitHub 上查看</string>
     <string name="lib_title">固件库</string>
     <string name="lib_empty">还没有固件：导入一个固件文件来创建第一台机器。</string>
     <string name="new_machine">新机器</string>
@@ -239,4 +267,7 @@
     <string name="stop_failed">无法停止系统</string>
     <string name="import_interrupted">上次固件导入中断，请检查导入状态。</string>
     <string name="import_recovery_error">无法检查未完成的导入数据</string>
+    <string name="m_hud">性能悬浮窗</string>
+    <string name="instance_settings">实例设置</string>
+    <string name="about_title">关于</string>
 </resources>

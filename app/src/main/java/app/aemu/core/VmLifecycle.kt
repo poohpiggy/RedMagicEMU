@@ -2,6 +2,7 @@ package app.aemu.core
 
 /** Serializes boot, cancellation and process creation for one VM. */
 internal class VmLifecycle {
+    class StoppedException : IllegalStateException("VM is stopping or stopped")
     private val lock = java.lang.Object()
     private var active = false
     private var booting = false
@@ -29,13 +30,13 @@ internal class VmLifecycle {
     }
 
     fun <T> create(action: () -> T): T = synchronized(lock) {
-        check(active && !stopping) { "VM is stopping or stopped" }
+        if (!active || stopping) throw StoppedException()
         action()
     }
 
     fun <T> run(action: () -> T): T {
         synchronized(lock) {
-            check(active && !stopping) { "VM is stopping or stopped" }
+            if (!active || stopping) throw StoppedException()
             workers++
         }
         try { return action() } finally {

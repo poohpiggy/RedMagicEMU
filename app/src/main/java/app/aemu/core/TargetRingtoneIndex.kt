@@ -81,23 +81,28 @@ internal object TargetRingtoneIndex {
     fun ensureWithRetry(api: Int, model: String, abi: String, engine: Engine,
                         pause: (Long) -> Boolean, report: (String) -> Unit,
                         run: (String, Long) -> Pair<Int, String>): Result {
-        if (api != 36 || model != "NX809J" || abi != "arm64-v8a" || engine != Engine.N64)
-            return Result.NOT_APPLICABLE
-        repeat(3) { attempt ->
-            report("provider query attempt ${attempt + 1}")
-            val (path, category) = entries[0]
-            val (code, output) = run(queryCommand(path, category), QUERY_TIMEOUT_MS)
-            val lines = output.lineSequence().map(String::trim).toList()
-            val ready = code == 0 && !hasExplicitError(output) &&
-                lines.any { it == "Row: 0 _data=$path" || it == "No result found." }
-            if (ready) return ensure(api, model, abi, engine, report, run)
-            report("provider query not ready")
-            if (attempt < 2 && !pause(5_000L)) {
-                report("cancelled")
-                return Result.CANCELLED
+        return try {
+            if (api != 36 || model != "NX809J" || abi != "arm64-v8a" || engine != Engine.N64)
+                return Result.NOT_APPLICABLE
+            repeat(3) { attempt ->
+                report("provider query attempt ${attempt + 1}")
+                val (path, category) = entries[0]
+                val (code, output) = run(queryCommand(path, category), QUERY_TIMEOUT_MS)
+                val lines = output.lineSequence().map(String::trim).toList()
+                val ready = code == 0 && !hasExplicitError(output) &&
+                    lines.any { it == "Row: 0 _data=$path" || it == "No result found." }
+                if (ready) return ensure(api, model, abi, engine, report, run)
+                report("provider query not ready")
+                if (attempt < 2 && !pause(5_000L)) {
+                    report("cancelled")
+                    return Result.CANCELLED
+                }
             }
+            report("all attempts failed")
+            Result.FAILED
+        } catch (_: VmLifecycle.StoppedException) {
+            report("cancelled")
+            Result.CANCELLED
         }
-        report("all attempts failed")
-        return Result.FAILED
     }
 }

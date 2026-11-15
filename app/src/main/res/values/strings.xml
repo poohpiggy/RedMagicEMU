@@ -1,6 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- создано app/l10n/gen.py, правьте langs/*.py -->
 <resources>
+    <string name="battery_sync">Battery follows host</string>
+    <string name="battery_sync_sub">Mirror the phone’s level, charging state and power source while the guest runs.</string>
+    <string name="battery_mode_host">Follow host</string>
+    <string name="battery_mode_custom">Custom</string>
+    <string name="battery_host_unavailable">Host battery state is unavailable.</string>
+    <string name="battery_mode_save_failed">Could not save the battery mode.</string>
+    <string name="battery_level">Battery level</string>
+    <string name="battery_power_source">Power source</string>
+    <string name="battery_source_none">Off</string>
+    <string name="battery_source_ac">AC</string>
+    <string name="battery_source_usb">USB</string>
+    <string name="battery_source_wireless">Wireless</string>
+    <string name="battery_controls_hint">Changes here apply immediately. Host sync may update the guest again.</string>
+    <string name="sensor_bridge">Sensor bridge</string>
+    <string name="sensor_bridge_toggle">Toggle sensors</string>
+    <string name="sensor_bridge_on">Sensors enabled</string>
+    <string name="sensor_bridge_off">Sensors disabled</string>
+    <string name="sensor_bridge_sub">Send the phone’s motion sensors and location to the guest while its screen is visible.</string>
+    <string name="sensor_bridge_save_failed">Could not save the sensor bridge setting.</string>
     <string name="app_name" translatable="false">RedMagicEMU</string>
     <string name="channel_vm">Running system</string>
     <string name="vm_running">%1$s is running</string>
@@ -37,6 +56,14 @@
     <string name="vs_fixed_2x">Android 2.x uses a fixed 480×800 screen at 240 dpi.</string>
     <string name="vs_screen_hint">A smaller screen makes the system faster.</string>
     <string name="vs_screen_stock">Stock display · %1$d × %2$d · %3$d DPI</string>
+    <string name="vs_screen_host">This phone · %1$d × %2$d · %3$d DPI</string>
+    <string name="vs_screen_host_unavailable">Phone display information is unavailable.</string>
+    <string name="vs_screen_choose">Choose resolution</string>
+    <string name="vs_screen_scaled">%1$d%% · %2$d × %3$d · %4$d DPI</string>
+    <string name="nav_bar_toggle">Show/hide button bar</string>
+    <string name="nav_bar_shown">Button bar shown</string>
+    <string name="nav_bar_hidden">Button bar hidden</string>
+    <string name="nav_bar_save_failed">Could not save the button bar setting.</string>
     <string name="vs_perf">Performance</string>
     <string name="vs_gpu">Phone GPU</string>
     <string name="vs_gpu_sub">Hardware graphics through the GL bridge. Turn off if the picture breaks.</string>
@@ -55,7 +82,7 @@
     <string name="vs_proxy_sub">Lets old browsers and apps open today’s HTTPS sites.</string>
     <string name="vs_controls">Controls</string>
     <string name="vs_nav">Android button bar</string>
-    <string name="vs_nav_sub">Back, Home, Recents and Menu under the screen.</string>
+    <string name="vs_nav_sub">Back, Home and Recents under the screen.</string>
     <string name="vs_awake">Keep screen on</string>
     <string name="vs_awake_sub">While the system is open.</string>
     <string name="vs_vsync">VSync</string>
@@ -68,7 +95,7 @@
     <string name="vol_up">Volume +</string>
     <string name="vol_down">Volume −</string>
     <string name="power">Power button</string>
-    <string name="shutdown">Shut down system</string>
+    <string name="shutdown">Shut down virtual machine</string>
     <string name="back">Back</string>
     <string name="home">Home</string>
     <string name="recents">Recents</string>
@@ -126,11 +153,11 @@
     <string name="m_power_menu">Power menu</string>
     <string name="m_keyboard">Show/hide keyboard</string>
     <string name="m_paste">Paste text from clipboard</string>
-    <string name="m_sms">Fake SMS</string>
+    <string name="m_sms">Virtual SMS</string>
     <string name="m_battery">Battery</string>
     <string name="m_screenshot">Screenshot</string>
     <string name="m_settings">Open Android settings</string>
-    <string name="m_reboot">Reboot</string>
+    <string name="m_reboot">Restart virtual machine</string>
     <string name="m_clip_empty">Clipboard is empty</string>
     <string name="m_screenshot_saved">Saved: %1$s</string>
     <string name="m_failed">Failed</string>
@@ -144,7 +171,7 @@
     <string name="m_charging">Charging</string>
     <string name="m_apply">Apply</string>
     <string name="m_reset">Reset</string>
-    <string name="m_call">Fake incoming call</string>
+    <string name="m_call">Virtual incoming call</string>
     <string name="m_call_ring">Call</string>
     <string name="fw_folder_title">Firmware in the folder</string>
     <string name="fw_folder_import">Import</string>
@@ -156,6 +183,21 @@
     <string name="vs_recovery_install">Install…</string>
     <string name="vs_recovery_failed">Not a recovery image</string>
     <string name="m_adb">ADB over network</string>
+    <string name="m_network_mode">Network mode</string>
+    <string name="m_network_ethernet">Ethernet</string>
+    <string name="m_network_wifi">Virtual Wi-Fi</string>
+    <string name="m_network_lte">Virtual LTE</string>
+    <string name="m_network_mode_note">This choice is used on the next guest boot. Virtual LTE uses the existing host network channel; it does not connect to the host cellular network.</string>
+    <string name="m_network_mode_test_note">This choice is used on the next guest boot. Virtual Wi-Fi or LTE may fall back to Ethernet.</string>
+    <string name="m_network_mode_saved">Saved. Restart the guest to apply the choice.</string>
+    <string name="m_network_mode_save_failed">Could not save the network mode.</string>
+    <string name="vs_network_mode_separate">Confirm in the network dialog to save separately; used on the next guest boot.</string>
+    <string name="vs_virtual_wifi">Virtual Wi-Fi</string>
+    <string name="vs_virtual_wifi_pending">Settings are saved for the open virtual access point. The Wi-Fi service is not enabled yet.</string>
+    <string name="vs_virtual_wifi_ready">These settings configure the open virtual access point and take effect on the next guest boot.</string>
+    <string name="vs_virtual_wifi_ssid">Access point name</string>
+    <string name="vs_virtual_wifi_signal">Signal: %1$d dBm</string>
+    <string name="vs_virtual_wifi_invalid">Enter an access point name of 1–32 UTF-8 bytes.</string>
     <string name="m_terminal">Terminal</string>
     <string name="m_adb_enable">Enable</string>
     <string name="m_adb_hint">Anyone on this Wi-Fi network gets a root shell of the firmware. Switch it off on public networks.</string>
@@ -183,21 +225,6 @@
     <string name="m_device">Device state</string>
     <string name="m_airplane">Airplane mode</string>
     <string name="m_stay_awake">Keep screen on</string>
-    <string name="as_updates">Updates</string>
-    <string name="as_auto_updates">Auto-check for updates</string>
-    <string name="as_auto_updates_sub">Check GitHub for new releases on app startup</string>
-    <string name="as_check_updates">Check for updates</string>
-    <string name="as_check_updates_sub">Current version: %1$s</string>
-    <string name="update_available_title">Update Available</string>
-    <string name="update_available_msg">A new version %1$s is available. Would you like to update?</string>
-    <string name="update_latest">You have the latest version (%1$s)</string>
-    <string name="update_checking">Checking for updates…</string>
-    <string name="update_btn">Update</string>
-    <string name="update_later">Later</string>
-    <string name="update_downloading">Downloading update…</string>
-    <string name="update_install">Install</string>
-    <string name="update_error">Failed to check for updates: %1$s</string>
-    <string name="update_open_github">View on GitHub</string>
     <string name="lib_title">Firmware library</string>
     <string name="lib_empty">No firmware yet: import a firmware file to create the first machine.</string>
     <string name="new_machine">New machine</string>
@@ -236,6 +263,7 @@
     <string name="m_apps">Firmware apps</string>
     <string name="m_apps_none">No app to launch</string>
     <string name="vs_disk">Internal storage</string>
+    <string name="vs_disk_hint">Sets the capacity reported to the guest; available space depends on the phone.</string>
     <string name="m_apps_search">Search apps</string>
     <string name="powered_off">Guest powered off</string>
     <string name="sort_by">Sort: %1$s</string>
@@ -283,4 +311,6 @@
     <string name="stop_failed">Could not stop the system</string>
     <string name="import_interrupted">The previous firmware import was interrupted. Please check the import status.</string>
     <string name="import_recovery_error">Could not check unfinished import data</string>
+    <string name="instance_settings">Instance settings</string>
+    <string name="about_title">About</string>
 </resources>

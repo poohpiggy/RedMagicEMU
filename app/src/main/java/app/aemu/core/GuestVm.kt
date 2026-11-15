@@ -174,22 +174,27 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             if (TreeFixer.isMtkAudio(paths.root)) "dev/aemu_pcm" else "dev/eac")
     }
     val audio by audioDelegate
-    val ril = RilStub(paths, ::log, img.settings.imei.ifBlank { VmSettings.DEFAULT_IMEI }, img.api)
     @Volatile private var activeRadioBackend = TargetRadioLaunch.Backend.DISABLED
+    @Volatile private var lteDataSelected = false
     @Volatile private var radioEvents: RadioHostChannel? = null
+    @Volatile private var wifiDnsChannel: WifiDnsHostChannel? = null
+    @Volatile private var wifiDnsNetworks: TargetHostNetworks? = null
+    @Volatile private var wifiDnsNotifier: WifiDnsAvailabilityNotifier? = null
+    @Volatile private var wifiDnsRestartPolicy: TargetDnsRestartPolicy? = null
+    private val wifiDnsLock = Any()
+    private val wifiDnsStartGate = TargetDnsStartGate()
+    private val wifiDnsRetirement = TargetDnsRetirementGuard()
 
     internal fun radioEventGeneration(): Long? = lifecycle.currentGeneration()
 
     internal fun sendVirtualSms(from: String, body: String, generation: Long): RadioSubmitResult =
         lifecycle.runForGeneration(generation) {
-            TargetRadioLaunch.routeEvent(activeRadioBackend, { radioEvents?.sms(from, body) ?: RadioSubmitResult.UNAVAILABLE },
-                { ril.sms(from, body) })
+            TargetRadioLaunch.routeEvent(activeRadioBackend) { radioEvents?.sms(from, body) ?: RadioSubmitResult.UNAVAILABLE }
         }
 
     internal fun ringVirtualCall(from: String, generation: Long): RadioSubmitResult =
         lifecycle.runForGeneration(generation) {
-            TargetRadioLaunch.routeEvent(activeRadioBackend, { radioEvents?.call(from) ?: RadioSubmitResult.UNAVAILABLE },
-                { ril.ring(from.trim()) })
+            TargetRadioLaunch.routeEvent(activeRadioBackend) { radioEvents?.call(from) ?: RadioSubmitResult.UNAVAILABLE }
         }
     // 2.x-3.x: wifi.c / dhcp_utils.c era; 4.0+ talks to p2p_supplicant and netd differently (not emulated yet)
     val wifi = if (img.api in 5..13) WifiStub(paths, img.api, props, "8.8.8.8" to "1.1.1.1", ::log) else null
@@ -202,13 +207,14 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     val lights = Lights(paths.root, ::log)
     /** the phone's accelerometer and vibration motor for the guest */
     // Only the admitted target firmware is supported; Guest API metadata is not a trust boundary.
-    val sensors = Sensors(ctx, paths.root, legacyVibration = false, log = ::log)
+    val sensors = Sensors(ctx, paths.root, legacyVibration = false, log = ::log,
+        targetProtocol = img.api == 36 && img.model == "NX809J" && img.abi == "arm64-v8a" && engine == Engine.N64,
+        initialBridgeEnabled = settings.accelerometerBridge)
+    val location = HostLocationBridge(ctx, paths.root, ::log, settings.accelerometerBridge)
     /** the phone's microphone for the guest (audio HAL input → /dev/aemu_mic) */
     val mic = AudioIn(ctx, paths.root, ::log)
     /** the phone's cameras for the guest (camera HAL → /dev/socket/aemu_cam) */
     val camera = CameraFeed(ctx, paths, img.api, ::log)
-    /** the phone's video encoder for the guest's OMX encoder (native/omxvenc → /dev/socket/aemu_venc) */
-    val venc = VideoEncoderFeed(paths, ::log)
     /** hardware overlays of 2.x (overlay HAL → /dev/socket/aemu_ovl), drawn over the screen */
     val overlays = OverlayFeed(paths, ::log)
     @Volatile private var lmk: GuestLmk? = null
@@ -254,6 +260,9 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                     }
                 } catch (t: Throwable) {
                     activeRadioBackend = TargetRadioLaunch.Backend.DISABLED
+                    wifiDnsRestartPolicy?.stop()
+                    wifiDnsRestartPolicy = null
+                    try { closeWifiDns() } catch (cleanup: Throwable) { t.addSuppressed(cleanup) }
                     closeDirectVibration()?.let { t.addSuppressed(it) }
                     closeExperimentalVibration()?.let { t.addSuppressed(it) }
                     closeRadioChannelForStop(radioEvents) { radioEvents = null }?.let { cleanup ->
@@ -420,6 +429,9 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         // 2. свойства
         val s = settings
         val radioBackend = TargetRadioLaunch.select(img.api, img.model, img.abi, engine, s.radio)
+        if (radioBackend == TargetRadioLaunch.Backend.AIDL) {
+            TargetVirtualImei.expose(paths.root, TargetVirtualImei.ensure(paths.dir, s.imei))
+        }
         val eventChannel = lifecycle.create {
             val channel = if (radioBackend == TargetRadioLaunch.Backend.AIDL) RadioHostChannel.prepare() else null
             radioEvents = channel
@@ -427,7 +439,13 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             channel
         }
         val aidlRadio = if (eventChannel != null) TargetRadioLaunch.service(paths.root, eventChannel.socketName,
-            AProcess.myPid(), AProcess.myUid(), eventChannel.epoch) else null
+            AProcess.myPid(), AProcess.myUid(), eventChannel.epoch, lteData = fixer.ltePrepared) else null
+        val targetLte = fixer.ltePrepared && aidlRadio != null
+        lteDataSelected = targetLte
+        if (fixer.ltePrepared && !targetLte) {
+            TargetNetworkGate.prepare(paths.root, virtualWifi = fixer.wifiPrepared)
+            log("lte: radio event channel unavailable; Ethernet retained")
+        }
         val overrides = LinkedHashMap<String, String>()
         // 2.3: ro.kernel.qemu=1 включает в фреймворке режим эмулятора — ставим его только mediaserver
         overrides["ro.kernel.qemu"] = if (engine == Engine.GB) "0" else "1"
@@ -669,7 +687,16 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                 overrides["ro.vendor.build.fingerprint"] = fp; overrides["ro.bootimage.build.fingerprint"] = fp
             }
         }
-        if (!props.prepare(overrides, later, if (engine == Engine.N64) kernel.propAreaSize else PropArea.SIZE)) error("property area not ready")
+        val projectSelection = if (engine == Engine.N64) when (val project = TargetCarrierProperties.load(paths.root, img.api, img.model, img.abi)) {
+            is TargetCarrierProperties.Result.Loaded -> {
+                log(if (project.fallback) "carrier: default project selected" else "carrier: project selected")
+                project
+            }
+            is TargetCarrierProperties.Result.Invalid -> error("carrier: ${project.reason}")
+            TargetCarrierProperties.Result.MissingImage -> { log("carrier: no ztecfg; project properties not loaded"); null }
+            TargetCarrierProperties.Result.NotTarget -> null
+        } else null
+        if (!props.prepare(overrides, later, if (engine == Engine.N64) kernel.propAreaSize else PropArea.SIZE, projectSelection?.properties ?: emptyMap())) error("property area not ready")
         if (img.api == 36 && img.model == "NX809J") {
             checkNotNull(props.area).applyTargetBootProperties()
         }
@@ -679,7 +706,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         props.onCtl = { start, svc -> onCtl(start, svc) }
 
         // 3. службы хоста
-        props.serve()
+        val propertyServiceReady = props.serve()
         if (img.api < 3) props.serveAbstract()
         input.rateHz = s.touchHz
         input.mtMode = if (img.api < 5) 4 else s.mtMode
@@ -687,8 +714,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         input.serve()
         frames.serve()
         when (radioBackend) {
-            TargetRadioLaunch.Backend.LEGACY -> ril.serve()
-            TargetRadioLaunch.Backend.DISABLED -> log("radio: emulation disabled in settings")
+            TargetRadioLaunch.Backend.DISABLED -> log("radio: emulation not active")
             TargetRadioLaunch.Backend.AIDL -> log("radio: target AIDL service selected")
         }
         vold.serve()
@@ -722,9 +748,9 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         events.start()
         lights.start()
         sensors.start()
+        location.start()
         mic.start()
         camera.start()
-        venc.start()
         overlays.start()
         if (img.api >= 21) logd.start()
         if (img.api >= 14) runCatching { dns.ensure() }
@@ -772,6 +798,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
 
         // 11+: the linker takes its library namespaces (which APEX module gives which library to whom) from
         // /linkerconfig, written at every boot by the firmware's own generator; init runs it before any service
+        var linkerConfigReady = false
         if (engine == Engine.N64 && File(paths.root, kernel.linkerConfigTool).isFile) runCatching {
             apexInfoList()
             File(paths.root, "linkerconfig").mkdirs()
@@ -780,6 +807,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             val own = if (kernel.trebleLinkerConfig) props.privateCopy("linkerconfig", mapOf("ro.treble.enabled" to "true")) else null
             val (code, out) = r.run(listOf("/" + kernel.linkerConfigTool, "--target", "/linkerconfig"), 30_000,
                 if (own != null) mapOf("AEMU64_PROPS_FILE" to own.absolutePath) else emptyMap())
+            linkerConfigReady = code == 0 && File(paths.root, "linkerconfig/ld.config.txt").isFile
             if (code != 0 || !File(paths.root, "linkerconfig/ld.config.txt").isFile) log("linkerconfig: exit $code ${out.trim().let { if (it.length > 700) it.take(400) + " ... " + it.takeLast(300) else it }}")
         }
 
@@ -792,8 +820,22 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             else r.derivedExports = out.readLines().mapNotNull { l -> l.trim().split(' ', limit = 3).takeIf { it.size == 3 && it[0] == "export" }?.let { it[1] to it[2] } }.toMap()
         }
 
+        // NX809J's load_persist_props_action starts this once before framework services.
+        if (engine == Engine.N64 && img.api == 36 && img.model == "NX809J" &&
+            File(paths.root, "dev/block/by-name/ztecfg").exists()) {
+            if (TargetVariantId.eligible(paths.root, img.api, img.model, img.abi, propertyServiceReady, linkerConfigReady))
+                log(TargetVariantId.run { argv -> r.runBounded(argv, 10_000) })
+            else log("variantid: skipped because prerequisites are not met; configuration and theme not verified")
+        }
+        projectSelection?.let { TargetCarrierProperties.requireVariantMatches(it.variant, props.get("persist.vendor.custom.variant.id")) }
+
         // 5. службы гостя по плану из init.rc прошивки
         val plan = servicePlan()
+        val targetWifi = TargetWifiLaunch.select(fixer.wifiPrepared, img.api, img.model, img.abi, engine,
+            File(paths.root, "system/framework/redmagic-wifi-net.jar").isFile,
+            File(paths.root, "system/framework/redmagic-wifi.jar").isFile,
+            File(paths.root, "data/system/aemu-wifi.properties").isFile)
+        if (targetWifi) wifiDnsRestartPolicy = TargetDnsRestartPolicy()
         if (aidlRadio != null) TargetRadioLaunch.requireServiceOrder(plan)
         val managedVibrationBinder = synchronized(procs) { procs["binderd"] } as? ManagedGuestProcess
         val directControl = if (directVibrationEnabled) runCatching { HostVibrationDevice.fromContext(ctx) }.getOrNull() else null
@@ -850,15 +892,26 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             // package manager requires)
             if (svc.name == "surfaceflinger" && engine == Engine.N64 && kernel.binderVold && File(paths.root, "system/framework/aemu-stubs.jar").isFile) {
                 killOurs(synchronized(procs) { procs.remove("aemu-vold") })
-                startService(GuestService("aemu-vold", listOf("/system/bin/app_process",
-                    "-Djava.class.path=/system/framework/aemu-stubs.jar", "/system/bin", "app.aemu.stub.VoldStub") + (if (kernel.volumeAtUserStart) listOf("userstart") else emptyList()), optional = true))
+                val voldArgs = TargetVoldArtifacts.launch(fixer.voldPrepared, kernel.volumeAtUserStart)
+                startService(GuestService("aemu-vold", listOf("/system/bin/app_process", voldArgs.first(),
+                    "/system/bin", "app.aemu.stub.VoldStub") + voldArgs.drop(1), optional = true))
             }
             // 5.0–7.x: a registered network (by the firmware's API: open32 runs 2.3–4.4 on kernel 23, where NetworkAgent
             // does not exist and the stub died 137/139), otherwise ConnectivityService says "no active network" and browsers stay offline
             if (svc.name == "zygote" && img.api >= 21 && (if (engine == Engine.N64) kernel.registeredNetwork else img.api in 21..25) && engine != Engine.GB && File(paths.root, "system/framework/aemu-stubs.jar").isFile) {
-                killOurs(synchronized(procs) { procs.remove("aemu-net") })
-                startService(GuestService("aemu-net", listOf("/system/bin/app_process",
-                    "-Djava.class.path=/system/framework/aemu-stubs.jar", "/system/bin", "app.aemu.stub.NetStub") + (if (Kernel64.forApi(img.api).ethernetStandIn) listOf("ethernet") else emptyList()), optional = true))
+                if (!targetLte) {
+                    killOurs(synchronized(procs) { procs.remove("aemu-net") })
+                    startService(TargetWifiLaunch.networkService(targetWifi, Kernel64.forApi(img.api).ethernetStandIn))
+                    if (targetWifi) {
+                        killOurs(synchronized(procs) { procs.remove("redmagic-wifi") })
+                        startService(TargetWifiLaunch.wifiService())
+                        if (HostNative.available) startWifiDnsVerifier()
+                        else log("wifi-dns: native authentication unavailable; raw DNS unavailable")
+                    }
+                } else {
+                    // Telephony creates the CELLULAR default network from RadioDataService's response.
+                    log("lte: virtual cellular data selected; Ethernet placeholder disabled")
+                }
             }
             if (svc.name == "zygote" && engine == Engine.N64 && kernel.apexStandIn && File(paths.root, "system/framework/aemu-stubs.jar").isFile) {
                 apexStandInList()
@@ -873,6 +926,16 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                 killOurs(synchronized(procs) { procs.remove("aemu-standin") })
                 if (names.isNotEmpty()) startService(GuestService("aemu-standin", listOf("/system/bin/app_process",
                     "-Djava.class.path=/system/framework/aemu-stubs.jar", "/system/bin", "app.aemu.stub.StandIn") + names, optional = true))
+            }
+            // The NX809J service publishes only its network location provider, while the stock
+            // compass requires "gps" during Activity startup. The stub waits for system_server.
+            if (svc.name == "zygote" && img.api == 36 && img.model == "NX809J" &&
+                    img.abi == "arm64-v8a" && engine == Engine.N64 &&
+                    File(paths.root, "system/framework/aemu-stubs.jar").isFile) {
+                killOurs(synchronized(procs) { procs.remove("aemu-location") })
+                startService(GuestService("aemu-location", listOf("/system/bin/app_process",
+                    "-Djava.class.path=/system/framework/aemu-stubs.jar", "/system/bin",
+                    "app.aemu.stub.LocationStub"), optional = true))
             }
             startService(svc)
             if (directPending && svc.name == "servicemanager") {
@@ -1105,6 +1168,127 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         }
     }
 
+    private fun retireWifiDns(channel: WifiDnsHostChannel, after: () -> Unit = {}): Boolean {
+        val resources = synchronized(wifiDnsLock) {
+            if (wifiDnsChannel !== channel) return false
+            wifiDnsRetirement.begin()
+            wifiDnsChannel = null
+            val resolver = dns.targetRawResolver.also { dns.targetRawResolver = null }
+            val networks = wifiDnsNetworks.also { wifiDnsNetworks = null }
+            val notifier = wifiDnsNotifier.also { wifiDnsNotifier = null }
+            Triple(resolver, networks, notifier)
+        }
+        finishDnsRetirement({
+            try {
+                RadioHostChannel.closeAll({ resources.first?.close() }, { resources.second?.close() },
+                    { channel.close() }, { resources.third?.close() })
+            } catch (failure: Throwable) {
+                wifiDnsRetirement.failed(failure)
+                throw failure
+            }
+            wifiDnsRetirement.complete()
+        }, after)
+        return true
+    }
+
+    private fun closeWifiDns() {
+        val channel = synchronized(wifiDnsLock) { wifiDnsChannel }
+        if (channel != null) retireWifiDns(channel)
+        wifiDnsRetirement.requireComplete()
+    }
+
+    private fun startWifiDnsVerifier() {
+        if (stopping || wifiDnsRestartPolicy == null) return
+        val decision = synchronized(wifiDnsLock) {
+            if (!wifiDnsRetirement.canStart()) null else wifiDnsStartGate.begin(wifiDnsChannel != null)
+        }
+        when (decision) {
+            null -> { log("wifi-dns: previous session cleanup unconfirmed; restart withheld"); return }
+            TargetDnsStartGate.Decision.ACTIVE -> return
+            TargetDnsStartGate.Decision.BUSY -> { scheduleWifiDnsRetry(0); return }
+            TargetDnsStartGate.Decision.START -> Unit
+        }
+        try { startWifiDnsVerifierReserved() } finally { wifiDnsStartGate.end() }
+    }
+
+    private fun startWifiDnsVerifierReserved() {
+        val channel = try { WifiDnsHostChannel.prepare() } catch (failure: Exception) {
+            log("wifi-dns: channel unavailable (${failure.javaClass.simpleName})")
+            scheduleWifiDnsRetry(0)
+            return
+        }
+        var createdNetworks: TargetHostNetworks? = null
+        var createdNotifier: WifiDnsAvailabilityNotifier? = null
+        try {
+            val connectivity = ctx.getSystemService(android.net.ConnectivityManager::class.java)
+                ?: throw IllegalStateException("Host connectivity unavailable")
+            val lease=WifiDnsLeaseClient(channel) {
+                // A sent request timed out: the verifier may be stuck in Binder while still alive.
+                // Terminate only the process belonging to this channel so its watcher restarts it.
+                val process = synchronized(wifiDnsLock) {
+                    if (wifiDnsChannel !== channel) null
+                    else synchronized(procs) { procs["redmagic-wifi-dns"] }
+                }
+                process?.let {
+                    log("wifi-dns: retiring verifier after uncertain exchange")
+                    it.destroyForcibly()
+                }
+            }
+            val notifier=WifiDnsAvailabilityNotifier(1000, lease::report)
+            createdNotifier=notifier
+            val networks = TargetHostNetworks(connectivity, notifier::update)
+            createdNetworks = networks
+            synchronized(wifiDnsLock) {
+                check(!stopping && wifiDnsChannel == null) { "Wi-Fi DNS already running or stopping" }
+                wifiDnsChannel = channel
+                wifiDnsNetworks = networks
+                wifiDnsNotifier = notifier
+                dns.targetRawResolver = TargetDnsResolver(networks, lease) { network, packet, flags ->
+                    HostRawDns.query(network as android.net.Network, packet, flags)
+                }
+            }
+            val service = TargetWifiLaunch.dnsVerifier(channel.socketName, AProcess.myPid(), AProcess.myUid(), channel.epoch)
+            val previous = synchronized(procs) { procs[service.name] }
+            startService(service)
+            val current = synchronized(procs) { procs[service.name] }
+            check(dnsVerifierWasStarted(previous, current)) { "Wi-Fi DNS verifier did not start" }
+        } catch (failure: Exception) {
+            log("wifi-dns: verifier start failed (${failure.javaClass.simpleName})")
+            try {
+                val retry = { scheduleWifiDnsRetry(0) }
+                if (!retireWifiDns(channel, retry)) {
+                    wifiDnsRetirement.begin()
+                    finishDnsRetirement({
+                        try { RadioHostChannel.closeAll({ createdNetworks?.close() }, { channel.close() }, { createdNotifier?.close() }) }
+                        catch (cleanup: Throwable) { wifiDnsRetirement.failed(cleanup); throw cleanup }
+                        wifiDnsRetirement.complete()
+                    }, retry)
+                }
+            } catch (cleanup: Exception) {
+                failure.addSuppressed(cleanup)
+                log("wifi-dns: failed startup cleanup (${cleanup.javaClass.simpleName})")
+            }
+        }
+    }
+
+    private fun scheduleWifiDnsRetry(runtimeMs: Long) {
+        val policy=wifiDnsRestartPolicy ?: return
+        val generation=lifecycle.currentGeneration() ?: return
+        val delay=policy.afterExit(runtimeMs) ?: return
+        try {
+            lifecycle.launch("wifi-dns-restart") {
+                if (policy.awaitRetry(delay)) try {
+                    lifecycle.runForGeneration(generation) {
+                        if (wifiDnsRestartPolicy === policy && !stopping) startWifiDnsVerifier()
+                    }
+                } catch (_: IllegalStateException) { /* VM stopped or session changed; no restart */ }
+            }
+        } catch (failure: Throwable) {
+            policy.cancelRetry()
+            throw failure
+        }
+    }
+
     private fun spawnExperimentalVibration(name: String, argv: List<String>, propsFile: File?, extra: Map<String, String>) = lifecycle.ifRunning {
         synchronized(vibrationLock) { if (vibrationChannel != null) return@ifRunning }
         val channel = try { HostVibrationChannel.prepare(ctx) } catch (failure: Throwable) {
@@ -1210,8 +1394,9 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             pb.redirectInput(File("/dev/null")).redirectOutput(ProcessBuilder.Redirect.appendTo(log))
         }
         val processChannel = if (name == "aemu-radio") radioEvents else null
+        val dnsProcessChannel = dnsChannelForSpawn(name, wifiDnsChannel)
         val p = if (vibration != null) guestLauncher.startLimitedVibrationExperiment(pb, paths.root)
-            else guestLauncher.start(pb, requireAuthenticated = processChannel != null)
+            else guestLauncher.start(pb, requireAuthenticated = processChannel != null || dnsProcessChannel != null)
         try {
         trackGuestProcess(name, p)
         vibration?.let { channel ->
@@ -1251,6 +1436,29 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                 }
             }, "radio-event-attach").apply { isDaemon = true; start() }
         }
+        dnsProcessChannel?.let { channel ->
+            val dnsStarted=SystemClock.elapsedRealtime()
+            Thread({
+                try { p.waitFor() } finally {
+                    try {
+                        retireWifiDns(channel) {
+                            if (!stopping) scheduleWifiDnsRetry((SystemClock.elapsedRealtime()-dnsStarted).coerceAtLeast(0))
+                        }
+                    } catch (failure: Exception) {
+                        log("wifi-dns: verifier cleanup failed (${failure.javaClass.simpleName})")
+                    }
+                }
+            }, "wifi-dns-exit").apply { isDaemon = true; start() }
+            Thread({
+                var attached = false
+                try { attached = channel.attach(p) } finally {
+                    if (!attached) {
+                        log("wifi-dns: verifier authentication failed")
+                        runCatching { p.destroyForcibly() }
+                    }
+                }
+            }, "wifi-dns-attach").apply { isDaemon = true; start() }
+        }
         log("· $name started")
         // init publishes every service's state; the framework waits on it (SystemService.waitForState: the WebView
         // zygote, the boot animation)
@@ -1278,7 +1486,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             synchronized(procs) { if (procs[name].let { it == null || it === p }) props.put("init.svc.$name", "stopped") }
         }, "log-$name").apply { isDaemon = true; start() }
         } catch (failure: Throwable) {
-            if (vibration != null) runCatching { p.destroyForcibly() }
+            if (vibration != null || dnsProcessChannel != null) runCatching { p.destroyForcibly() }
             throw failure
         }
     }
@@ -1508,8 +1716,8 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         disableBrokenComponents()
         if (stopping) return
         if (img.api >= 24) runCatching { enableHome() }.onFailure { log("home screen check failed: $it") }
-        val img2 =img.copy(lastBootMs = bootDoneAt - bootAt, bootCount = img.bootCount + 1)
-        ImageStore.save(ctx, img2)
+        val elapsed = bootDoneAt - bootAt
+        ImageStore.update(ctx, img.id) { current -> GuestBootMetadata.apply(current, elapsed) }
     }
 
     private fun initializeFirstRingtones(runner: GuestRunner) {
@@ -1650,7 +1858,17 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                 for (name in dead) {
                     if (stopping) break
                     val p = synchronized(procs) { procs[name] } ?: continue
+                    if (name == "redmagic-wifi-dns") {
+                        removeDeadDnsVerifier(procs, p) { it.isAlive }
+                        continue
+                    }
                     val code = runCatching { p.exitValue() }.getOrDefault(-1)
+                    if (name == "aemu-radio" && lteDataSelected) {
+                        lteDataSelected = false
+                        runCatching { TargetNetworkGate.setClosed(paths.root) }
+                            .onFailure { log("lte: could not close network gate after radio exit: ${it.message}") }
+                        log("lte: radio service exited; network gate closed")
+                    }
                     if (name == "zygote" || name == "zygote_secondary") {
                         if (state != State.FAILED && bootDoneAt == 0L && !(everBooted && zygoteRestarts < 6)) {
                             failure = "$name exited (code $code)" + if (code == 137) " — killed: the phone ran out of memory, or system_server died and took zygote with it (see the guest log)" else ""
@@ -1878,9 +2096,14 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     fun stop() {
         var radioCleanupFailure: Exception? = null
         var vibrationCleanupFailure: Exception? = null
+        var dnsCleanupFailure: Throwable? = null
         lifecycle.stop(onRequest = {
             stopping = true
             setState(State.STOPPING)
+            wifiDnsRestartPolicy?.stop()
+            wifiDnsRestartPolicy=null
+            dnsCleanupFailure = captureDnsStopFailure { closeWifiDns() }
+            dnsCleanupFailure?.let { log("wifi-dns: cleanup unconfirmed: ${it.javaClass.simpleName}") }
             closeRadioChannelForStop(radioEvents) { radioEvents = null }?.let { failure ->
                 radioCleanupFailure = failure
                 log("radio: event channel cleanup failed: ${failure.javaClass.simpleName}")
@@ -1903,10 +2126,15 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                 log("stopping system")
                 runCatching { guestRunner.run(listOf("/system/bin/sync"), 5_000, start = ::startCleanupSync) }
                 killAll()
-                props.stop(); props.stopAbstract();input.stop(); frames.stop(); ril.stop(); wifi?.stop(); vold.stop(); if (audioDelegate.isInitialized()) audio.stop(); net.stop(); dns.stop(); events.stop(); logd.stop(); lights.stop(); sensors.stop(); mic.stop(); camera.stop(); venc.stop(); overlays.stop(); GlHost.stop()
+                props.stop(); props.stopAbstract();input.stop(); frames.stop(); wifi?.stop(); vold.stop(); if (audioDelegate.isInitialized()) audio.stop(); net.stop(); dns.stop(); events.stop(); logd.stop(); lights.stop(); sensors.stop(); location.stop(); mic.stop(); camera.stop(); overlays.stop(); GlHost.stop()
                 extraStubs.forEach { it.stop() }; extraStubs.clear()
                 lmk?.stop(); lmk = null
                 Keeper.release(ctx)
+            }
+            dnsCleanupFailure?.let { failure ->
+                radioCleanupFailure?.let { if (it !== failure) failure.addSuppressed(it) }
+                vibrationCleanupFailure?.let { if (it !== failure) failure.addSuppressed(it) }
+                throw failure
             }
             radioCleanupFailure?.let { throw it }
             vibrationCleanupFailure?.let { throw it }

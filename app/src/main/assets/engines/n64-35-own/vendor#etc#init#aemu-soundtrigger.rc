@@ -1,5 +1,0 @@
-service vendor.aemu-soundtrigger /vendor/bin/hw/aemu-soundtrigger
-    class hal
-    user audioserver
-    group audio
-    interface android.hardware.soundtrigger@2.3::ISoundTriggerHw default

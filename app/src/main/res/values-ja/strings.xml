@@ -46,7 +46,7 @@
     <string name="vs_proxy_sub">古いブラウザーやアプリで現在の HTTPS サイトを開けます。</string>
     <string name="vs_controls">操作</string>
     <string name="vs_nav">Android ボタンバー</string>
-    <string name="vs_nav_sub">画面下に戻る・ホーム・履歴・メニュー。</string>
+    <string name="vs_nav_sub">画面下に戻る・ホーム・履歴。</string>
     <string name="vs_awake">画面をオンのままにする</string>
     <string name="vs_awake_sub">システムを開いている間。</string>
     <string name="vs_vsync">VSync</string>
@@ -59,7 +59,7 @@
     <string name="vol_up">音量 +</string>
     <string name="vol_down">音量 −</string>
     <string name="power">電源ボタン</string>
-    <string name="shutdown">システムをシャットダウン</string>
+    <string name="shutdown">仮想マシンを終了</string>
     <string name="back">戻る</string>
     <string name="home">ホーム</string>
     <string name="recents">履歴</string>
@@ -113,14 +113,14 @@
     <string name="vs_advanced">Advanced</string>
     <string name="vs_qemu_args">Extra qemu options</string>
     <string name="vs_qemu_args_sub">Example: -d unimp DHD_TBFLUSH=2 (NAME=value becomes an environment variable)</string>
-    <string name="m_power_menu">Power menu</string>
+    <string name="m_power_menu">電源メニュー</string>
     <string name="m_keyboard">キーボードの表示/非表示</string>
-    <string name="m_paste">Paste text from clipboard</string>
-    <string name="m_sms">Fake SMS</string>
-    <string name="m_battery">Battery</string>
-    <string name="m_screenshot">Screenshot</string>
-    <string name="m_settings">Open Android settings</string>
-    <string name="m_reboot">Reboot</string>
+    <string name="m_paste">クリップボードからテキストを貼り付け</string>
+    <string name="m_sms">仮想SMS</string>
+    <string name="m_battery">バッテリー</string>
+    <string name="m_screenshot">スクリーンショット</string>
+    <string name="m_settings">Android 設定を開く</string>
+    <string name="m_reboot">仮想マシンを再起動</string>
     <string name="m_clip_empty">Clipboard is empty</string>
     <string name="m_screenshot_saved">Saved: %1$s</string>
     <string name="m_failed">Failed</string>
@@ -131,7 +131,7 @@
     <string name="m_charging">Charging</string>
     <string name="m_apply">Apply</string>
     <string name="m_reset">Reset</string>
-    <string name="m_call">着信</string>
+    <string name="m_call">仮想着信</string>
     <string name="m_call_ring">発信</string>
     <string name="fw_folder_title">フォルダー内のファームウェア</string>
     <string name="fw_folder_import">インポート</string>
@@ -175,21 +175,6 @@
     <string name="m_device">端末の状態</string>
     <string name="m_airplane">機内モード</string>
     <string name="m_stay_awake">画面をオンのままにする</string>
-    <string name="as_updates">アップデート</string>
-    <string name="as_auto_updates">アップデートを自動確認</string>
-    <string name="as_auto_updates_sub">起動時に GitHub で新しいバージョンを確認</string>
-    <string name="as_check_updates">アップデートを確認</string>
-    <string name="as_check_updates_sub">現在のバージョン：%1$s</string>
-    <string name="update_available_title">アップデートがあります</string>
-    <string name="update_available_msg">新しいバージョン %1$s があります。更新しますか？</string>
-    <string name="update_latest">最新バージョンです（%1$s）</string>
-    <string name="update_checking">アップデートを確認中…</string>
-    <string name="update_btn">更新</string>
-    <string name="update_later">後で</string>
-    <string name="update_downloading">アップデートをダウンロード中…</string>
-    <string name="update_install">インストール</string>
-    <string name="update_error">アップデートを確認できませんでした：%1$s</string>
-    <string name="update_open_github">GitHub で見る</string>
     <string name="lib_title">ファームウェアライブラリ</string>
     <string name="lib_empty">ファームウェアがまだありません。ファームウェアファイルをインポートして最初のマシンを作成してください。</string>
     <string name="new_machine">新しいマシン</string>
@@ -212,4 +197,9 @@
     <string name="m_vnc">VNC サーバーを開始</string>
     <string name="m_vnc_stop">VNC サーバーを停止</string>
     <string name="m_vnc_started">VNC：%1$s、パスワード %2$s</string>
+    <string name="m_hud">パフォーマンス表示</string>
+    <string name="m_network_mode">ネットワークモード</string>
+    <string name="vs_disk_hint">ゲストに表示する容量を設定します。使用可能な空き容量は端末に依存します。</string>
+    <string name="instance_settings">インスタンス設定</string>
+    <string name="about_title">アプリについて</string>
 </resources>

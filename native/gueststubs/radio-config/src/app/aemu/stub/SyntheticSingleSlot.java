@@ -14,6 +14,7 @@ class SyntheticSingleSlot {
     static final String TEST_ICCID = SyntheticSimProfile.TEST_ICCID;
     static final String TEST_ATR = SyntheticSimProfile.TEST_ATR;
     private static final int CARD_PRESENT = 1; // android.hardware.radio.sim.CardStatus.STATE_PRESENT
+    private final boolean dataInternet;
     private boolean connected = true;
     private boolean radioOn;
     private long deliveryGeneration = 1;
@@ -24,9 +25,12 @@ class SyntheticSingleSlot {
     }
     private final List<Listener> listeners = new ArrayList<>();
     private final List<Runnable> deliveryListeners = new ArrayList<>();
-    SyntheticSingleSlot() {}
+    private final List<Runnable> radioStateListeners = new ArrayList<>();
+    SyntheticSingleSlot() { this(false); }
+    SyntheticSingleSlot(boolean dataInternet) { this.dataInternet = dataInternet; }
 
     static SyntheticSingleSlot forTests() { return new SyntheticSingleSlot(); }
+    static SyntheticSingleSlot forTests(boolean dataInternet) { return new SyntheticSingleSlot(dataInternet); }
     SyntheticSimProfile simProfile() { return simProfile; }
 
     synchronized boolean isConnected() { return connected; }
@@ -60,6 +64,7 @@ class SyntheticSingleSlot {
             radioOn = on;
             if (changed) invalidateDelivery();
             notify = changed && !on ? new ArrayList<>(deliveryListeners) : new ArrayList<>();
+            if (changed) notify.addAll(radioStateListeners);
         }
         // Listeners must never run under the shared state lock.
         RuntimeException failure = null;
@@ -73,6 +78,13 @@ class SyntheticSingleSlot {
         if (failure != null) throw failure;
         return changed;
     }
+
+    synchronized void addRadioStateListener(Runnable listener) {
+        if (listener == null) throw new IllegalArgumentException("listener is required");
+        radioStateListeners.add(listener);
+    }
+
+    synchronized void removeRadioStateListener(Runnable listener) { radioStateListeners.remove(listener); }
 
     synchronized void addDeliveryListener(Runnable listener) {
         if (listener == null) throw new IllegalArgumentException("listener is required");
@@ -98,6 +110,7 @@ class SyntheticSingleSlot {
             invalidateDelivery();
             pending = new ArrayList<>(listeners);
             deliveryPending = new ArrayList<>(deliveryListeners);
+            deliveryPending.addAll(radioStateListeners);
         }
         Throwable failure = null;
         for (Runnable listener : deliveryPending) {
@@ -148,9 +161,8 @@ class SyntheticSingleSlot {
         PhoneCapability capability = new PhoneCapability();
         capability.logicalModemIds = new byte[]{0};
         capability.maxActiveVoice = 1;
-        // The isolated voice/SMS test model has no data or Internet bearer.
-        capability.maxActiveData = 0;
-        capability.maxActiveInternetData = 0;
+        capability.maxActiveData = dataInternet ? (byte) 1 : (byte) 0;
+        capability.maxActiveInternetData = dataInternet ? (byte) 1 : (byte) 0;
         capability.isInternetLingeringSupported = false;
         return capability;
     }

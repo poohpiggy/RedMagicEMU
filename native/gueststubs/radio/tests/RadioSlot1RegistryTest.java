@@ -77,11 +77,11 @@ public final class RadioSlot1RegistryTest {
         catch(InvocationTargetException expected) { check(expected.getCause() instanceof IllegalArgumentException,"wrong duplicate error"); }
         Class<?> entry=Class.forName("app.aemu.stub.RadioServiceMain");
         Method create;
-        try { create=entry.getDeclaredMethod("createServiceGroup",SyntheticSingleSlot.class); }
+        try { create=entry.getDeclaredMethod("createServiceGroup",SyntheticSingleSlot.class,String.class); }
         catch (NoSuchMethodException missing) { throw new AssertionError("formal shared service group missing",missing); }
         create.setAccessible(true);
         SyntheticSingleSlot model=SyntheticSingleSlot.forTests();
-        Object group=create.invoke(null,model);
+        Object group=create.invoke(null,model,"490154203237518");
         java.lang.reflect.Field servicesField=group.getClass().getDeclaredField("services"); servicesField.setAccessible(true);
         java.lang.reflect.Field endpointField=group.getClass().getDeclaredField("endpoint"); endpointField.setAccessible(true);
         IBinder[] actual=(IBinder[])servicesField.get(group);
