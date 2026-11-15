@@ -9,7 +9,7 @@ Das Projekt zielt auf die originale REDMAGIC-NX809J-Firmware mit Android 16 / AP
 Das Android-Projekt benötigt Android SDK 36 und NDK r28. Für den Build der Ausgangsbasis wurde JDK 21 verwendet:
 
 ```shell
-./gradlew :app:assembleStandardDebug
+./gradlew :app:assembleDebug
 ```
 
 Für die lokale Entwicklung wird die Anwendungs-ID `app.redmagicemu` verwendet. Android installiert die Anwendung getrennt von der Upstream-App; private Daten werden nicht automatisch migriert. Die alte App und ihre Daten sollten erhalten bleiben, bis ein Migrationsverfahren überprüft wurde.

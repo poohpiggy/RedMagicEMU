@@ -9,7 +9,7 @@ RedMagicEMU एक अनौपचारिक, स्वतंत्र रू�
 Android परियोजना के लिए Android SDK 36 और NDK r28 आवश्यक हैं। बेसलाइन बिल्ड में JDK 21 का उपयोग हुआ था:
 
 ```shell
-./gradlew :app:assembleStandardDebug
+./gradlew :app:assembleDebug
 ```
 
 स्थानीय विकास में एप्लिकेशन ID `app.redmagicemu` है। Android इसे अपस्ट्रीम ऐप से अलग स्थापित करता है; निजी डेटा अपने आप स्थानांतरित नहीं होता। स्थानांतरण की विधि सत्यापित होने तक पुराना ऐप और उसका डेटा सुरक्षित रखें।

@@ -9,7 +9,7 @@ O projeto tem como guest o firmware original REDMAGIC NX809J Android 16 / API 36
 O projeto Android requer Android SDK 36 e NDK r28. A compilação de referência usou JDK 21:
 
 ```shell
-./gradlew :app:assembleStandardDebug
+./gradlew :app:assembleDebug
 ```
 
 O desenvolvimento local usa o application ID `app.redmagicemu`. É uma instalação Android separada do aplicativo upstream: seus dados privados não são migrados automaticamente. Mantenha o aplicativo antigo e seus dados até que um método de migração seja verificado.

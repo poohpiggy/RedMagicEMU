@@ -9,7 +9,7 @@ Dự án nhắm tới firmware gốc REDMAGIC NX809J Android 16 / API 36 / ARM64
 Dự án Android cần Android SDK 36 và NDK r28. Bản dựng cơ sở sử dụng JDK 21:
 
 ```shell
-./gradlew :app:assembleStandardDebug
+./gradlew :app:assembleDebug
 ```
 
 Môi trường phát triển cục bộ dùng ID ứng dụng `app.redmagicemu`. Android cài ứng dụng này riêng với ứng dụng gốc: dữ liệu riêng tư không tự động được chuyển. Hãy giữ ứng dụng cũ và dữ liệu cho đến khi có phương pháp chuyển dữ liệu đã được kiểm chứng.

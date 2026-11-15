@@ -9,7 +9,7 @@ RedMagicEMU 是基于 [AEmulator](https://github.com/uxazu/AEmulator) 独立维�
 Android 项目需要 Android SDK 36 和 NDK r28。基线构建使用 JDK 21：
 
 ```shell
-./gradlew :app:assembleStandardDebug
+./gradlew :app:assembleDebug
 ```
 
 本地开发使用应用 ID `app.redmagicemu`。Android 将其视为独立于上游应用的安装，私有数据不会自动迁移。在迁移方法经过验证之前，请保留旧应用及其数据。

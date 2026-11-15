@@ -21,7 +21,7 @@ The project targets the original REDMAGIC NX809J Android 16 / API 36 / ARM64 fir
 The Android project requires Android SDK 36 and NDK r28. The baseline build used JDK 21:
 
 ```shell
-./gradlew :app:assembleStandardDebug
+./gradlew :app:assembleDebug
 ```
 
 Local development uses application ID `app.redmagicemu`. It is a separate Android installation from the upstream app: its private data is not migrated automatically. Keep the old app and its data until a migration method has been verified.

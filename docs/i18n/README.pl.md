@@ -9,7 +9,7 @@ Projekt jest przeznaczony dla oryginalnego firmware REDMAGIC NX809J Android 16 /
 Projekt Android wymaga Android SDK 36 i NDK r28. W kompilacji bazowej użyto JDK 21:
 
 ```shell
-./gradlew :app:assembleStandardDebug
+./gradlew :app:assembleDebug
 ```
 
 W lokalnym środowisku programistycznym używany jest application ID `app.redmagicemu`. To instalacja Androida oddzielna od aplikacji źródłowej: prywatne dane nie są migrowane automatycznie. Zachowaj starą aplikację i jej dane do czasu zweryfikowania metody migracji.

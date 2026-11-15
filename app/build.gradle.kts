@@ -50,6 +50,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
+        applicationId = "app.redmagicemu"
         minSdk = 26
         // 28: гостевые бинарники запускаются из каталога данных приложения (W^X для targetSdk>=29)
         //noinspection ExpiredTargetSdkVersion
@@ -57,23 +58,6 @@ android {
         versionCode = 8
         versionName = "0.5.0-beta"
         ndk { abiFilters += listOf("arm64-v8a") }
-    }
-
-    flavorDimensions += "distribution"
-    productFlavors {
-        create("standard") {
-            dimension = "distribution"
-            applicationId = "app.redmagicemu"
-        }
-        create("clone") {
-            dimension = "distribution"
-            applicationId = "app.redmagicemu.clone"
-        }
-        // a copy of this release that installs next to app.redmagicemu (a package name part cannot start with a digit)
-        create("v0003") {
-            dimension = "distribution"
-            applicationId = "app.redmagicemu.v0003"
-        }
     }
 
     signingConfigs {
@@ -143,17 +127,13 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
 }
 
-// sh: ./gradlew :app:copyReleaseApks -> release-apks/<version>/app.redmagicemu.apk and app.redmagicemu.0003.apk
+// sh: ./gradlew :app:copyReleaseApks -> release-apks/<version>/app.redmagicemu.apk
 tasks.register<Copy>("copyReleaseApks") {
-    dependsOn("assembleStandardRelease", "assembleV0003Release")
+    dependsOn("assembleRelease")
     val v = android.defaultConfig.versionName
-    from(layout.buildDirectory.dir("outputs/apk/standard/release")) {
+    from(layout.buildDirectory.dir("outputs/apk/release")) {
         include("*.apk")
         rename { "app.redmagicemu.apk" }
-    }
-    from(layout.buildDirectory.dir("outputs/apk/v0003/release")) {
-        include("*.apk")
-        rename { "app.redmagicemu.0003.apk" }
     }
     into(rootProject.layout.projectDirectory.dir("release-apks/$v"))
 }

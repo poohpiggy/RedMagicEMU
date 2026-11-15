@@ -1191,7 +1191,7 @@
 
 - 需求：在已验收的 0.5.0 基础上完成实例电池同步与运行时控制、传感器和 GPS 桥接、虚拟 Wi-Fi 断网修复、zygote 稳定性、虚拟 LTE，并回归相机；LTE 相关功能放在最后推进。
 - 实现：实例设置提供“跟随宿主/自定义”电池控制及宿主电池广播实时刷新；Guest 浮动菜单提供同一运行态控制。传感器桥接同时覆盖加速度计、陀螺仪、磁力计和宿主位置。虚拟 Wi-Fi 增加网络闸门，LTE 增加 synthetic Radio 数据链路，相机相关图形/HAL 资产恢复到已验收版本。
-- 验证：WSL 完整 `:app:testStandardDebugUnitTest :app:assembleStandardDebug` 多次通过，最近记录为 712 项、0 失败、0 错误、3 跳过；实机已覆盖电池插拔刷新、指南针、传感器、虚拟 Wi-Fi 关闭断网、虚拟 LTE 数据链路与前后摄恢复。各 APK 的 SHA-256、证书和覆盖安装结果见后续小节。
+- 验证：发行配置已收敛为单一 `app.redmagicemu`；WSL 干净克隆执行 `:app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :app:copyReleaseApks`，717 项、0 失败、0 错误、3 跳过，Debug、Release 与发布 APK 复制均成功。实机已覆盖电池插拔刷新、指南针、传感器、虚拟 Wi-Fi 关闭断网、虚拟 LTE 数据链路与前后摄恢复。
 - 限制与回滚：GPS 仍来自宿主最后已知位置；LTE 为 synthetic Radio，不代表真实蜂窝或 IMS；相机另有浏览器 API、断连恢复及其他宿主边界。各模块的限制和最小回滚范围见对应小节及[兼容矩阵](COMPATIBILITY.md)。
 
 #### 0.6.0 宿主电池同步与 Guest 运行时控制（2026-11-15）
@@ -1282,3 +1282,10 @@
 - 随后对当前 0.6.0 包与已验收的 0.5.0 包做逐条审计：128 个非引擎 APK 路径名称与内容一致；205 个引擎路径集合一致；仅有 8 个引擎条目和 2 个 arm64 JNI 条目变化。其中 6 项是本轮预期的 stubs、传感器、Radio、Wi-Fi 和网络闸门 API 36 引擎，另外 4 项为回退到旧版本的相机相关文件：宿主 `libaemugl.so`、Guest `libGLES_aemu.so`、system/vendor 两份 camera HAL。未发现其他已验收修复丢失。
 - 已从 `RedMagicEMU-0.5.0-beta-delete-stub-clean.apk` 原样恢复上述 4 个文件：`libaemugl.so` SHA-256 `990c361f73fe9760a2644d7a139a3e4fe2377f22a054298f87883656b3332533`，Guest GLES blob `db987d74570f64213a7076bb3ae3b83a30c37d30`，两份 camera HAL blob `1c2e48bc07a08d5367c5efdf5456d3b42d6cbfbe`。恢复前文件备份在系统临时目录 `rme-camera-060-before-merge-dc353e4734df43a2865855e946baa3aa`。重构建后与已验收 0.5.0 相比只剩 5 个预期引擎变化和预期的 API 36 网络闸门引擎变化。
 - 可覆盖安装包为 `app/build/outputs/apk/standard/debug/app-standard-debug-camera-restored-signed.apk`，SHA-256 `d77b1661929b79a49528a8c33116c793664d6122e69afe4c3e29a6b0670d19b4`；v2/v3 与 16 KB 对齐通过并已覆盖安装。Guest 冷启动后实际打开后摄和前摄，日志各记录连续约 29 帧和宿主亮度变化；前后摄实机回归通过。
+
+#### 单一发行变体与仓库干净构建验证（2026-11-15）
+
+- 发行配置收敛为单一 `app.redmagicemu`，删除 `standard`、`clone` 和 `v0003` flavor 层；仅保留 Debug/Release 构建类型。当前任务为 `:app:testDebugUnitTest`、`:app:assembleDebug`、`:app:assembleRelease` 和 `:app:copyReleaseApks`，不会再生成 clone 或 v0003 APK。
+- 删除仓库内硬编码的本机 `org.gradle.java.home`，构建改用环境中的 JDK 21。OMX Manifest 测试改为校验 XML 可解析且不含不可用 OMX 声明，不再绑定受 Git 换行转换影响的文件摘要。
+- 从 GitHub `main` 的干净克隆使用 WSL Linux 文件系统、OpenJDK 21.0.2、Android SDK 36 和 Build Tools 35.0.0 执行 `clean :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :app:copyReleaseApks --rerun-tasks`：95 个任务全部执行，717 项测试、0 失败、0 错误、3 跳过，构建成功。
+- 输出仅包含单一应用的 `app-debug.apk`、`app-release-unsigned.apk` 以及 `release-apks/0.5.0-beta/app.redmagicemu.apk`；没有 clone 或 v0003 产物。构建仍有 SDK XML 版本、`extractNativeLibs`、Kotlin 可空/弃用 API 和预编译库无法 strip 的既有警告，但均未阻断编译。

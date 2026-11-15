@@ -27,7 +27,7 @@
 #define OPEN_TREE_CLOEXEC O_CLOEXEC
 #endif
 
-static const char clone_files[] = "/data/user/0/app.redmagicemu.clone/files";
+static const char target_files[] = "/data/user/0/app.redmagicemu/files";
 
 static void print_file(const char *label, const char *path) {
     FILE *f = fopen(path, "re");
@@ -107,7 +107,7 @@ static void single_unshare_probe(int flag) {
 static void files_tree_probe(void) {
     alarm(5);
     /* Clone is never attached, and close discards the detached mount. */
-    int tree = (int)syscall(__NR_open_tree, AT_FDCWD, clone_files, OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC);
+    int tree = (int)syscall(__NR_open_tree, AT_FDCWD, target_files, OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC);
     if (tree < 0) { printf("files_open_tree_clone failed errno=%d\n", errno); fflush(stdout); _exit(1); }
     close(tree);
     puts("files_open_tree_clone ok");
@@ -116,16 +116,16 @@ static void files_tree_probe(void) {
 }
 
 static void print_fd_reopen(void) {
-    int fd = open(clone_files, O_PATH | O_DIRECTORY | O_CLOEXEC);
-    if (fd < 0) { printf("clone_files_open failed errno=%d\n", errno); return; }
+    int fd = open(target_files, O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) { printf("target_files_open failed errno=%d\n", errno); return; }
     char path[64];
     snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
     int reopened = open(path, O_PATH | O_DIRECTORY | O_CLOEXEC);
-    if (reopened < 0) printf("clone_files_fd_reopen failed errno=%d\n", errno);
+    if (reopened < 0) printf("target_files_fd_reopen failed errno=%d\n", errno);
     else {
         struct stat original, copy;
-        if (fstat(fd, &original) || fstat(reopened, &copy)) printf("clone_files_fd_stat failed errno=%d\n", errno);
-        else printf("clone_files_fd_reopen same=%d\n", original.st_dev == copy.st_dev && original.st_ino == copy.st_ino);
+        if (fstat(fd, &original) || fstat(reopened, &copy)) printf("target_files_fd_stat failed errno=%d\n", errno);
+        else printf("target_files_fd_reopen same=%d\n", original.st_dev == copy.st_dev && original.st_ino == copy.st_ino);
         close(reopened);
     }
     close(fd);
@@ -161,9 +161,9 @@ int main(void) {
     if (mounts < 0) printf("mountinfo unavailable errno=%d\n", errno);
     else { puts("mountinfo readable"); close(mounts); }
     struct statvfs fs;
-    if (statvfs(clone_files, &fs))
-        printf("clone_files_statvfs failed errno=%d\n", errno);
-    else printf("clone_files_nodev=%d\n", !!(fs.f_flag & ST_NODEV));
+    if (statvfs(target_files, &fs))
+        printf("target_files_statvfs failed errno=%d\n", errno);
+    else printf("target_files_nodev=%d\n", !!(fs.f_flag & ST_NODEV));
     print_fd_reopen();
     int failed = 0;
     failed |= run_probe("combined", 0);

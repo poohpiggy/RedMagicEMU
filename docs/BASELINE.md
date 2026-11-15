@@ -2,6 +2,8 @@
 
 记录时间：2026-11-04。来源为 https://github.com/uxazu/AEmulator，取得时 HEAD：`c3e94275a83dbab0bdc0d7dca75c2431c27fe1f9`；阶段分支 `s0-baseline-audit`。初始工作树干净。本次新建 checkout 无法恢复已删除项目及其历史。
 
+2026-11-15 后续版本已移除 `standard`、`clone` 和 `v0003` product flavor，只保留单一 `app.redmagicemu`。当前构建命令为 `./gradlew :app:assembleDebug`；下文保留的是移除 flavor 之前的基线记录。
+
 ## 代码入口
 
 - `app/src/main/AndroidManifest.xml`：`MainActivity` 的启动、VIEW 和 BOOT 入口；`VmActivity`、`Keeper` 在 `:vm` 进程。

@@ -9,7 +9,7 @@ Proje, konuk sistem olarak orijinal REDMAGIC NX809J Android 16 / API 36 / ARM64 
 Android projesi Android SDK 36 ve NDK r28 gerektirir. Temel derlemede JDK 21 kullanılmıştır:
 
 ```shell
-./gradlew :app:assembleStandardDebug
+./gradlew :app:assembleDebug
 ```
 
 Yerel geliştirmede `app.redmagicemu` uygulama kimliği kullanılır. Android bunu kaynak uygulamadan ayrı yükler; özel veriler otomatik olarak taşınmaz. Taşıma yöntemi doğrulanana kadar eski uygulamayı ve verilerini koruyun.

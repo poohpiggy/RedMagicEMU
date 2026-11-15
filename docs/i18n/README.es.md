@@ -9,7 +9,7 @@ El proyecto tiene como objetivo usar como sistema invitado el firmware original 
 El proyecto Android requiere Android SDK 36 y NDK r28. Para la compilación de referencia se utilizó JDK 21:
 
 ```shell
-./gradlew :app:assembleStandardDebug
+./gradlew :app:assembleDebug
 ```
 
 El desarrollo local usa el identificador de aplicación `app.redmagicemu`. Android la instala por separado de la aplicación original y sus datos privados no se migran automáticamente. Conserva la aplicación anterior y sus datos hasta que se haya verificado un método de migración.

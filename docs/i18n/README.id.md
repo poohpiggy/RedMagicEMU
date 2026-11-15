@@ -9,7 +9,7 @@ Proyek ini menargetkan firmware asli REDMAGIC NX809J Android 16 / API 36 / ARM64
 Proyek Android memerlukan Android SDK 36 dan NDK r28. Build baseline menggunakan JDK 21:
 
 ```shell
-./gradlew :app:assembleStandardDebug
+./gradlew :app:assembleDebug
 ```
 
 Pengembangan lokal menggunakan application ID `app.redmagicemu`. Instalasi Android ini terpisah dari aplikasi upstream: data privat tidak dimigrasikan otomatis. Simpan aplikasi lama dan datanya sampai metode migrasi terverifikasi.

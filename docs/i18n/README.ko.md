@@ -9,7 +9,7 @@ RedMagicEMU는 [AEmulator](https://github.com/uxazu/AEmulator)를 기반으로 �
 Android 프로젝트에는 Android SDK 36과 NDK r28이 필요합니다. 기준 빌드에는 JDK 21을 사용했습니다.
 
 ```shell
-./gradlew :app:assembleStandardDebug
+./gradlew :app:assembleDebug
 ```
 
 로컬 개발에는 application ID `app.redmagicemu`를 사용합니다. 업스트림 앱과 별도의 Android 설치이므로 비공개 데이터는 자동으로 이전되지 않습니다. 이전 방법이 검증될 때까지 기존 앱과 데이터를 보관하세요.

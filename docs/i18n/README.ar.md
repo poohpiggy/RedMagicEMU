@@ -9,7 +9,7 @@ RedMagicEMU مشروع مستقل غير رسمي يستند إلى [AEmulator](
 يتطلب مشروع Android الإصدار 36 من Android SDK وNDK r28. استُخدم JDK 21 في بناء خط الأساس:
 
 ```shell
-./gradlew :app:assembleStandardDebug
+./gradlew :app:assembleDebug
 ```
 
 يستخدم التطوير المحلي معرّف التطبيق `app.redmagicemu`. يُثبّت كتطبيق Android مستقل عن التطبيق الأصلي، ولا تُنقل بياناته الخاصة تلقائيًا. احتفظ بالتطبيق القديم وبياناته إلى أن تُتحقق طريقة للترحيل.
