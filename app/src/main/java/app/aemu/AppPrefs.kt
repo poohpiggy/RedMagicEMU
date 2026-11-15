@@ -12,7 +12,8 @@ object AppPrefs {
     /** Языки интерфейса: код BCP-47 → самоназвание. Пустой код — как в системе. */
     val LANGUAGES = listOf(
         "" to "",
-        "en" to "English",
+        "en-US" to "English (United States)",
+        "en-GB" to "English (United Kingdom)",
         "ru" to "Русский",
         "uk" to "Українська",
         "de" to "Deutsch",
@@ -28,6 +29,8 @@ object AppPrefs {
         "id" to "Bahasa Indonesia",
         "vi" to "Tiếng Việt",
         "zh-CN" to "简体中文",
+        "zh-TW" to "繁體中文",
+        "zh-HK" to "繁體中文（香港）",
         "ja" to "日本語",
         "ko" to "한국어",
     )
@@ -52,8 +55,10 @@ object AppPrefs {
     fun lastRun(ctx: Context, id: String): Long = sp(ctx).getLong("last_run_$id", 0L)
     fun setLastRun(ctx: Context, id: String, v: Long) = sp(ctx).edit().putLong("last_run_$id", v).apply()
 
-    fun language(ctx: Context): String = sp(ctx).getString("lang", "") ?: ""
-    fun setLanguage(ctx: Context, tag: String) = sp(ctx).edit().putString("lang", tag).apply()
+    private fun normalizeLanguageTag(tag: String): String = if (tag == "en") "en-US" else tag
+
+    fun language(ctx: Context): String = normalizeLanguageTag(sp(ctx).getString("lang", "") ?: "")
+    fun setLanguage(ctx: Context, tag: String) = sp(ctx).edit().putString("lang", normalizeLanguageTag(tag)).apply()
 
     fun theme(ctx: Context): Int = sp(ctx).getInt("theme", THEME_SYSTEM)
     fun setTheme(ctx: Context, v: Int) = sp(ctx).edit().putInt("theme", v).apply()
