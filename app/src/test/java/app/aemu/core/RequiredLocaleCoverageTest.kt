@@ -53,6 +53,7 @@ class RequiredLocaleCoverageTest {
             .map { locales.getElementsByTagName("locale").item(it) as Element }
             .map { it.getAttribute("android:name") }
             .toSet()
-        assertEquals(emptySet<String>(), required.keys - configured)
+        assertEquals(required.keys, configured)
+        assertEquals(setOf("") + required.keys, AppPrefs.LANGUAGES.map { it.first }.toSet())
     }
 }

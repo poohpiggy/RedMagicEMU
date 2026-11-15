@@ -1293,5 +1293,5 @@
 #### 必需语言完整覆盖（2026-11-15）
 
 - 界面语言新增 `en-US`、`en-GB`、`zh-TW` 和 `zh-HK`；语言选择器、Android locale config 与旧 `en` 偏好的 `en-US` 迁移已接通。简体中文补齐 42 条缺失资源，繁体台湾和繁体香港各生成完整 311 条资源，并分别采用台湾与香港地区常用词。
-- `app/l10n/keys.py` 已扩展到当前 311 条 key。`gen.py` 改为合并现有 XML 与旧语言模块，避免重新生成时删除后续新增字符串；`--check` 强制校验通用英文、en-US、en-GB、zh-CN、zh-TW 和 zh-HK 的 key、空值及占位符完整性。
-- `RequiredLocaleCoverageTest` 同时校验五种对外语言、语言选择器和 locale config。WSL 完整 `:app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --rerun-tasks` 通过：718 项测试、0 失败、0 错误、3 跳过。其他 16 个可选 locale 仍保留现有部分翻译并允许英文回退，不纳入本轮完整覆盖承诺。
+- `app/l10n/keys.py` 已扩展到当前 311 条 key。`gen.py` 改为直接以现有 XML 为翻译源，删除不再使用的旧 `langs/*.py`；`--check` 强制校验通用英文、en-US、en-GB、zh-CN、zh-TW 和 zh-HK 的 key、空值及占位符完整性。
+- `RequiredLocaleCoverageTest` 同时校验五种对外语言、语言选择器和 locale config。WSL 完整 `:app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --rerun-tasks` 通过：718 项测试、0 失败、0 错误、3 跳过。其他 16 个可选 locale 及对应资源目录已删除；通用英文只作为缺省回退。

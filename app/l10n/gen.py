@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """Generates res/values*/strings.xml and res/xml/locales_config.xml.
 
-Existing XML is the source of truth for translations that predate the Python
-language modules. Modules are overlaid when present, which keeps legacy locale
-files intact while allowing new locales to be maintained directly in XML.
+Existing XML is the translation source of truth. This keeps the runtime files
+and the generator aligned without hidden translation overlays.
 
 Run: python app/l10n/gen.py
 Check only: python app/l10n/gen.py --check
 """
 import os
 import re
-import runpy
 import sys
 import xml.etree.ElementTree as ET
 
@@ -23,47 +21,16 @@ DIRS = {
     "en": "values",
     "en-US": "values-en-rUS",
     "en-GB": "values-en-rGB",
-    "ru": "values-ru",
-    "uk": "values-uk",
-    "de": "values-de",
-    "fr": "values-fr",
-    "es": "values-es",
-    "pt-BR": "values-pt-rBR",
-    "it": "values-it",
-    "pl": "values-pl",
-    "tr": "values-tr",
-    "ar": "values-ar",
-    "fa": "values-fa",
-    "hi": "values-hi",
-    "id": "values-in",
-    "vi": "values-vi",
     "zh-CN": "values-zh-rCN",
     "zh-TW": "values-zh-rTW",
     "zh-HK": "values-zh-rHK",
-    "ja": "values-ja",
-    "ko": "values-ko",
 }
 REQUIRED = {"en", "en-US", "en-GB", "zh-CN", "zh-TW", "zh-HK"}
 PLACEHOLDER = re.compile(r"%(?:\d+\$)?[sd]|%%")
 
 
-def android_escape(s: str) -> str:
-    s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    s = s.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"').replace("\n", "\\n")
-    if s.startswith("@") or s.startswith("?"):
-        s = "\\" + s
-    return s
-
-
 def xml_escape(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def load_module(code):
-    path = os.path.join(HERE, "langs", code + ".py")
-    if not os.path.isfile(path):
-        return {}
-    return {key: android_escape(value) for key, value in runpy.run_path(path)["S"].items()}
 
 
 def load_existing(directory):
@@ -81,16 +48,12 @@ def main():
     check_only = "--check" in sys.argv[1:]
     translations = {}
     base = load_existing("values")
-    partial = []
     for code, directory in DIRS.items():
         s = load_existing(directory)
-        s.update(load_module(code))
         lack = [k for k in KEYS if k not in s]
         extra = [k for k in s if k not in KEYS]
         if code in REQUIRED and (lack or extra):
             print(f"{code}: missing={lack} extra={extra}")
-        elif code not in REQUIRED and lack:
-            partial.append(code)
         if code in REQUIRED:
             assert not lack, f"{code}: missing keys {lack}"
             for key in KEYS:
@@ -100,7 +63,7 @@ def main():
         translations[code] = s
 
     if check_only:
-        print(f"ok: {len(REQUIRED)} complete languages, {len(KEYS)} strings; partial: {', '.join(partial) or 'none'}")
+        print(f"ok: {len(REQUIRED)} complete languages, {len(KEYS)} strings")
         return
 
     for code, directory in DIRS.items():
