@@ -15,7 +15,7 @@
 
 上游 README 指定 JDK 17、Android SDK 36、NDK r28；`gradle/wrapper/gradle-wrapper.properties` 指定 Gradle 8.14.2，根构建脚本指定 Android Gradle Plugin 8.13.2、Kotlin 2.2.21。`app/build.gradle.kts` 设置 compileSdk 36、Java/Kotlin 目标 17、arm64-v8a；`gradle.properties` 指向本机不存在的 Android Studio JBR 路径。`native/*/build.sh` 单独构建原生部分，不能假定 APK 构建会重建所有原生产物。
 
-本机 PATH 的 Java/Javac 为 25.0.4，另发现 JDK 18 和 21；未设置常见 Android SDK/NDK 环境变量，常见 SDK 路径不存在，不能据此证明其他位置无安装。
+本机 PATH 的 Java/Javac 为 25.0.4，另发现 JDK 18 和 21；当时的 Android SDK/NDK 环境变量为空，常见 SDK 路径不存在。
 
 实际执行：
 
@@ -40,7 +40,7 @@ PowerShell 中设置 `$env:JAVA_HOME='C:\Program Files\Java\jdk-21.0.10'` 和 `$
 
 仓库已跟踪四份历史 `hs_err` JVM 崩溃日志及一份 replay 日志，前者记录历史原生内存分配失败及本地环境信息；它们不是 Guest 启动日志，无法说明当前构建失败或 Guest 根因。忽略规则不影响已跟踪文件，须注意现有历史资料的隐私风险；本轮未删除或改写它们。
 
-2026-11-04 审阅历史导出日志。日志说明它来自过去修改过的 AE 版本，不能视为当前 checkout 的实测；原文件保留在下载目录，不纳入仓库。日志标签显示 NX809J、Android 16/API 36 和 ARM64 引擎，但标签不能证明固件的唯一身份。
+2026-11-04 审阅历史导出日志。日志说明它来自过去修改过的 AE 版本，不能视为当前 checkout 的实测；原文件保留在下载目录，不纳入仓库。日志标签为 NX809J、Android 16/API 36 和 ARM64。固件身份以对应样本为准。
 
 - 可观察事实：Guest main 日志记录 health 服务进入 charger mode；宿主记录 ztecharger 启动后出现 `guest requested power off (unplug)`。日志还记录一些 vendor 服务退出或 HAL 故障。Guest 日志只保留末尾 4 MiB，不能由缺少某条启动记录断定该事件从未发生。
 - 待验证假设：充电/关机路径可能与此次提前停止有关；触发者、因果关系及与 HAL 报错的关系都未确定，需核对当时版本并在当前代码上复现。不能把所有 HAL 报错当作根因。
