@@ -1,0 +1,47 @@
+--- a/host/color_buffer.cpp
++++ b/host/color_buffer.cpp
+@@ -445,7 +445,7 @@
+ }
+ 
+ bool ColorBuffer::Impl::flushFromGl() {
+-    if (!(mColorBufferGl && mColorBufferVk)) {
++    if (!(getColorBufferGl() && mColorBufferVk)) {
+         return true;
+     }
+ 
+@@ -460,7 +460,7 @@
+ }
+ 
+ bool ColorBuffer::Impl::flushFromVk() {
+-    if (!(mColorBufferGl && mColorBufferVk)) {
++    if (!(getColorBufferGl() && mColorBufferVk)) {
+         return true;
+     }
+ 
+@@ -488,7 +488,7 @@
+ }
+ 
+ bool ColorBuffer::Impl::flushFromVkBytes(const void* bytes, size_t bytesSize) {
+-    if (!(mColorBufferGl && mColorBufferVk)) {
++    if (!(getColorBufferGl() && mColorBufferVk)) {
+         return true;
+     }
+ 
+@@ -509,7 +509,7 @@
+ }
+ 
+ bool ColorBuffer::Impl::invalidateForGl() {
+-    if (!(mColorBufferGl && mColorBufferVk)) {
++    if (!(getColorBufferGl() && mColorBufferVk)) {
+         return true;
+     }
+ 
+@@ -523,7 +523,7 @@
+ }
+ 
+ bool ColorBuffer::Impl::invalidateForVk() {
+-    if (!(mColorBufferGl && mColorBufferVk)) {
++    if (!(getColorBufferGl() && mColorBufferVk)) {
+         return true;
+     }
+ 

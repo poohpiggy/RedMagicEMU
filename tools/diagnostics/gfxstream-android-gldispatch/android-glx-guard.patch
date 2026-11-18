@@ -1,0 +1,12 @@
+diff --git a/host/gl/glestranslator/GLcommon/GLDispatch.cpp b/host/gl/glestranslator/GLcommon/GLDispatch.cpp
+--- a/host/gl/glestranslator/GLcommon/GLDispatch.cpp
++++ b/host/gl/glestranslator/GLcommon/GLDispatch.cpp
+@@ -22,7 +22,7 @@
+ #include "host-common/logging.h"
+ 
+ 
+-#ifdef __linux__
++#if defined(__linux__) && !defined(__ANDROID__)
+ #include <GL/glx.h>
+ #elif defined(WIN32)
+ #include <windows.h>

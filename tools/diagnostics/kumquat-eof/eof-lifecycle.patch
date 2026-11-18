@@ -1,0 +1,15 @@
+--- original/kumquat/server/src/kumquat.rs
++++ eof-fix/kumquat/server/src/kumquat.rs
+@@ -56,9 +56,10 @@
+                         KumquatConnection::GpuConnection(ref mut gpu_conn) => {
+                             if event.readable {
+                                 if let Some(ref mut kumquat_gpu) = self.kumquat_gpu_opt {
+-                                    hung_up =
+-                                        !gpu_conn.process_command(kumquat_gpu)? && event.hung_up;
++                                    hung_up = gpu_conn.process_command(kumquat_gpu)?;
+                                 }
++                            } else if event.hung_up {
++                                hung_up = true;
+                             }
+ 
+                             if hung_up {

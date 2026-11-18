@@ -1,0 +1,11 @@
+--- a/host/native_window/include/gfxstream/host/native_sub_window.h
++++ b/host/native_window/include/gfxstream/host/native_sub_window.h
+@@ -20,7 +20,7 @@
+ 
+ #include "render-utils/render_api_platform_types.h"
+ 
+-#if GFXSTREAM_ENABLE_HOST_GLES
++#if GFXSTREAM_ENABLE_HOST_GLES || defined(__ANDROID__)
+ #include <EGL/egl.h>
+ #else
+ typedef unsigned int GLenum;

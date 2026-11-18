@@ -1,0 +1,55 @@
+--- a/guest/vulkan/gfxstream_vk_device.cpp
++++ b/guest/vulkan/gfxstream_vk_device.cpp
+@@ -319,31 +319,33 @@
+     }
+ 
+     VkResult result = VK_SUCCESS;
++    gfxstream::vk::VkEncoder* vkEnc = nullptr;
+     /* Encoder call */
+     {
+         ALOGV("calling setup instance internally");
+         result = SetupInstanceForProcess();
+         if (VK_SUCCESS != result) {
++            vk_free(pAllocator, instance);
+             return vk_error(NULL, result);
+         }
+-        uint32_t initialEnabledExtensionCount = pCreateInfo->enabledExtensionCount;
+-        const char* const* initialPpEnabledExtensionNames = pCreateInfo->ppEnabledExtensionNames;
+         std::vector<const char*> filteredExts = filteredInstanceExtensionNames(
+             pCreateInfo->enabledExtensionCount, pCreateInfo->ppEnabledExtensionNames);
+-        // Temporarily modify createInfo for the encoder call
+-        VkInstanceCreateInfo* mutableCreateInfo = (VkInstanceCreateInfo*)pCreateInfo;
+-        mutableCreateInfo->enabledExtensionCount = static_cast<uint32_t>(filteredExts.size());
+-        mutableCreateInfo->ppEnabledExtensionNames = filteredExts.data();
++        VkInstanceCreateInfo encoderCreateInfo = *pCreateInfo;
++        encoderCreateInfo.enabledExtensionCount = static_cast<uint32_t>(filteredExts.size());
++        encoderCreateInfo.ppEnabledExtensionNames = filteredExts.data();
+ 
+-        VK_HOST_CONNECTION(VK_ERROR_DEVICE_LOST);
+-        result = vkEnc->vkCreateInstance(pCreateInfo, nullptr, &instance->internal_object,
++        HostConnection* hostCon = HostConnection::getOrCreate(kCapsetGfxStreamVulkan);
++        vkEnc = hostCon ? hostCon->vkEncoder() : nullptr;
++        if (!vkEnc) {
++            vk_free(pAllocator, instance);
++            return VK_ERROR_DEVICE_LOST;
++        }
++        result = vkEnc->vkCreateInstance(&encoderCreateInfo, nullptr, &instance->internal_object,
+                                          true /* do lock */);
+         if (VK_SUCCESS != result) {
++            vk_free(pAllocator, instance);
+             return vk_error(NULL, result);
+         }
+-        // Revert the createInfo the user-set data
+-        mutableCreateInfo->enabledExtensionCount = initialEnabledExtensionCount;
+-        mutableCreateInfo->ppEnabledExtensionNames = initialPpEnabledExtensionNames;
+     }
+ 
+     struct vk_instance_dispatch_table dispatch_table;
+@@ -359,6 +361,7 @@
+                               pCreateInfo, pAllocator);
+ 
+     if (result != VK_SUCCESS) {
++        vkEnc->vkDestroyInstance(instance->internal_object, nullptr, true /* do lock */);
+         vk_free(pAllocator, instance);
+         return vk_error(NULL, result);
+     }

@@ -1,0 +1,9 @@
+diff --git a/cross.ini b/cross.ini
+--- a/cross.ini
++++ b/cross.ini
+@@ -12,3 +12,5 @@
+ [built-in options]
++c_args = ['-DANDROID']
++cpp_args = ['-DANDROID']
+ c_link_args = ['-Wl,-z,max-page-size=16384']
+ cpp_link_args = ['-Wl,-z,max-page-size=16384']

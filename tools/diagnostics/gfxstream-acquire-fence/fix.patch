@@ -1,0 +1,61 @@
+--- a/guest/vulkan_enc/ResourceTracker.h
++++ b/guest/vulkan_enc/ResourceTracker.h
+@@ -267,7 +267,7 @@
+     void unwrap_vkCreateImage_pCreateInfo(const VkImageCreateInfo* pCreateInfo,
+                                           VkImageCreateInfo* local_pCreateInfo);
+ 
+-    void unwrap_vkAcquireImageANDROID_nativeFenceFd(int fd, int* fd_out);
++    VkResult unwrap_vkAcquireImageANDROID_nativeFenceFd(int fd, int* fd_out);
+ 
+     void unwrap_VkBindImageMemory2_pBindInfos(uint32_t bindInfoCount,
+                                               const VkBindImageMemoryInfo* inputBindInfos,
+--- a/guest/vulkan_enc/ResourceTracker.cpp
++++ b/guest/vulkan_enc/ResourceTracker.cpp
+@@ -6103,15 +6103,14 @@
+ #endif
+ }
+ 
+-void ResourceTracker::unwrap_vkAcquireImageANDROID_nativeFenceFd(int fd, int* fd_out) {
++VkResult ResourceTracker::unwrap_vkAcquireImageANDROID_nativeFenceFd(int fd, int* fd_out) {
+ #ifdef VK_USE_PLATFORM_ANDROID_KHR
+-    (void)fd_out;
+     if (fd != -1) {
+         AEMU_SCOPED_TRACE("waitNativeFenceInAcquire");
+         // Implicit Synchronization
+         auto* syncHelper =
+             ResourceTracker::threadingCallbacks.hostConnectionGetFunc()->syncHelper();
+-        syncHelper->wait(fd, 3000);
++        int waitResult = syncHelper->wait(fd, 3000);
+         // From libvulkan's swapchain.cpp:
+         // """
+         // NOTE: we're relying on AcquireImageANDROID to close fence_clone,
+@@ -6125,8 +6125,12 @@
+         // """
+         // Therefore, assume contract where we need to close fd in this driver
+         syncHelper->close(fd);
++        *fd_out = -1;
++        if (waitResult != 0) return VK_ERROR_DEVICE_LOST;
+     }
+ #endif
++    (void)fd_out;
++    return VK_SUCCESS;
+ }
+ 
+ void ResourceTracker::unwrap_VkBindImageMemory2_pBindInfos(
+--- a/guest/vulkan_enc/VkEncoder.cpp
++++ b/guest/vulkan_enc/VkEncoder.cpp
+@@ -31867,8 +31867,12 @@
+     local_nativeFenceFd = nativeFenceFd;
+     local_semaphore = semaphore;
+     local_fence = fence;
+-    sResourceTracker->unwrap_vkAcquireImageANDROID_nativeFenceFd(nativeFenceFd,
+-                                                                 &local_nativeFenceFd);
++    VkResult acquireFenceResult = sResourceTracker->unwrap_vkAcquireImageANDROID_nativeFenceFd(
++        nativeFenceFd, &local_nativeFenceFd);
++    if (acquireFenceResult != VK_SUCCESS) {
++        if (!queueSubmitWithCommandsEnabled && doLock) this->unlock();
++        return acquireFenceResult;
++    }
+     size_t count = 0;
+     size_t* countPtr = &count;
+     {

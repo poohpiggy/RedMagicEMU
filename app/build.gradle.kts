@@ -55,8 +55,8 @@ android {
         // 28: гостевые бинарники запускаются из каталога данных приложения (W^X для targetSdk>=29)
         //noinspection ExpiredTargetSdkVersion
         targetSdk = 28
-        versionCode = 11
-        versionName = "0.6.0-beta"
+        versionCode = 12
+        versionName = "0.6.2-beta"
         ndk { abiFilters += listOf("arm64-v8a") }
     }
 
@@ -82,6 +82,21 @@ android {
     }
 
     sourceSets["main"].assets.setSrcDirs(listOf(engineOut))
+    val generatedGpuBridge = rootProject.layout.buildDirectory.dir("generated/rme-gpu-bridge").get().asFile
+    val gpuBridge = providers.gradleProperty("rmeGpuBridgeDir").orNull?.let(rootProject::file)
+        ?: generatedGpuBridge.takeIf { File(it, "assets/rme-gpu/guest.idx").isFile }
+        ?: rootProject.file("native/gpu-runtime/android")
+    if (File(gpuBridge, "assets/rme-gpu/guest.idx").isFile) {
+        sourceSets["main"].assets.srcDir(File(gpuBridge, "assets"))
+        sourceSets["main"].jniLibs.srcDir(File(gpuBridge, "jniLibs"))
+    }
+    providers.gradleProperty("experimentalVulkanJniDir").orNull?.let { path ->
+        val jniDir = file(path)
+        check(File(jniDir, "arm64-v8a/libaemuvkrenderer.so").isFile) {
+            "experimentalVulkanJniDir must contain the staged Vulkan renderer bundle"
+        }
+        sourceSets["debug"].jniLibs.srcDir(jniDir)
+    }
 
     packaging {
         // исполняемые файлы движка лежат как lib*.so и должны распаковываться на диск
@@ -103,7 +118,7 @@ android {
             optIn.add("androidx.compose.material3.ExperimentalMaterial3Api")
         }
     }
-    buildFeatures { compose = true; buildConfig = true }
+    buildFeatures { compose = true; buildConfig = true; aidl = true }
     lint { abortOnError = false; checkReleaseBuilds = false }
 }
 

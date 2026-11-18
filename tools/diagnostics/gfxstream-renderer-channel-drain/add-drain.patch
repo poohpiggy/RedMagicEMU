@@ -1,0 +1,22 @@
+--- a/host/RendererImpl.cpp
++++ b/host/RendererImpl.cpp
+@@ -260,6 +260,19 @@
+     return channel;
+ }
+ 
++void RendererImpl::rmeDrainForSession() {
++    android::base::AutoLock lock(mChannelsLock);
++    mStopped = true;
++    auto channels = std::move(mChannels);
++    lock.unlock();
++    for (const auto& c : channels) {
++        c->stopFromHost();
++    }
++    for (const auto& c : channels) {
++        c->renderThread()->wait();
++    }
++}
++
+ void RendererImpl::addListener(FrameBufferChangeEventListener* listener) {
+     mRenderWindow->addListener(listener);
+ }

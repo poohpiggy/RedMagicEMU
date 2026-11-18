@@ -1,0 +1,123 @@
+--- a/host/vulkan/VkDecoderGlobalState.cpp
++++ b/host/vulkan/VkDecoderGlobalState.cpp
+@@ -377,6 +377,7 @@
+         mPhysdevInfo.clear();
+         mDeviceInfo.clear();
+         mImageInfo.clear();
++        mSwapchainImageMetadata.clear();
+         mImageViewInfo.clear();
+         mSamplerInfo.clear();
+         mCmdBufferInfo.clear();
+@@ -1910,6 +1911,7 @@
+     }
+ 
+     void destroyDeviceLocked(VkDevice device, const VkAllocationCallbacks* pAllocator) {
++        forgetDeviceSwapchainsLocked(device);
+         auto* deviceInfo = android::base::find(mDeviceInfo, device);
+         if (!deviceInfo) return;
+ 
+@@ -2086,6 +2088,48 @@
+ 
+         return result;
+     }
++
++    // RME swapchain metadata begin
++    struct SwapchainImageMetadata {
++        VkDevice device;
++        VkSwapchainCreateFlagsKHR flags;
++        VkFormat format;
++        VkExtent2D extent;
++        uint32_t arrayLayers;
++        VkImageUsageFlags usage;
++        VkSharingMode sharingMode;
++        bool hasPNext;
++        std::vector<uint32_t> queueFamilyIndices;
++    };
++
++    void on_recordSwapchain(VkDevice device, VkSwapchainKHR boxed,
++                            const VkSwapchainCreateInfoKHR* info) {
++        SwapchainImageMetadata saved{device, info->flags, info->imageFormat,
++            info->imageExtent, info->imageArrayLayers, info->imageUsage,
++            info->imageSharingMode, info->pNext != nullptr, {}};
++        if (info->imageSharingMode == VK_SHARING_MODE_CONCURRENT && info->queueFamilyIndexCount) {
++            saved.queueFamilyIndices.assign(info->pQueueFamilyIndices,
++                                           info->pQueueFamilyIndices + info->queueFamilyIndexCount);
++        }
++        std::lock_guard<std::recursive_mutex> lock(mLock);
++        mSwapchainImageMetadata[boxed] = std::move(saved);
++    }
++
++    void on_forgetSwapchain(VkDevice device, VkSwapchainKHR boxed) {
++        std::lock_guard<std::recursive_mutex> lock(mLock);
++        auto it = mSwapchainImageMetadata.find(boxed);
++        if (it != mSwapchainImageMetadata.end() && it->second.device == device)
++            mSwapchainImageMetadata.erase(it);
++    }
++
++    // Caller holds mLock, as in destroyDeviceLocked.
++    void forgetDeviceSwapchainsLocked(VkDevice device) {
++        for (auto it = mSwapchainImageMetadata.begin(); it != mSwapchainImageMetadata.end();) {
++            if (it->second.device == device) it = mSwapchainImageMetadata.erase(it);
++            else ++it;
++        }
++    }
++    // RME swapchain metadata end
+ 
+     VkResult on_vkCreateImage(android::base::BumpPool* pool, VkDevice boxed_device,
+                               const VkImageCreateInfo* pCreateInfo,
+@@ -7639,6 +7683,7 @@
+     std::unordered_map<VkPhysicalDevice, PhysicalDeviceInfo> mPhysdevInfo;
+     std::unordered_map<VkDevice, DeviceInfo> mDeviceInfo;
+     std::unordered_map<VkImage, ImageInfo> mImageInfo;
++    std::unordered_map<VkSwapchainKHR, SwapchainImageMetadata> mSwapchainImageMetadata;
+     std::unordered_map<VkImageView, ImageViewInfo> mImageViewInfo;
+     std::unordered_map<VkSampler, SamplerInfo> mSamplerInfo;
+     std::unordered_map<VkCommandBuffer, CommandBufferInfo> mCmdBufferInfo;
+@@ -7988,6 +8033,15 @@
+                                                          VkDevice device, uint32_t bindInfoCount,
+                                                          const VkBindBufferMemoryInfo* pBindInfos) {
+     return mImpl->on_vkBindBufferMemory2KHR(pool, device, bindInfoCount, pBindInfos);
++}
++
++void VkDecoderGlobalState::on_recordSwapchain(VkDevice device, VkSwapchainKHR boxed,
++                                              const VkSwapchainCreateInfoKHR* info) {
++    mImpl->on_recordSwapchain(device, boxed, info);
++}
++
++void VkDecoderGlobalState::on_forgetSwapchain(VkDevice device, VkSwapchainKHR boxed) {
++    mImpl->on_forgetSwapchain(device, boxed);
+ }
+ 
+ VkResult VkDecoderGlobalState::on_vkCreateImage(android::base::BumpPool* pool, VkDevice device,
+--- a/host/vulkan/VkDecoderGlobalState.h
++++ b/host/vulkan/VkDecoderGlobalState.h
+@@ -222,6 +222,10 @@
+     VkResult on_vkBindBufferMemory2KHR(android::base::BumpPool* pool, VkDevice device,
+                                        uint32_t bindInfoCount,
+                                        const VkBindBufferMemoryInfo* pBindInfos);
++
++    void on_recordSwapchain(VkDevice device, VkSwapchainKHR boxed,
++                            const VkSwapchainCreateInfoKHR* info);
++    void on_forgetSwapchain(VkDevice device, VkSwapchainKHR boxed);
+ 
+     VkResult on_vkCreateImage(android::base::BumpPool* pool, VkDevice device,
+                               const VkImageCreateInfo* pCreateInfo,
+--- a/host/vulkan/VkDecoder.cpp
++++ b/host/vulkan/VkDecoder.cpp
+@@ -13217,6 +13217,8 @@
+                               "handle map overwrite requires VkSwapchainKHR to be 8 bytes long");
+                 vkStream->handleMapping()->mapHandles_VkSwapchainKHR((VkSwapchainKHR*)pSwapchain,
+                                                                      1);
++                if (vkCreateSwapchainKHR_VkResult_return == VK_SUCCESS)
++                    m_state->on_recordSwapchain(unboxed_device, *pSwapchain, pCreateInfo);
+                 vkStream->write((VkSwapchainKHR*)pSwapchain, 8 * 1);
+                 // Begin auto non dispatchable handle create for pSwapchain;
+                 vkStream->setHandleMapping(&m_boxedHandleUnwrapMapping);
+@@ -13278,6 +13280,7 @@
+                             ioStream, (unsigned long long)device, (unsigned long long)swapchain,
+                             (unsigned long long)pAllocator);
+                 }
++                m_state->on_forgetSwapchain(unboxed_device, boxed_swapchain_preserve);
+                 vk->vkDestroySwapchainKHR(unboxed_device, swapchain, pAllocator);
+                 vkStream->unsetHandleMapping();
+                 vkReadStream->setReadPos((uintptr_t)(*readStreamPtrPtr) -

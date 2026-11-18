@@ -1,0 +1,39 @@
+--- a/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
++++ b/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
+@@ -1864,7 +1864,6 @@
+         "VK_KHR_external_memory",
+         "VK_KHR_external_fence",
+         "VK_KHR_external_fence_fd",
+-        "VK_EXT_device_memory_report",
+ #endif
+ #ifdef LINUX_GUEST_BUILD
+         // Passthrough if available on host. Will otherwise be emulated by guest
+@@ -1986,19 +1985,6 @@
+         filteredExts.push_back(anbExtProp);
+     }
+ 
+-    /*
+-     * GfxstreamEnd2EndVkTest::DeviceMemoryReport always assumes the memory report
+-     * extension is present.  It's is filtered out when sent host side, since for a
+-     * virtual GPU this is quite difficult to implement.
+-     *
+-     * Mesa runtime checks physical device features.  So if the test tries to enable
+-     * device level extension without it definitely existing, the test will fail.
+-     *
+-     * The test can also be modified to check VkPhysicalDeviceDeviceMemoryReportFeaturesEXT,
+-     * but that's more involved.  Work around this by always advertising the extension.
+-     * Tracking bug: b/338270042
+-     */
+-    filteredExts.push_back(VkExtensionProperties{"VK_EXT_device_memory_report", 1});
+ 
+ #if defined(VK_USE_PLATFORM_ANDROID_KHR) || DETECT_OS_LINUX
+     bool hostSupportsExternalFenceFd =
+@@ -2227,7 +2213,7 @@
+         VkPhysicalDeviceDeviceMemoryReportFeaturesEXT* memoryReportFeaturesEXT =
+             vk_find_struct(pFeatures, PHYSICAL_DEVICE_DEVICE_MEMORY_REPORT_FEATURES_EXT);
+         if (memoryReportFeaturesEXT) {
+-            memoryReportFeaturesEXT->deviceMemoryReport = VK_TRUE;
++            memoryReportFeaturesEXT->deviceMemoryReport = VK_FALSE;
+         }
+     }
+ }

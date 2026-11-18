@@ -1,0 +1,20 @@
+--- a/host/RendererImpl.cpp
++++ b/host/RendererImpl.cpp
+@@ -230,15 +230,11 @@
+ 
+ RenderChannelPtr RendererImpl::createRenderChannel(
+         android::base::Stream* loadStream, uint32_t virtioGpuContextId) {
++    android::base::AutoLock lock(mChannelsLock);
++    if (mStopped) return nullptr;
+     const auto channel =
+         std::make_shared<RenderChannelImpl>(loadStream, virtioGpuContextId);
+     {
+-        android::base::AutoLock lock(mChannelsLock);
+-
+-        if (mStopped) {
+-            return nullptr;
+-        }
+-
+         // Clean up the stopped channels.
+         mChannels.erase(
+                 std::remove_if(mChannels.begin(), mChannels.end(),

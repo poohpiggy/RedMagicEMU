@@ -8,7 +8,7 @@
 
 ### 三组裁剪（2026-11-15，设备回归待补）
 
-- 本轮在 `codex/0.5.0-target-prune` 同一轮处理以下三组：四个 Honeycomb 图形资产、旧容量滑块辅助对象与对应三项测试、已无入口的旧上游更新实现和对话框。两个 Activity 仅删除各三条相关导入；`diskMb`、存储路径、设置值、其他翻译、Manifest、安装权限及 FileProvider 均保留，原有文件的其他未提交内容未动。
+- 在 `codex/0.5.0-target-prune` 裁剪三组旧组件：四个 Honeycomb 图形资产、旧容量滑块辅助对象与对应三项测试、已无入口的旧上游更新实现和对话框。两个 Activity 仅删除各三条相关导入；`diskMb`、存储路径、设置值、其他翻译、Manifest、安装权限及 FileProvider 均保留，原有文件的其他未提交内容未动。
 - 目标 NX809J 正确识别为 API 36 时，`HcHwRender.install` 在 API 11–13 之外于读取资产前返回；保存的 Guest 元数据在异常或陈旧状态下未证明不可为其他值，故不将此说成所有状态的不可达保证。预编译、JNI、反射、Guest、协议、资产索引及压缩档按名称扫描未发现这三组的额外引用；不能排除未知动态拼接。四个资产历史来源提交为 `0cf76bc`，`HcHwRender` 原有来源说明、根许可证和项目来源声明仍保留。
 - 修改前 10 个受影响文件（含未跟踪的容量辅助代码、测试和既有修改的 Activity）已逐个备份并校验至 Git 外 `E:\RedMagicEMU-checkpoints\0.4.0-camera-20261115\before-three-group-prune\`；恢复时只将被删除的 8 个文件按原路径复制回来，并从备份中逐行恢复两个 Activity 的六条导入，保留期间其他修改。不要整树重置。手机此前确认启动的迁移测试包仍保留，恢复命名的裁剪前构建 `RedMagicEMU-keep-aemu-checkpoint.apk` 也保留但未实机验证；均须正常关闭 Guest 后覆盖安装。
 - 全量 `:app:testStandardDebugUnitTest :app:assembleStandardDebug` 首次 724 项、2 失败、90 跳过：跨进程锁测试是先前已记录的不稳定项；`TargetVoldArtifactsTest` 首次在 ZIP 第 10 字节比较失败，测试两次生成带当前时间的 ZIP，独立探针复现跨 ZIP 两秒时间戳边界的同位置差异，单项重跑通过，但不能证明原次失败唯一原因。重跑全量测试和构建成功：724 项、0 失败、0 错误、90 跳过；比此前少 3 项是随滑块辅助代码移除的测试。这不代表上述不稳定测试已经修复。
@@ -18,7 +18,7 @@
 
 ### 四组后续裁剪及 ARM32 探针（2026-11-15，设备回归待补）
 
-- 本轮在 `codex/0.5.0-legacy-prune` 同一轮删除此前审计的旧多实例界面、`libqemu_gb.so`、四个旧系统相机 HAL 资产，以及未接线 AOD 画布原型的三个源码文件和两份测试。Recovery 辅助资产、正式 AOD 导入及代理、目标相机资产、`libqemu_arm.so` 和 KK 图形服务保留。相机源代码与构建脚本仍在；执行旧相机构建脚本可能重新生成被裁剪的旧资产。
+- 在 `codex/0.5.0-legacy-prune`，根据依赖审计删除旧多实例界面、`libqemu_gb.so`、四个旧系统相机 HAL 资产，以及未接线 AOD 画布原型的三个源码文件和两份测试。Recovery 辅助资产、正式 AOD 导入及代理、目标相机资产、`libqemu_arm.so` 和 KK 图形服务保留。相机源代码与构建脚本仍在；执行旧相机构建脚本可能重新生成被裁剪的旧资产。
 - 修改前 11 个删除文件和原 `GuestVmEngineTest.kt` 已逐项备份并校验至 `E:\RedMagicEMU-checkpoints\0.4.0-camera-20261115\before-legacy-prune\`；包含工作区原有未跟踪的 AOD 原型和测试。回滚源码时仅按原路径恢复这些文件，并仅撤销本轮新增的 GB 测试，不覆盖其他未提交更改。通过基础回归的裁剪前 APK 保留于 `RedMagicEMU-0.5.0-pruned-test.apk`；回退安装前正常关闭 Guest。
 - 目标 `GuestVm` 对旧 `Engine.GB` 元数据调用 `effective()` 后选择 N64 和 `libaemu64_36.so`；新增测试验证该选择、原始元数据不变以及无旧 GB 可执行文件时仍选择 N64。隔离负向对照令 GB 元数据错误地继续选择 GB，新增测试按预期失败；恢复源码后测试通过。旧 `Engine.GB` 兼容分支代码仍在，但被移除的 GB 可执行文件不再随 APK 提供；上述结论仅覆盖现有目标入口。APK 内 56 个 ELF 的 `DT_NEEDED`/`SONAME` 和压缩成员定向扫描未发现其他 GB 二进制引用，但不能排除未知动态调用。
 - `libqemu_gb.so` 是不可确认等价重建来源的预编译文件，原件及摘要已保存在检查点；上游提交、版权和二进制中提取的许可声明见 [GB QEMU 来源及声明](LEGACY_QEMU_GB_NOTICES.md)，原始许可证与项目来源说明保留。
@@ -105,7 +105,7 @@
 
 - **设备回归失败**：`0.5.0-beta-trim-r8.apk` 中 zygote 反复以 137 退出；截图同时显示多个厂商服务崩溃，`boot completed` 标记不能代表启动成功。设备现场的 Guest 崩溃记录显示 `system_server` 因无法连接 Keystore 服务抛出异常，之后 zygote 退出；Keystore 未启动或不可用的根本原因尚未确认，不能断言由某个删除项、R8 或内存压力造成。
 - 已停止继续裁剪，并按此前精确备份撤回本轮 24 个资产、`Importer.kt`、构建依赖及 R8 配置；撤回前的源码与配置另存于 `E:\RedMagicEMU-checkpoints\0.4.0-camera-20261115\zygote-regression-before-revert\`。工作区现与前一已验收构建快照一致，既有四份相机资产差异仍按先前记录处理。恢复 APK 为同一检查点目录下 `RedMagicEMU-0.5.0-beta-graphics-pruned.apk`，SHA-256 `070f18d8c8c5de9b164984868dad4c4f7f578d8ae08f405a56711e9ac7859fee`。设备只读核对现装 APK 哈希与该恢复包一致；回滚后日志显示 18:34:13 Keystore2 启动、18:34:22 zygote 启动、18:34:45 系统报告启动完成，截至 18:35:41 未见 zygote 再次退出。此记录不能代表全部功能已回归通过。重新启动时旧版会尝试修复运行树，但不能保证恢复用户数据或所有已修改文件；未经明确确认不要清空数据、重导入或重置实例。
-- 对此前风险描述的纠正：API 36 的 `ownVendorUnderGsi=true`，实际 API 36 两个 vendor 条件下均加载 own 图层，比较两个 APK 的最终层名称及内容哈希一致；不能将 14 个基础 vendor 资产被删除直接认定为本次崩溃根因。其余路径、运行树实际状态和 R8 动态行为仍需证据。
+- 运行层核对结果。API 36 的 `ownVendorUnderGsi=true`，实际 API 36 两个 vendor 条件下均加载 own 图层，比较两个 APK 的最终层名称及内容哈希一致；不能将 14 个基础 vendor 资产被删除直接认定为本次崩溃根因。其余路径、运行树实际状态和 R8 动态行为仍需证据。
 
 - 本轮原处理：4 个旧 KK GLES 资产、5 个旧 common 图形/copybit/overlay 资产、`kk/dhd.props`、14 个被 own-vendor 覆盖的基础 vendor 资产，共 24 项；原件逐项备份及 SHA-256 清单位于 `E:\RedMagicEMU-checkpoints\0.4.0-camera-20261115\before-asset-prune-24\`，现已撤回。旧构建脚本可能重新生成部分资产。
 - 删除 `Importer.kt` 中未被指定 ZIP 公开入口调用的旧通用格式私有处理链，并同步移除仅该路径直接使用的 Brotli、Junrar 依赖。指定 ZIP 校验、`TargetPackageTree`、ramdisk、APEX 所需 Commons Compress/XZ、指纹校验和既有版权许可保留。修改前 `Importer.kt` 与构建脚本备份于 `before-target-import-source-prune\`；恢复时仅按备份恢复相关内容，不得重置其他未提交工作。旧通用格式不再受支持。
@@ -191,14 +191,14 @@
 
 ### 宿主主题函数（2026-11-15，设备回归待补）
 
-- 选项 A：将宿主 Compose 函数 `AemuTheme` 改为 `RedMagicEmuTheme`，同步修改主界面、设置页和 Guest 菜单的三个直接调用；没有改变主题实现、协议或 Guest 启动流程。源码调用点、JNI、库加载、动态查找、Guest 辅助类、设备及通信路径、资产索引、预编译文件和压缩 JAR 均已核查；除 APK 中的宿主 DEX 外未发现该名字。静态搜索不能排除未知的动态拼接引用。网站另有 `aemu-theme` 存储键，不属于本项。
+- 将宿主 Compose 函数 `AemuTheme` 改为 `RedMagicEmuTheme`，同步修改主界面、设置页和 Guest 菜单的三个直接调用；没有改变主题实现、协议或 Guest 启动流程。源码调用点、JNI、库加载、动态查找、Guest 辅助类、设备及通信路径、资产索引、预编译文件和压缩 JAR 均已核查；除 APK 中的宿主 DEX 外未发现该名字。静态搜索不能排除未知的动态拼接引用。网站另有 `aemu-theme` 存储键，不属于本项。
 - 编译探针在修改前因新名称不存在而失败；改名后隔离构建成功。最终 `:app:testStandardDebugUnitTest :app:assembleStandardDebug` 成功：727 项、0 失败、0 错误、90 跳过。此前跨进程锁测试在完整基线测试失败而单项通过，最终整套测试通过并不能消除其不稳定性。
 - 测试 APK：`E:\RedMagicEMU-checkpoints\0.4.0-camera-20261115\RedMagicEMU-0.5.0-theme-test.apk`，SHA-256 `ce0cda08992eed78bb74969c3e9d426ff277f269d786155622a0beb78c462d16`；applicationId `app.redmagicemu`，调试证书与相机实验包一致，版本显示仍为 `0.4.0-beta`。与隔离重建基线及相机实验包比较，非签名 APK 条目均仅 `classes7.dex` 不同；实验包与隔离基线本身已有 Compose 指令差异，未证明语义等价。相机实验库仍有上述限制。
 - 设备验收记录：该包完成一次基础回归，但未逐项说明安装、启动及回归步骤，故上方各项不据此勾选。发生回归先停止迁移并定位或恢复检查点，不继续裁剪。回滚源码只把 `Theme.kt` 的声明及三个调用恢复旧名；恢复相机实验包前正常关闭 Guest，再覆盖安装同目录 `camera-lux-diagnostic.apk`，保留实例和原固件。不得重置其他未提交更改。
 
 ### 启动准入函数的内部包名（2026-11-15，设备回归待补）
 
-- 阶段分支 `codex/0.5.0-system-boot-namespace`。选项 A：将 `SystemBootOnly.kt` 从 `app.aemu.core` 移至 `app.redmagicemu.core`，同步 `GuestVm` 和两项现有测试的导入；函数逻辑、系统启动与 Recovery 拒绝条件和错误信息不变。迁移前现有两项测试通过；先在隔离构建中引用新包，编译按预期因新包尚不存在失败，随后完成迁移。
+- 阶段分支 `codex/0.5.0-system-boot-namespace`。将 `SystemBootOnly.kt` 从 `app.aemu.core` 移至 `app.redmagicemu.core`，同步 `GuestVm` 和两项现有测试的导入；函数逻辑、系统启动与 Recovery 拒绝条件和错误信息不变。迁移前现有两项测试通过；先在隔离构建中引用新包，编译按预期因新包尚不存在失败，随后完成迁移。
 - 核查了源码、JNI、库加载及动态查找、反射、Guest 辅助类、设备/通信路径、资产索引和预编译二进制；递归扫描资产及压缩档，包括上轮测试 APK 和相机实验包，仅在宿主 DEX 中发现旧符号，未发现 Guest 或预编译组件引用。静态扫描不能证明不存在未知的动态拼接引用。
 - 隔离构建首次完整测试为 727 项、1 项失败、90 项跳过；失败仍是上轮基线已有的不稳定跨进程锁测试。重跑 `:app:testStandardDebugUnitTest :app:assembleStandardDebug` 成功，727 项、0 失败、0 错误、90 项跳过，其中两项启动准入测试均通过。不将重跑通过解释为锁测试问题已经修复。
 - 测试 APK：`E:\RedMagicEMU-checkpoints\0.4.0-camera-20261115\RedMagicEMU-0.5.0-system-boot-test.apk`，SHA-256 `5711dbd1bf04ca4487d8893b8e85f90a1aeadc636b0161b07f1bd89b9b5d4f93`。与上轮 APK 相比，非签名 APK 内容仅 `classes4.dex`、`classes10.dex` 不同；相机实验库、`app.redmagicemu` 和调试签名证书保持一致。版本显示仍为 `0.4.0-beta`。

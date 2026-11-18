@@ -15,6 +15,7 @@
  */
 #include <dlfcn.h>
 #include <errno.h>
+#include <limits.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -73,6 +74,10 @@ struct gstate {
 /* ---- the stream ---- */
 struct ectx;
 struct esurf;
+/* Experimental Unity COPY_WRITE mirrors. Retired pointers stay allocated until
+ * the last shared context goes away, because a numeric name is not an object. */
+struct unity_map { struct ectx *owner; unsigned name, access; long offset, length; void *ptr; int retired; };
+struct unity_maps { pthread_mutex_t lock; unsigned refs; struct unity_map map[8]; };
 struct ts {
     int fd, dead;
     uint8_t *buf;
@@ -143,6 +148,9 @@ struct ectx {
     void *g1;               /* a GLES 1 context of the 1.x driver behind (g1_up) */
     uint32_t host;          /* the host's context */
     void *dpy, *cfg;
+    struct unity_maps *unity_maps;
+    int unity_copy_unknown;
+    uint32_t unity_map_logged;
     struct gstate g;
 };
 static struct gstate *G(void) { return &t_ts->ctx->g; }
@@ -181,6 +189,77 @@ static unsigned bound_to(struct gstate *g, GLenum target, int *known) {
     if (target == 0x8892) return g->array;
     if (target == 0x8893) { if (!g->vao) return g->elem; *known = g->elem_vao_known; return g->elem_vao; }
     for (int i = 0; i < 12; i++) if (g->bind[i].target == target) return g->bind[i].name;
+    return 0;
+}
+static const char *prog_name(void);
+static pthread_once_t unity_once = PTHREAD_ONCE_INIT;
+static int unity_selected;
+static void unity_select(void) { unity_selected = !strcmp(prog_name(), "com.antutu.benchmark.full.lite:unity"); }
+static int unity_target(unsigned target) {
+    if (target != 0x8F37) return 0; /* GL_COPY_WRITE_BUFFER */
+    pthread_once(&unity_once, unity_select);
+    return unity_selected;
+}
+static struct unity_maps *unity_group(struct ectx *share) {
+    struct unity_maps *u = share ? share->unity_maps : 0;
+    if (share && !u) return 0;
+    if (u) { pthread_mutex_lock(&u->lock); ++u->refs; pthread_mutex_unlock(&u->lock); return u; }
+    u = calloc(1, sizeof(*u));
+    if (!u) return 0;
+    if (pthread_mutex_init(&u->lock, 0)) { free(u); return 0; }
+    u->refs = 1;
+    return u;
+}
+static void unity_drop_context(struct ectx *c) {
+    struct unity_maps *u = c->unity_maps;
+    if (!u) return;
+    pthread_mutex_lock(&u->lock);
+    for (int i = 0; i < 8; ++i) if (u->map[i].owner == c) {
+        u->map[i].owner = 0;
+        u->map[i].retired = 1;
+    }
+    int last = --u->refs == 0;
+    if (last) for (int i = 0; i < 8; ++i) free(u->map[i].ptr);
+    pthread_mutex_unlock(&u->lock);
+    if (last) { pthread_mutex_destroy(&u->lock); free(u); }
+    c->unity_maps = 0;
+}
+static void unity_retire_name(struct ectx *c, unsigned name) {
+    struct unity_maps *u = c->unity_maps;
+    if (!u || !name) return;
+    pthread_mutex_lock(&u->lock);
+    for (int i = 0; i < 8; ++i) if (u->map[i].ptr && u->map[i].name == name) u->map[i].retired = 1;
+    pthread_mutex_unlock(&u->lock);
+}
+static struct unity_map *unity_find(struct unity_maps *u, struct ectx *owner, unsigned name) {
+    for (int i = 0; i < 8; ++i)
+        if (u->map[i].ptr && !u->map[i].retired && u->map[i].owner == owner && u->map[i].name == name) return &u->map[i];
+    return 0;
+}
+static int unity_has_maps(struct unity_maps *u) {
+    for (int i = 0; i < 8; ++i) if (u->map[i].ptr) return 1;
+    return 0;
+}
+enum unity_map_reason {
+    U_NO_GROUP, U_DISCONNECTED, U_BINDING_UNKNOWN, U_UNBOUND, U_INVALID_OFFSET,
+    U_INVALID_LENGTH, U_LENGTH_LIMIT, U_RANGE_OVERFLOW, U_LEGACY_MAPPING,
+    U_NAME_MAPPED, U_RETIRED_NAME, U_SLOT_EXHAUSTED, U_ALLOCATION_FAILED,
+    U_UNSUPPORTED_FLAGS_BUSY, U_LEGACY_MAP_UNAVAILABLE, U_LEGACY_ALLOCATION_FAILED
+};
+static void *unity_map_reject(struct ectx *c, enum unity_map_reason reason, unsigned name,
+                              long offset, long length, unsigned access) {
+    static const char *const labels[] = {
+        "no_group", "disconnected", "binding_unknown", "unbound", "invalid_offset",
+        "invalid_length", "length_limit", "range_overflow", "legacy_mapping",
+        "name_mapped", "retired_name", "slot_exhausted", "allocation_failed",
+        "unsupported_flags_busy", "legacy_map_unavailable", "legacy_allocation_failed"
+    };
+    uint32_t bit = 1u << reason;
+    if (!(c->unity_map_logged & bit)) {
+        c->unity_map_logged |= bit;
+        LOG("unity_map_reject reason=%s buffer=%u offset=%ld length=%ld flags=0x%x",
+            labels[reason], name, offset, length, access);
+    }
     return 0;
 }
 static void sh_write(GLenum target, long offset, const void *p, long size, int whole) {
@@ -225,7 +304,15 @@ static long sh_max(struct gstate *g, long offset, int count, uint32_t isz) {
     pthread_mutex_unlock(&g_sh_lock);
     return r;
 }
-static void k_glBufferData(GLenum target, GLsizeiptr size, const void *data, GLenum usage) { (void)usage; sh_write(target, 0, data, size, 1); }
+static void k_glBufferData(GLenum target, GLsizeiptr size, const void *data, GLenum usage) {
+    switch (usage) {
+    case 0x88E0: case 0x88E1: case 0x88E2: /* STREAM_DRAW/READ/COPY */
+    case 0x88E4: case 0x88E5: case 0x88E6: /* STATIC_DRAW/READ/COPY */
+    case 0x88E8: case 0x88E9: case 0x88EA: /* DYNAMIC_DRAW/READ/COPY */
+        sh_write(target, 0, data, size, 1);
+        break;
+    }
+}
 static void k_glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void *data) { sh_write(target, offset, data, size, 0); }
 static void k_glCopyBufferSubData(GLenum r, GLenum w, GLintptr ro, GLintptr wo, GLsizeiptr size) {
     struct gstate *g = G();
@@ -266,6 +353,11 @@ static void k_glBindBuffer(GLenum target, GLuint b) {
 }
 static void k_glPixelStorei(GLenum pname, GLint v) {
     struct gstate *g = G();
+    /* Keep the shadow state in step with GL when an invalid value is sent.
+     * The generated encoder still forwards the call so the host reports it. */
+    if (pname == 0x0D05 || pname == 0x0CF5) {
+        if (v != 1 && v != 2 && v != 4 && v != 8) return;
+    } else if (v < 0) return;
     switch (pname) {
     case 0x0D05: g->p_align = v; break;
     case 0x0D02: g->p_row = v; break;
@@ -287,6 +379,12 @@ static void k_glDeleteBuffers(GLsizei n, const GLuint *b) {
     struct gstate *g = G();
     for (int i = 0; b && i < n; i++) {
         if (!b[i]) continue;
+        if (unity_target(0x8F37)) {
+            int known = 0;
+            unsigned current = bound_to(g, 0x8F37, &known);
+            if (known && current == b[i]) TS()->ctx->unity_copy_unknown = 1;
+            unity_retire_name(TS()->ctx, b[i]);
+        }
         sh_drop(g->root, b[i]);
         if (g->host_array == b[i]) g->host_array = 0;
         if (g->host_elem == b[i]) g->host_elem_ok = 0;
@@ -315,10 +413,17 @@ static void k_glGetInteger64v(GLenum pname, GLint64 *d) { (void)d; k_count(pname
 static void e_glBindBuffer(GLenum target, GLuint b) {
     struct gstate *g = G();
     k_glBindBuffer(target, b);
-    if (target == 0x8892) { if (g->host_array == b) return; g->host_array = b; }
+    if (unity_target(target)) TS()->ctx->unity_copy_unknown = 0;
+    /* A deleted shared buffer may remain bound while its name is reused for a
+     * different object. Even the same numeric name must reach the host. */
+    if (target == 0x8892) {
+        g->host_array = b;
+        /* Vertex attribute bindings retain the object, not just its name. */
+        for (int i = 0; i < 16; i++) g->hp[i].ok = 0;
+    }
     if (target == 0x8893) {
         if (g->vao) g->host_elem_ok = 0;
-        else { if (g->host_elem_ok && g->host_elem == b) return; g->host_elem = b; g->host_elem_ok = 1; }
+        else { g->host_elem = b; g->host_elem_ok = 1; }
     }
     e0_glBindBuffer(target, b);
 }
@@ -738,16 +843,82 @@ static void map_write(struct ts *T, GLenum target, long offset, const void *p, l
  * contents up), written back when it is unmapped or flushed. */
 static void *e_glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access) {
     struct ts *T = TS();
+    if (unity_target(target)) {
+        struct ectx *c = T->ctx;
+        struct unity_maps *u = c->unity_maps;
+        if (access == 0x36 || access == 0x6) { /* write + invalidate, with or without explicit flush */
+            int known = 0;
+            unsigned name = bound_to(&c->g, target, &known);
+            if (!u) return unity_map_reject(c, U_NO_GROUP, name, offset, length, access);
+            if (T->dead) return unity_map_reject(c, U_DISCONNECTED, name, offset, length, access);
+            if (c->unity_copy_unknown || !known) return unity_map_reject(c, U_BINDING_UNKNOWN, name, offset, length, access);
+            if (!name) return unity_map_reject(c, U_UNBOUND, name, offset, length, access);
+            if (offset < 0) return unity_map_reject(c, U_INVALID_OFFSET, name, offset, length, access);
+            if (length <= 0) return unity_map_reject(c, U_INVALID_LENGTH, name, offset, length, access);
+            if (length > (64L << 20)) return unity_map_reject(c, U_LENGTH_LIMIT, name, offset, length, access);
+            if (offset > LONG_MAX - length) return unity_map_reject(c, U_RANGE_OVERFLOW, name, offset, length, access);
+            if (map_of(target, 0)) return unity_map_reject(c, U_LEGACY_MAPPING, name, offset, length, access);
+            pthread_mutex_lock(&u->lock);
+            struct unity_map *slot = 0;
+            int ambiguous = 0, retired = 0;
+            for (int i = 0; i < 8; ++i) {
+                if (u->map[i].ptr && u->map[i].name == name) { ambiguous = 1; if (u->map[i].retired) retired = 1; }
+                if (!u->map[i].ptr && !slot) slot = &u->map[i];
+            }
+            /* Invalidated contents are unspecified; zero initialization also
+             * avoids sending unrelated heap bytes if an app flushes unwritten data. */
+            void *p = !ambiguous && slot ? calloc(1, (size_t)length) : 0;
+            if (p) { slot->owner = c; slot->name = name; slot->access = access; slot->offset = offset; slot->length = length; slot->ptr = p; }
+            pthread_mutex_unlock(&u->lock);
+            if (ambiguous) return unity_map_reject(c, retired ? U_RETIRED_NAME : U_NAME_MAPPED, name, offset, length, access);
+            if (!slot) return unity_map_reject(c, U_SLOT_EXHAUSTED, name, offset, length, access);
+            if (!p) return unity_map_reject(c, U_ALLOCATION_FAILED, name, offset, length, access);
+            return p;
+        }
+        /* Do not mix the legacy target-indexed mapping with these mirrors. */
+        if (u) {
+            pthread_mutex_lock(&u->lock); int busy = unity_has_maps(u); pthread_mutex_unlock(&u->lock);
+            if (busy) {
+                int known = 0; unsigned name = bound_to(&c->g, target, &known);
+                return unity_map_reject(c, U_UNSUPPORTED_FLAGS_BUSY, known ? name : 0, offset, length, access);
+            }
+        }
+    }
     struct map *m = map_of(target, 1);
-    if (!m || m->ptr || length <= 0) return 0;
+    if (!m || m->ptr || length <= 0) {
+        if (unity_target(target)) {
+            int known = 0; unsigned name = bound_to(G(), target, &known);
+            return unity_map_reject(T->ctx, U_LEGACY_MAP_UNAVAILABLE, known ? name : 0, offset, length, access);
+        }
+        return 0;
+    }
     void *p = malloc((size_t)length);
-    if (!p) return 0;
+    if (!p) {
+        if (unity_target(target)) {
+            int known = 0; unsigned name = bound_to(G(), target, &known);
+            return unity_map_reject(T->ctx, U_LEGACY_ALLOCATION_FAILED, known ? name : 0, offset, length, access);
+        }
+        return 0;
+    }
     if ((access & 1) || !(access & (4 | 8))) map_read(T, target, offset, length, p);
     m->target = target; m->access = access; m->offset = offset; m->length = length; m->ptr = p;
     return p;
 }
 static GLboolean e_glUnmapBuffer(GLenum target) {
     struct ts *T = TS();
+    if (unity_target(target) && T->ctx->unity_maps) {
+        struct unity_maps *u = T->ctx->unity_maps;
+        int known = 0; unsigned name = bound_to(&T->ctx->g, target, &known);
+        pthread_mutex_lock(&u->lock);
+        struct unity_map *m = known ? unity_find(u, T->ctx, name) : 0;
+        if (m) {
+            if (!(m->access & 0x10)) map_write(T, target, m->offset, m->ptr, m->length);
+            free(m->ptr); memset(m, 0, sizeof(*m)); pthread_mutex_unlock(&u->lock); return 1;
+        }
+        int busy = unity_has_maps(u);
+        pthread_mutex_unlock(&u->lock);
+        if (busy) return 0;
+    }
     struct map *m = map_of(target, 0);
     if (!m) return 0;
     if ((m->access & 2) && !(m->access & 0x10)) map_write(T, target, m->offset, m->ptr, m->length);
@@ -755,10 +926,34 @@ static GLboolean e_glUnmapBuffer(GLenum target) {
     return 1;
 }
 static void e_glFlushMappedBufferRange(GLenum target, GLintptr offset, GLsizeiptr length) {
+    if (unity_target(target) && TS()->ctx->unity_maps) {
+        struct ectx *c = TS()->ctx; struct unity_maps *u = c->unity_maps;
+        int known = 0; unsigned name = bound_to(&c->g, target, &known);
+        pthread_mutex_lock(&u->lock);
+        struct unity_map *m = known ? unity_find(u, c, name) : 0;
+        if (m) {
+            if ((m->access & 0x10) && offset >= 0 && length >= 0 && offset <= m->length && length <= m->length - offset)
+                map_write(TS(), target, m->offset + offset, (char *)m->ptr + offset, length);
+            pthread_mutex_unlock(&u->lock);
+            return;
+        }
+        int busy = unity_has_maps(u);
+        pthread_mutex_unlock(&u->lock);
+        if (busy) return;
+    }
     struct map *m = map_of(target, 0);
     if (m && offset >= 0 && offset + length <= m->length) map_write(TS(), target, m->offset + offset, (char *)m->ptr + offset, length);
 }
 static void e_glGetBufferPointerv(GLenum target, GLenum pname, void **params) {
+    if (unity_target(target) && TS()->ctx->unity_maps) {
+        struct ectx *c = TS()->ctx; struct unity_maps *u = c->unity_maps;
+        int known = 0; unsigned name = bound_to(&c->g, target, &known);
+        pthread_mutex_lock(&u->lock);
+        struct unity_map *m = known ? unity_find(u, c, name) : 0;
+        int busy = unity_has_maps(u);
+        if (m || busy) { if (params) *params = m ? m->ptr : 0; pthread_mutex_unlock(&u->lock); return; }
+        pthread_mutex_unlock(&u->lock);
+    }
     struct map *m = map_of(target, 0);
     (void)pname;
     if (params) *params = m ? m->ptr : 0;
@@ -1657,6 +1852,7 @@ EXPORT EGLContext eglCreateContext(EGLDisplay d, EGLConfig cfg, EGLContext share
             char name[17] = "";
             prctl(PR_GET_NAME, name);
             c->bridged = 1;
+            if (unity_target(0x8F37)) c->unity_maps = unity_group(sh);
             LOG("a GLES %d context on the phone's GPU (%u), thread %s", c->version, c->host, name);
             return c;
         }
@@ -1683,6 +1879,7 @@ static void ctx_free(struct ectx *c) {
         for (int i = 0; i < c->g.next; i++) free(c->g.ext[i]);
         free(c->g.ext);
         for (int i = 0; i < 8; i++) free(c->g.maps[i].ptr);
+        unity_drop_context(c);
     } else { SSF(EGLBoolean, DestroyContext, (EGLDisplay, EGLContext)); if (DestroyContext) DestroyContext(c->dpy, c->ss); }
     free(c);
 }

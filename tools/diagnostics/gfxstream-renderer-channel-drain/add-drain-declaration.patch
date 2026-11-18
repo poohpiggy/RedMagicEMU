@@ -1,0 +1,11 @@
+--- a/host/RendererImpl.h
++++ b/host/RendererImpl.h
+@@ -128,6 +128,9 @@
+     const void* getEglDispatch() override;
+     const void* getGles2Dispatch() override;
+ 
++    // Single-session shutdown: stop/join render workers before ProcessPipe cleanup.
++    void rmeDrainForSession();
++
+ private:
+     DISALLOW_COPY_ASSIGN_AND_MOVE(RendererImpl);

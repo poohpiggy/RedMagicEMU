@@ -1,0 +1,95 @@
+--- a/kumquat/server/src/kumquat.rs
++++ b/kumquat/server/src/kumquat.rs
+@@ -13,6 +13,7 @@
+ use magma_gpu::util::WaitTimeout;
+ 
+ use crate::kumquat_gpu::KumquatGpu;
++use crate::kumquat_gpu::KumquatGpuError;
+ use crate::kumquat_gpu::KumquatGpuConnection;
+ use crate::kumquat_gpu::KumquatGpuResult;
+ 
+@@ -56,9 +57,17 @@
+                         KumquatConnection::GpuConnection(ref mut gpu_conn) => {
+                             if event.readable {
+                                 if let Some(ref mut kumquat_gpu) = self.kumquat_gpu_opt {
+-                                    hung_up =
+-                                        !gpu_conn.process_command(kumquat_gpu)? && event.hung_up;
++                                    match gpu_conn.process_command(kumquat_gpu) {
++                                        Ok(eof) => hung_up = eof,
++                                        Err(KumquatGpuError::DisallowedCapset(id)) => {
++                                            log::warn!("Closing connection: capset {} is not enabled", id);
++                                            hung_up = true;
++                                        }
++                                        Err(err) => return Err(err),
++                                    }
+                                 }
++                            } else if event.hung_up {
++                                hung_up = true;
+                             }
+ 
+                             if hung_up {
+--- a/kumquat/server/src/kumquat_gpu/mod.rs
++++ b/kumquat/server/src/kumquat_gpu/mod.rs
+@@ -36,6 +36,7 @@
+ use rutabaga_gfx::RutabagaWsi;
+ use rutabaga_gfx::Transfer3D;
+ use rutabaga_gfx::VulkanInfo as RutabagaVulkanInfo;
++use rutabaga_gfx::RUTABAGA_CONTEXT_INIT_CAPSET_ID_MASK;
+ use rutabaga_gfx::RUTABAGA_FLAG_FENCE;
+ use rutabaga_gfx::RUTABAGA_FLAG_FENCE_HOST_SHAREABLE;
+ use rutabaga_gfx::RUTABAGA_MAP_ACCESS_RW;
+@@ -48,6 +49,8 @@
+ #[non_exhaustive]
+ #[derive(Error, Debug)]
+ pub enum KumquatGpuError {
++    #[error("capset {0} is not enabled")]
++    DisallowedCapset(u32),
+     #[error("Mesa Error {0}")]
+     MagmaGpuError(MagmaGpuError),
+     #[error("Rutabaga Error {0}")]
+@@ -100,6 +103,7 @@
+ }
+ 
+ pub struct KumquatGpu {
++    capset_mask: u64,
+     rutabaga: Rutabaga,
+     fence_state: FenceState,
+     id_allocator: u32,
+@@ -136,6 +140,7 @@
+             .build()?;
+ 
+         Ok(KumquatGpu {
++            capset_mask,
+             rutabaga,
+             fence_state,
+             id_allocator: 0,
+@@ -143,6 +148,13 @@
+         })
+     }
+ 
++    fn require_capset(&self, capset_id: u32) -> KumquatGpuResult<()> {
++        match 1u64.checked_shl(capset_id) {
++            Some(bit) if (self.capset_mask & bit) != 0 => Ok(()),
++            _ => Err(KumquatGpuError::DisallowedCapset(capset_id)),
++        }
++    }
++
+     pub fn allocate_id(&mut self) -> u32 {
+         self.id_allocator += 1;
+         self.id_allocator
+@@ -188,6 +200,7 @@
+                     self.stream.write(KumquatGpuProtocolWrite::Cmd(resp))?;
+                 }
+                 KumquatGpuProtocol::GetCapset(cmd) => {
++                    kumquat_gpu.require_capset(cmd.capset_id)?;
+                     let capset = kumquat_gpu
+                         .rutabaga
+                         .get_capset(cmd.capset_id, cmd.capset_version)?;
+@@ -204,6 +217,7 @@
+                         .write(KumquatGpuProtocolWrite::CmdWithData(resp, capset))?;
+                 }
+                 KumquatGpuProtocol::CtxCreate(cmd) => {
++                    kumquat_gpu.require_capset(cmd.context_init & RUTABAGA_CONTEXT_INIT_CAPSET_ID_MASK)?;
+                     let context_id = kumquat_gpu.allocate_id();
+                     let context_name: Option<String> =
+                         String::from_utf8(cmd.debug_name.to_vec()).ok();

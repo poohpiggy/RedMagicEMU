@@ -1,0 +1,47 @@
+--- a/guest/OpenglSystemCommon/HostConnection.cpp
++++ b/guest/OpenglSystemCommon/HostConnection.cpp
+@@ -198,7 +198,8 @@
+ 
+ // static
+ std::unique_ptr<HostConnection> HostConnection::connect(enum VirtGpuCapset capset) {
+-    const enum HostConnectionType connType = getConnectionTypeFromProperty(capset);
++    const enum HostConnectionType connType = capset == kCapsetGfxStreamVulkan
++        ? HOST_CONNECTION_QEMU_PIPE : getConnectionTypeFromProperty(capset);
+     uint32_t noRenderControlEnc = 0;
+ 
+     // Use "new" to access a non-public constructor.
+@@ -294,7 +295,7 @@
+ 
+     if (capset == kCapsetGfxStreamMagma) {
+         noRenderControlEnc = 1;
+-    } else if (capset == kCapsetGfxStreamVulkan) {
++    } else if (capset == kCapsetGfxStreamVulkan && connType != HOST_CONNECTION_QEMU_PIPE) {
+         VirtGpuDevice* instance = VirtGpuDevice::getInstance(kCapsetGfxStreamVulkan);
+         auto caps = instance->getCaps();
+         noRenderControlEnc = caps.vulkanCapset.noRenderControlEnc;
+@@ -305,8 +306,9 @@
+         ALOGE("Failed to initialize process pipe\n");
+         return nullptr;
+     }
+-    if (!noRenderControlEnc && capset == kCapsetGfxStreamVulkan) {
+-        con->rcEncoder();
++    if (!noRenderControlEnc && capset == kCapsetGfxStreamVulkan &&
++        !con->rcEncoder()->featureInfo_const()->hasVulkan) {
++        return nullptr;
+     }
+ 
+     return con;
+@@ -395,6 +397,13 @@
+                                                              checksumHelper());
+ 
+         ExtendedRCEncoderContext* rcEnc = m_rcEnc.get();
++        if (m_connectionType == HOST_CONNECTION_QEMU_PIPE) {
++            // The EMU service advertises Vulkan only after binding this stream.
++            rcEnc->rcSetPuid(rcEnc, getPuid());
++            queryAndSetVulkanSupport(rcEnc);
++            queryAndSetVulkanShaderFloat16Int8Support(rcEnc);
++            return rcEnc;
++        }
+         setChecksumHelper(rcEnc);
+         queryAndSetSyncImpl(rcEnc);
+         queryAndSetDmaImpl(rcEnc);

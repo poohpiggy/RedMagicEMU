@@ -1,0 +1,19 @@
+--- a/host/frame_buffer.cpp
++++ b/host/frame_buffer.cpp
+@@ -636,6 +636,8 @@
+     std::optional<BlobDescriptorInfo> exportColorBuffer(HandleType colorBufferHandle);
+     std::optional<BlobDescriptorInfo> exportBuffer(HandleType bufferHandle);
+ 
++    bool hasEmulationVk() const { return m_emulationVk != nullptr; }
++
+ #if GFXSTREAM_ENABLE_HOST_GLES
+     // Retrieves the color buffer handle associated with |p_surface|.
+     // Returns 0 if there is no such handle.
+@@ -713,7 +715,6 @@
+     bool hasEmulationGl() const { return m_emulationGl != nullptr; }
+ 
+     vk::VkEmulation& getEmulationVk();
+-    bool hasEmulationVk() const { return m_emulationVk != nullptr; }
+ 
+     bool setColorBufferVulkanMode(HandleType colorBufferHandle, uint32_t mode);
+     int32_t mapGpaToBufferHandle(uint32_t bufferHandle, uint64_t gpa, uint64_t size);
