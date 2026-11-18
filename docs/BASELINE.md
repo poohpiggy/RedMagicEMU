@@ -44,4 +44,4 @@ PowerShell 中设置 `$env:JAVA_HOME='C:\Program Files\Java\jdk-21.0.10'` 和 `$
 
 - 可观察事实：Guest main 日志记录 health 服务进入 charger mode；宿主记录 ztecharger 启动后出现 `guest requested power off (unplug)`。日志还记录一些 vendor 服务退出或 HAL 故障。Guest 日志只保留末尾 4 MiB，不能由缺少某条启动记录断定该事件从未发生。
 - 待验证假设：充电/关机路径可能与此次提前停止有关；触发者、因果关系及与 HAL 报错的关系都未确定，需核对当时版本并在当前代码上复现。不能把所有 HAL 报错当作根因。
-- 历史分析：日志来自旧的修改版，既不能证明当前代码行为，也不能恢复已删除对话中的分析。上游 README 的功能描述是上游声明，不是 NX809J 实测。固件校验、安装、当前版本真机启动和功能均未验证。
+- 验证范围：旧版本日志和上游 README 用于基线分析。NX809J 固件校验、安装、真机启动和功能在该阶段均待验证。

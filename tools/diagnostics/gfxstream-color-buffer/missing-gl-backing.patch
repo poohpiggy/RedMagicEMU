@@ -1,0 +1,11 @@
+--- a/host/color_buffer.cpp
++++ b/host/color_buffer.cpp
+@@ -424,7 +424,7 @@
+     }
+ #endif
+ 
+-    return true;
++    return false;
+ }
+ 
+ bool ColorBuffer::Impl::invalidateForBackend(Backend backend) {

@@ -1,0 +1,31 @@
+--- a/guest/vulkan/gfxstream_vk_device.cpp
++++ b/guest/vulkan/gfxstream_vk_device.cpp
+@@ -62,25 +62,15 @@
+ static gfxstream::vk::VkEncoder* getVkEncoder(HostConnection* con) { return con->vkEncoder(); }
+ 
+ static VkResult SetupInstanceForProcess(void) {
+-    uint32_t noRenderControlEnc = 0;
+     HostConnection* hostCon = getConnection();
+     if (!hostCon) {
+         mesa_loge("vulkan: Failed to get host connection\n");
+         return VK_ERROR_DEVICE_LOST;
+     }
+ 
+-    gfxstream::vk::ResourceTracker::get()->setupCaps(noRenderControlEnc);
+-    // Legacy goldfish path: could be deleted once goldfish not used guest-side.
+-    if (!noRenderControlEnc) {
+-        // Implicitly sets up sequence number
+-        ExtendedRCEncoderContext* rcEnc = hostCon->rcEncoder();
+-        if (!rcEnc) {
+-            mesa_loge("vulkan: Failed to get renderControl encoder context\n");
+-            return VK_ERROR_DEVICE_LOST;
+-        }
+-
+-        gfxstream::vk::ResourceTracker::get()->setupFeatures(rcEnc->featureInfo_const());
+-    }
++    // This client uses the authorized EMU socket and has no VirtGpu capset.
++    gfxstream::vk::ResourceTracker::get()->setupFeatures(
++        hostCon->rcEncoder()->featureInfo_const());
+ 
+     gfxstream::vk::ResourceTracker::get()->setThreadingCallbacks({
+         .hostConnectionGetFunc = getConnection,

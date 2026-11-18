@@ -1,0 +1,21 @@
+--- a/guest/vulkan_enc/ResourceTracker.cpp
++++ b/guest/vulkan_enc/ResourceTracker.cpp
+@@ -4079,6 +4079,18 @@
+                                            const VkAllocationCallbacks* pAllocator,
+                                            VkImage* pImage) {
+     VkEncoder* enc = (VkEncoder*)context;
++#ifdef VK_USE_PLATFORM_ANDROID_KHR
++    const VkNativeBufferANDROID* native = vk_find_struct<VkNativeBufferANDROID>(pCreateInfo);
++    if (native) {
++        if (!native->handle) return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++        auto* connection = threadingCallbacks.hostConnectionGetFunc
++                               ? threadingCallbacks.hostConnectionGetFunc() : nullptr;
++        if (!connection || !connection->grallocHelper()) return VK_ERROR_DEVICE_LOST;
++        if (!connection->grallocHelper()->getHostHandle(
++                reinterpret_cast<const native_handle_t*>(native->handle)))
++            return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++    }
++#endif
+ 
+     VkImageCreateInfo localCreateInfo = vk_make_orphan_copy(*pCreateInfo);
+     if (localCreateInfo.sharingMode != VK_SHARING_MODE_CONCURRENT) {

@@ -1,0 +1,230 @@
+--- a/host/vulkan/VkDecoderGlobalState.cpp
++++ b/host/vulkan/VkDecoderGlobalState.cpp
+@@ -19,6 +19,7 @@
+ #include <memory>
+ #include <mutex>
+ #include <unordered_map>
++#include <unordered_set>
+ #include <vector>
+ 
+ #include "BlobManager.h"
+@@ -376,6 +377,9 @@
+         mInstanceInfo.clear();
+         mPhysdevInfo.clear();
+         mDeviceInfo.clear();
++        for (auto& entry : mSwapchainImageMetadata)
++            releaseSwapchainImagesLocked(entry.first, entry.second);
++        mSwapchainImageOwners.clear();
+         mImageInfo.clear();
+         mSwapchainImageMetadata.clear();
+         mImageViewInfo.clear();
+@@ -2100,13 +2104,14 @@
+         VkSharingMode sharingMode;
+         bool hasPNext;
+         std::vector<uint32_t> queueFamilyIndices;
++        std::unordered_map<VkImage, VkImage> images;
+     };
+ 
+     void on_recordSwapchain(VkDevice device, VkSwapchainKHR boxed,
+                             const VkSwapchainCreateInfoKHR* info) {
+         SwapchainImageMetadata saved{device, info->flags, info->imageFormat,
+             info->imageExtent, info->imageArrayLayers, info->imageUsage,
+-            info->imageSharingMode, info->pNext != nullptr, {}};
++            info->imageSharingMode, info->pNext != nullptr, {}, {}};
+         if (info->imageSharingMode == VK_SHARING_MODE_CONCURRENT && info->queueFamilyIndexCount) {
+             saved.queueFamilyIndices.assign(info->pQueueFamilyIndices,
+                                            info->pQueueFamilyIndices + info->queueFamilyIndexCount);
+@@ -2115,17 +2120,108 @@
+         mSwapchainImageMetadata[boxed] = std::move(saved);
+     }
+ 
++    VkResult on_validateSwapchain(VkDevice device, VkSwapchainKHR boxed) {
++        std::lock_guard<std::recursive_mutex> lock(mLock);
++        auto it = mSwapchainImageMetadata.find(boxed);
++        auto* deviceInfo = android::base::find(mDeviceInfo, device);
++        if (it == mSwapchainImageMetadata.end() || it->second.device != device ||
++            it->second.hasPNext || it->second.flags || snapshotsEnabled() || !deviceInfo ||
++            deviceInfo->needEmulatedDecompression(it->second.format)) return VK_ERROR_UNKNOWN;
++        return VK_SUCCESS;
++    }
++
++    VkResult on_registerSwapchainImages(VkDevice device, VkSwapchainKHR boxed,
++                                        uint32_t count, VkImage* images) {
++        std::lock_guard<std::recursive_mutex> lock(mLock);
++        if (on_validateSwapchain(device, boxed) != VK_SUCCESS || (count && !images))
++            return VK_ERROR_UNKNOWN;
++        auto& meta = mSwapchainImageMetadata.at(boxed);
++        std::unordered_set<VkImage> seen;
++        for (uint32_t i = 0; i < count; ++i) {
++            VkImage raw = images[i];
++            if (!raw || !seen.insert(raw).second) return VK_ERROR_UNKNOWN;
++            auto known = meta.images.find(raw);
++            auto owner = mSwapchainImageOwners.find(raw);
++            auto imageInfo = mImageInfo.find(raw);
++            VkImage reverse = unboxed_to_boxed_non_dispatchable_VkImage(raw);
++            if (known != meta.images.end()) {
++                if (owner == mSwapchainImageOwners.end() || owner->second != boxed ||
++                    imageInfo == mImageInfo.end() || imageInfo->second.device != device ||
++                    reverse != known->second) return VK_ERROR_UNKNOWN;
++            } else if (owner != mSwapchainImageOwners.end() || imageInfo != mImageInfo.end() || reverse) {
++                return VK_ERROR_UNKNOWN;
++            }
++        }
++        std::vector<VkImage> added;
++        for (uint32_t i = 0; i < count; ++i) {
++            VkImage raw = images[i];
++            if (meta.images.find(raw) != meta.images.end()) continue;
++            VkImage imageBox = new_boxed_non_dispatchable_VkImage(raw);
++            if (!imageBox) {
++                for (VkImage prior : added) {
++                    delete_VkImage(meta.images.at(prior));
++                    meta.images.erase(prior);
++                    mSwapchainImageOwners.erase(prior);
++                    mImageInfo.erase(prior);
++                }
++                return VK_ERROR_UNKNOWN;
++            }
++            meta.images[raw] = imageBox;
++            mSwapchainImageOwners[raw] = boxed;
++            auto& imageInfo = mImageInfo[raw];
++            imageInfo.device = device;
++            imageInfo.cmpInfo = CompressedImageInfo(device);
++            VkImageCreateInfo ci = {};
++            ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
++            ci.imageType = VK_IMAGE_TYPE_2D;
++            ci.format = meta.format;
++            ci.extent = {meta.extent.width, meta.extent.height, 1};
++            ci.mipLevels = 1;
++            ci.arrayLayers = meta.arrayLayers;
++            ci.samples = VK_SAMPLE_COUNT_1_BIT;
++            ci.tiling = VK_IMAGE_TILING_OPTIMAL;
++            ci.usage = meta.usage;
++            ci.sharingMode = meta.sharingMode;
++            ci.queueFamilyIndexCount = static_cast<uint32_t>(meta.queueFamilyIndices.size());
++            ci.pQueueFamilyIndices = meta.queueFamilyIndices.empty() ? nullptr : meta.queueFamilyIndices.data();
++            ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++            imageInfo.imageCreateInfoShallow = ci;
++            imageInfo.layout = ci.initialLayout;
++            added.push_back(raw);
++        }
++        for (uint32_t i = 0; i < count; ++i) images[i] = meta.images.at(images[i]);
++        return VK_SUCCESS;
++    }
++
++    // No vkDestroyImage: the swapchain/driver owns these images.
++    void releaseSwapchainImagesLocked(VkSwapchainKHR boxed, SwapchainImageMetadata& meta) {
++        for (const auto& entry : meta.images) {
++            auto owner = mSwapchainImageOwners.find(entry.first);
++            if (owner != mSwapchainImageOwners.end() && owner->second == boxed) {
++                mImageInfo.erase(entry.first);
++                mSwapchainImageOwners.erase(owner);
++            }
++            delete_VkImage(entry.second);
++        }
++        meta.images.clear();
++    }
++
+     void on_forgetSwapchain(VkDevice device, VkSwapchainKHR boxed) {
+         std::lock_guard<std::recursive_mutex> lock(mLock);
+         auto it = mSwapchainImageMetadata.find(boxed);
+-        if (it != mSwapchainImageMetadata.end() && it->second.device == device)
++        if (it != mSwapchainImageMetadata.end() && it->second.device == device) {
++            releaseSwapchainImagesLocked(boxed, it->second);
+             mSwapchainImageMetadata.erase(it);
++        }
+     }
+ 
+     // Caller holds mLock, as in destroyDeviceLocked.
+     void forgetDeviceSwapchainsLocked(VkDevice device) {
+         for (auto it = mSwapchainImageMetadata.begin(); it != mSwapchainImageMetadata.end();) {
+-            if (it->second.device == device) it = mSwapchainImageMetadata.erase(it);
++            if (it->second.device == device) {
++                releaseSwapchainImagesLocked(it->first, it->second);
++                it = mSwapchainImageMetadata.erase(it);
++            }
+             else ++it;
+         }
+     }
+@@ -2217,7 +2313,7 @@
+     void destroyImageLocked(VkDevice device, VulkanDispatch* deviceDispatch, VkImage image,
+                             const VkAllocationCallbacks* pAllocator) {
+         auto* imageInfo = android::base::find(mImageInfo, image);
+-        if (!imageInfo) return;
++        if (!imageInfo || mSwapchainImageOwners.count(image)) return;
+ 
+         if (!imageInfo->anbInfo) {
+             imageInfo->cmpInfo.destroy(deviceDispatch);
+@@ -7684,6 +7780,7 @@
+     std::unordered_map<VkDevice, DeviceInfo> mDeviceInfo;
+     std::unordered_map<VkImage, ImageInfo> mImageInfo;
+     std::unordered_map<VkSwapchainKHR, SwapchainImageMetadata> mSwapchainImageMetadata;
++    std::unordered_map<VkImage, VkSwapchainKHR> mSwapchainImageOwners;
+     std::unordered_map<VkImageView, ImageViewInfo> mImageViewInfo;
+     std::unordered_map<VkSampler, SamplerInfo> mSamplerInfo;
+     std::unordered_map<VkCommandBuffer, CommandBufferInfo> mCmdBufferInfo;
+@@ -8038,6 +8135,15 @@
+ void VkDecoderGlobalState::on_recordSwapchain(VkDevice device, VkSwapchainKHR boxed,
+                                               const VkSwapchainCreateInfoKHR* info) {
+     mImpl->on_recordSwapchain(device, boxed, info);
++}
++
++VkResult VkDecoderGlobalState::on_validateSwapchain(VkDevice device, VkSwapchainKHR boxed) {
++    return mImpl->on_validateSwapchain(device, boxed);
++}
++
++VkResult VkDecoderGlobalState::on_registerSwapchainImages(VkDevice device, VkSwapchainKHR boxed,
++                                                           uint32_t count, VkImage* images) {
++    return mImpl->on_registerSwapchainImages(device, boxed, count, images);
+ }
+ 
+ void VkDecoderGlobalState::on_forgetSwapchain(VkDevice device, VkSwapchainKHR boxed) {
+--- a/host/vulkan/VkDecoderGlobalState.h
++++ b/host/vulkan/VkDecoderGlobalState.h
+@@ -225,6 +225,9 @@
+ 
+     void on_recordSwapchain(VkDevice device, VkSwapchainKHR boxed,
+                             const VkSwapchainCreateInfoKHR* info);
++    VkResult on_validateSwapchain(VkDevice device, VkSwapchainKHR boxed);
++    VkResult on_registerSwapchainImages(VkDevice device, VkSwapchainKHR boxed,
++                                        uint32_t count, VkImage* images);
+     void on_forgetSwapchain(VkDevice device, VkSwapchainKHR boxed);
+ 
+     VkResult on_vkCreateImage(android::base::BumpPool* pool, VkDevice device,
+--- a/host/vulkan/VkDecoder.cpp
++++ b/host/vulkan/VkDecoder.cpp
+@@ -13315,8 +13315,8 @@
+                 uint64_t cgen_var_1;
+                 memcpy((uint64_t*)&cgen_var_1, *readStreamPtrPtr, 1 * 8);
+                 *readStreamPtrPtr += 1 * 8;
+-                *(VkSwapchainKHR*)&swapchain =
+-                    (VkSwapchainKHR)unbox_VkSwapchainKHR((VkSwapchainKHR)(*&cgen_var_1));
++                VkSwapchainKHR boxed_swapchain = (VkSwapchainKHR)(*&cgen_var_1);
++                swapchain = unbox_VkSwapchainKHR(boxed_swapchain);
+                 // Begin manual dispatchable handle unboxing for pSwapchainImageCount;
+                 vkReadStream->unsetHandleMapping();
+                 // WARNING PTR CHECK
+@@ -13358,9 +13358,21 @@
+                         (unsigned long long)pSwapchainImageCount,
+                         (unsigned long long)pSwapchainImages);
+                 }
+-                VkResult vkGetSwapchainImagesKHR_VkResult_return = (VkResult)0;
+-                vkGetSwapchainImagesKHR_VkResult_return = vk->vkGetSwapchainImagesKHR(
+-                    unboxed_device, swapchain, pSwapchainImageCount, pSwapchainImages);
++                VkResult vkGetSwapchainImagesKHR_VkResult_return =
++                    m_state->on_validateSwapchain(unboxed_device, boxed_swapchain);
++                if (vkGetSwapchainImagesKHR_VkResult_return == VK_SUCCESS) {
++                    vkGetSwapchainImagesKHR_VkResult_return = vk->vkGetSwapchainImagesKHR(
++                        unboxed_device, swapchain, pSwapchainImageCount, pSwapchainImages);
++                }
++                if ((vkGetSwapchainImagesKHR_VkResult_return == VK_SUCCESS ||
++                     vkGetSwapchainImagesKHR_VkResult_return == VK_INCOMPLETE) && pSwapchainImages) {
++                    VkResult registration = m_state->on_registerSwapchainImages(
++                        unboxed_device, boxed_swapchain, *pSwapchainImageCount, pSwapchainImages);
++                    if (registration != VK_SUCCESS) vkGetSwapchainImagesKHR_VkResult_return = registration;
++                }
++                if (vkGetSwapchainImagesKHR_VkResult_return != VK_SUCCESS &&
++                    vkGetSwapchainImagesKHR_VkResult_return != VK_INCOMPLETE &&
++                    pSwapchainImages && pSwapchainImageCount) *pSwapchainImageCount = 0;
+                 if ((vkGetSwapchainImagesKHR_VkResult_return) == VK_ERROR_DEVICE_LOST)
+                     m_state->on_DeviceLost();
+                 m_state->on_CheckOutOfMemory(vkGetSwapchainImagesKHR_VkResult_return, opcode,

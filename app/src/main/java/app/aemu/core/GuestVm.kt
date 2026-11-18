@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Process as AProcess
 import android.os.SystemClock
 import android.view.Surface
+import app.aemu.BuildConfig
 import dev.lk.dhd.BinderSlot
 import dev.lk.dhd.GlSlot
 import dev.lk.dhd.Slot
@@ -231,6 +232,8 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     @Volatile var bootStartedElapsed: Long = 0L
         private set
     private val lifecycle = VmLifecycle()
+    private val hostVulkan = HostVulkanVmHost(HostVulkanService(), ::log) { android.os.Process.myPid() }
+    private val hostOpenCl = HostOpenClVmHost(::log)
     internal fun withAdmittedFramebuffer(action: () -> Unit) = admissionState.ifAdmitted {
         if (state == State.PREPARING || state == State.BOOTING || state == State.RUNNING) action()
     }
@@ -244,6 +247,8 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                 failure = null
                 powerHandled.set(false)
                 admissionState.reset()
+                hostVulkan.begin()
+                hostOpenCl.begin()
                 setState(State.PREPARING)
             }) return
         try {
@@ -259,6 +264,13 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                         if (!stopping) { if (recoveryMode) doRecovery() else doBoot() }
                     }
                 } catch (t: Throwable) {
+                    hostVulkan.cancel()
+                    hostOpenCl.cancel()
+                    runCatching { hostVulkan.stop() }.onFailure { t.addSuppressed(it) }
+                    runCatching { hostOpenCl.stop() }.onFailure {
+                        t.addSuppressed(it)
+                        log("OpenCL host cleanup unconfirmed: ${it.message}")
+                    }
                     activeRadioBackend = TargetRadioLaunch.Backend.DISABLED
                     wifiDnsRestartPolicy?.stop()
                     wifiDnsRestartPolicy = null
@@ -386,6 +398,47 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         }.start()
     }
 
+    private fun prepareGuestGpu(runner: File) {
+        if (!HostVulkanVmHost.selected(img.model, img.api, img.abi, engine == Engine.N64, true)) return
+        val runtime = TargetGpuRuntime(paths.root, File(paths.bin, "gpu-runtime-original"), ctx.assets::open)
+        val nativeDir = File(ctx.applicationInfo.nativeLibraryDir)
+        val renderer = File(nativeDir, HostVulkanVmHost.RENDERER_EXECUTABLE)
+        val assets = if (renderer.canExecute()) ctx.assets.list("rme-gpu").orEmpty() else emptyArray()
+        val packaged = "guest.idx" in assets
+        if (settings.gpu && packaged) {
+            val sockets = File(paths.root, "dev/socket")
+            sockets.mkdirs()
+            val stale = File(sockets, "aemuvk")
+            if (stale.exists()) check(stale.delete()) { "cannot clear previous Guest Vulkan socket" }
+            if (hostVulkan.startGuestRenderer(nativeDir, paths.root, runner, settings.width, settings.height,
+                    settings.density)) {
+                val prepared = try {
+                    val index = ctx.assets.open(TargetGpuRuntime.INDEX).bufferedReader().use { it.readText() }
+                    runtime.prepare(index)
+                    true
+                } catch (failure: Exception) {
+                    hostVulkan.stop()
+                    runtime.restore()
+                    log("Guest GPU libraries unavailable: ${failure.message}")
+                    false
+                }
+                if (prepared) {
+                    log("Guest Vulkan and OpenCL libraries prepared")
+                    if ("native-opencl" in assets) hostOpenCl.start(paths.root, runner)
+                    return
+                }
+            }
+        }
+        runtime.restore()
+        if (settings.gpu && !packaged) lifecycle.launch("vulkan-host") {
+            if (BuildConfig.DEBUG && renderer.isFile) {
+                hostVulkan.startRenderer(nativeDir, settings.width, settings.height, settings.density)
+            } else {
+                hostVulkan.start(File(nativeDir, "libaemuvkhost.so"))
+            }
+        }
+    }
+
     private fun doBoot() {
         paths.bin.mkdirs()
         runCatching { logFile.writeText("") }
@@ -413,6 +466,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         // 1. дерево
         val fixer = TreeFixer(ctx, paths, img, ::log)
         fixer.fixup()
+        prepareGuestGpu(qemu)
         val vibrationAdapterReady = prepareVibrationRuntime(recoveryMode, {
             TargetVibrationArtifacts.prepare(paths.root, img.api, img.model, img.abi, engine, true) { asset ->
                 EngineAssets.open(ctx, asset).use { it.readBytes() }
@@ -2099,6 +2153,8 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         var dnsCleanupFailure: Throwable? = null
         lifecycle.stop(onRequest = {
             stopping = true
+            hostVulkan.cancel()
+            hostOpenCl.cancel()
             setState(State.STOPPING)
             wifiDnsRestartPolicy?.stop()
             wifiDnsRestartPolicy=null
@@ -2121,6 +2177,10 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             adb.requestStop()
             externalProcs.forEach { runCatching { it.destroyForcibly() } }
         }) {
+            val vulkanCleanupFailure = runCatching { hostVulkan.stop() }.exceptionOrNull()
+            vulkanCleanupFailure?.let { log("Vulkan host cleanup unconfirmed: ${it.message}") }
+            val openClCleanupFailure = runCatching { hostOpenCl.stop() }.exceptionOrNull()
+            openClCleanupFailure?.let { log("OpenCL host cleanup unconfirmed: ${it.message}") }
             adb.stop()
             if (admissionState.admitted) {
                 log("stopping system")
@@ -2131,13 +2191,12 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                 lmk?.stop(); lmk = null
                 Keeper.release(ctx)
             }
-            dnsCleanupFailure?.let { failure ->
-                radioCleanupFailure?.let { if (it !== failure) failure.addSuppressed(it) }
-                vibrationCleanupFailure?.let { if (it !== failure) failure.addSuppressed(it) }
+            val cleanupFailures = listOfNotNull(dnsCleanupFailure, radioCleanupFailure,
+                vibrationCleanupFailure, vulkanCleanupFailure, openClCleanupFailure)
+            cleanupFailures.firstOrNull()?.let { failure ->
+                cleanupFailures.drop(1).filter { it !== failure }.forEach(failure::addSuppressed)
                 throw failure
             }
-            radioCleanupFailure?.let { throw it }
-            vibrationCleanupFailure?.let { throw it }
             setState(State.STOPPED)
         }
     }

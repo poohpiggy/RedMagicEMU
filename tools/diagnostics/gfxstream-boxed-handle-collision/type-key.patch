@@ -1,0 +1,105 @@
+--- a/host/vulkan/VkDecoderGlobalState.cpp
++++ b/host/vulkan/VkDecoderGlobalState.cpp
+@@ -207,10 +207,11 @@
+     // expect the system to go over 16000 total live handles, outside some
+     // dEQP object management tests.
+     using Store = android::base::HybridEntityManager<16000, uint64_t, T>;
++    using HandleCodec = typename Store::EM;
+ 
+     Lock lock;
+     mutable Store store;
+-    std::unordered_map<uint64_t, uint64_t> reverseMap;
++    std::unordered_map<uint64_t, std::unordered_map<size_t, uint64_t>> reverseMap;
+     struct DelayedRemove {
+         uint64_t handle;
+         std::function<void()> callback;
+@@ -225,14 +226,14 @@
+     uint64_t add(const T& item, BoxedHandleTypeTag tag) {
+         auto res = (uint64_t)store.add(item, (size_t)tag);
+         AutoLock l(lock);
+-        reverseMap[(uint64_t)(item.underlying)] = res;
++        reverseMap[(uint64_t)(item.underlying)][HandleCodec::getHandleType(res)] = res;
+         return res;
+     }
+ 
+     uint64_t addFixed(uint64_t handle, const T& item, BoxedHandleTypeTag tag) {
+         auto res = (uint64_t)store.addFixed(handle, item, (size_t)tag);
+         AutoLock l(lock);
+-        reverseMap[(uint64_t)(item.underlying)] = res;
++        reverseMap[(uint64_t)(item.underlying)][HandleCodec::getHandleType(res)] = res;
+         return res;
+     }
+ 
+@@ -240,7 +241,10 @@
+     // this reverse-map entry after sharing the same underlying value.
+     void eraseReverseMappingIfMatches(uint64_t underlying, uint64_t boxed) {
+         auto it = reverseMap.find(underlying);
+-        if (it != reverseMap.end() && it->second == boxed) reverseMap.erase(it);
++        if (it == reverseMap.end()) return;
++        auto typed = it->second.find(HandleCodec::getHandleType(boxed));
++        if (typed != it->second.end() && typed->second == boxed) it->second.erase(typed);
++        if (it->second.empty()) reverseMap.erase(it);
+     }
+ 
+     void update(uint64_t handle, const T& item, BoxedHandleTypeTag tag) {
+@@ -251,7 +255,7 @@
+         if (oldHandle) {
+             eraseReverseMappingIfMatches(oldHandle, handle);
+         }
+-        reverseMap[(uint64_t)(item.underlying)] = handle;
++        reverseMap[(uint64_t)(item.underlying)][HandleCodec::getHandleType(handle)] = handle;
+     }
+ 
+     void remove(uint64_t h) {
+@@ -289,10 +293,11 @@
+ 
+     T* get(uint64_t h) { return (T*)store.get_const(h); }
+ 
+-    uint64_t getBoxedFromUnboxedLocked(uint64_t unboxed) {
+-        auto* res = android::base::find(reverseMap, unboxed);
+-        if (!res) return 0;
+-        return *res;
++    uint64_t getBoxedFromUnboxedLocked(uint64_t unboxed, BoxedHandleTypeTag type) {
++        auto it = reverseMap.find(unboxed);
++        if (it == reverseMap.end()) return 0;
++        auto typed = it->second.find((size_t)type);
++        return typed == it->second.end() ? 0 : typed->second;
+     }
+ };
+ 
+@@ -6758,7 +6763,7 @@
+     }                                                                                             \
+     type unboxed_to_boxed_##type(type unboxed) {                                                  \
+         AutoLock lock(sBoxedHandleManager.lock);                                                  \
+-        return (type)sBoxedHandleManager.getBoxedFromUnboxedLocked((uint64_t)(uintptr_t)unboxed); \
++        return (type)sBoxedHandleManager.getBoxedFromUnboxedLocked((uint64_t)(uintptr_t)unboxed, Tag_##type); \
+     }                                                                                             \
+     VulkanDispatch* dispatch_##type(type boxed) {                                                 \
+         auto elt = sBoxedHandleManager.get((uint64_t)(uintptr_t)boxed);                           \
+@@ -6787,7 +6792,7 @@
+     }                                                                                             \
+     type unboxed_to_boxed_non_dispatchable_##type(type unboxed) {                                 \
+         AutoLock lock(sBoxedHandleManager.lock);                                                  \
+-        return (type)sBoxedHandleManager.getBoxedFromUnboxedLocked((uint64_t)(uintptr_t)unboxed); \
++        return (type)sBoxedHandleManager.getBoxedFromUnboxedLocked((uint64_t)(uintptr_t)unboxed, Tag_##type); \
+     }                                                                                             \
+     type unbox_##type(type boxed) {                                                               \
+         auto elt = sBoxedHandleManager.get((uint64_t)(uintptr_t)boxed);                           \
+@@ -8951,7 +8956,7 @@
+     }                                                                                             \
+     type unboxed_to_boxed_##type(type unboxed) {                                                  \
+         AutoLock lock(sBoxedHandleManager.lock);                                                  \
+-        return (type)sBoxedHandleManager.getBoxedFromUnboxedLocked((uint64_t)(uintptr_t)unboxed); \
++        return (type)sBoxedHandleManager.getBoxedFromUnboxedLocked((uint64_t)(uintptr_t)unboxed, Tag_##type); \
+     }
+ 
+ #define DEFINE_BOXED_NON_DISPATCHABLE_HANDLE_GLOBAL_API_DEF(type)                                 \
+@@ -8977,7 +8982,7 @@
+     }                                                                                             \
+     type unboxed_to_boxed_non_dispatchable_##type(type unboxed) {                                 \
+         AutoLock lock(sBoxedHandleManager.lock);                                                  \
+-        return (type)sBoxedHandleManager.getBoxedFromUnboxedLocked((uint64_t)(uintptr_t)unboxed); \
++        return (type)sBoxedHandleManager.getBoxedFromUnboxedLocked((uint64_t)(uintptr_t)unboxed, Tag_##type); \
+     }
+ 
+ GOLDFISH_VK_LIST_DISPATCHABLE_HANDLE_TYPES(DEFINE_BOXED_DISPATCHABLE_HANDLE_GLOBAL_API_DEF)

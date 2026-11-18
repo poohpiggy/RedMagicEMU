@@ -1,0 +1,39 @@
+--- a/guest/vulkan_enc/ResourceTracker.cpp
++++ b/guest/vulkan_enc/ResourceTracker.cpp
+@@ -7038,6 +7038,9 @@
+         goldfish_sync_queue_work(
+             mSyncDeviceFd, get_host_u64_VkImage(image) /* the handle */,
+             GOLDFISH_SYNC_VULKAN_QSRI /* thread handle (doubling as type field) */, fd);
++#else
++        *fd = -1;
++        return VK_ERROR_UNKNOWN;
+ #endif
+     }
+ 
+@@ -7102,6 +7105,13 @@
+         }
+     }
+ 
++#if !GFXSTREAM_ENABLE_GUEST_GOLDFISH
++    if (!mFeatureInfo->hasVirtioGpuNativeSync) {
++        if (pNativeFenceFd) *pNativeFenceFd = -1;
++        return VK_ERROR_UNKNOWN;
++    }
++#endif
++
+     enc->vkQueueSignalReleaseImageANDROIDAsyncGOOGLE(queue, waitSemaphoreCount, pWaitSemaphores,
+                                                      image, true /* lock */);
+ 
+@@ -7110,10 +7120,10 @@
+     if (pNativeFenceFd) {
+         result = exportSyncFdForQSRILocked(image, pNativeFenceFd);
+     } else {
+-        int syncFd;
++        int syncFd = -1;
+         result = exportSyncFdForQSRILocked(image, &syncFd);
+ 
+-        if (syncFd >= 0) {
++        if (result == VK_SUCCESS && syncFd >= 0) {
+             auto* syncHelper =
+                 ResourceTracker::threadingCallbacks.hostConnectionGetFunc()->syncHelper();
+             syncHelper->close(syncFd);

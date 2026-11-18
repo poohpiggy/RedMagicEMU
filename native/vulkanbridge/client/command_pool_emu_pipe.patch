@@ -1,0 +1,32 @@
+--- a/guest/vulkan/gfxstream_vk_cmd.cpp
++++ b/guest/vulkan/gfxstream_vk_cmd.cpp
+@@ -15,5 +15,13 @@
++#include "HostConnection.h"
+ #include "ResourceTracker.h"
+ #include "VkEncoder.h"
+ #include "gfxstream_vk_private.h"
+ 
++// Vulkan external synchronization orders pool operations across application
++// threads. Wait for the decoder before a different thread uses its own stream.
++static void finishPoolOperation() {
++    auto* rc = HostConnection::get()->rcEncoder();
++    rc->rcGetRendererVersion(rc);
++}
++
+ VkResult gfxstream_vk_CreateCommandPool(VkDevice device, const VkCommandPoolCreateInfo* pCreateInfo,
+@@ -54,6 +62,7 @@
+         vkEnc->vkDestroyCommandPool(gfxstream_device->internal_object,
+                                     gfxstream_commandPool->internal_object, pAllocator,
+                                     true /* do lock */);
++        finishPoolOperation();
+     }
+     vk_command_pool_finish(&gfxstream_commandPool->vk);
+     vk_free(&gfxstream_commandPool->vk.alloc, gfxstream_commandPool);
+@@ -180,6 +189,7 @@
+         vkEnc->vkFreeCommandBuffers(gfxstream_device->internal_object,
+                                     gfxstream_commandPool->internal_object, commandBufferCount,
+                                     internal_objects.data(), true /* do lock */);
++        finishPoolOperation();
+     }
+     for (uint32_t i = 0; i < commandBufferCount; i++) {
+         VK_FROM_HANDLE(gfxstream_vk_command_buffer, gfxstream_commandBuffer, pCommandBuffers[i]);

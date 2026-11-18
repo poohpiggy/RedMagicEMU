@@ -1,0 +1,11 @@
+--- a/guest/vulkan/gfxstream_vk_device.cpp
++++ b/guest/vulkan/gfxstream_vk_device.cpp
+@@ -30,7 +30,7 @@
+ 
+ #define VK_HOST_CONNECTION(ret)                                                    \
+     HostConnection* hostCon = HostConnection::getOrCreate(kCapsetGfxStreamVulkan); \
+-    gfxstream::vk::VkEncoder* vkEnc = hostCon->vkEncoder();                        \
++    gfxstream::vk::VkEncoder* vkEnc = hostCon ? hostCon->vkEncoder() : nullptr;    \
+     if (!vkEnc) {                                                                  \
+         mesa_loge("vulkan: Failed to get Vulkan encoder\n");                       \
+         return ret;                                                                \

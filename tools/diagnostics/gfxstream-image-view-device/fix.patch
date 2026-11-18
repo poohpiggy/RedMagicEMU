@@ -1,0 +1,10 @@
+--- a/host/vulkan/VkDecoderGlobalState.cpp
++++ b/host/vulkan/VkDecoderGlobalState.cpp
+@@ -2381,6 +2381,7 @@
+         auto* deviceInfo = android::base::find(mDeviceInfo, device);
+         auto* imageInfo = android::base::find(mImageInfo, pCreateInfo->image);
+         if (!deviceInfo || !imageInfo) return VK_ERROR_OUT_OF_HOST_MEMORY;
++        if (imageInfo->device != device) return VK_ERROR_UNKNOWN;
+         VkImageViewCreateInfo createInfo;
+         bool needEmulatedAlpha = false;
+         if (deviceInfo->needEmulatedDecompression(pCreateInfo->format)) {

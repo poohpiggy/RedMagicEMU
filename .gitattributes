@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Preserve the verified GPU bundle bytes on all platforms.
+native/gpu-runtime/android/** -text

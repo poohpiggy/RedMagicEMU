@@ -86,6 +86,11 @@
         </service>
 
         <service
+            android:name=".core.VulkanSurfaceService"
+            android:exported="false"
+            android:process=":vulkan" />
+
+        <service
             android:name="dev.lk.dhd.BinderSlot"
             android:exported="false"
             android:process=":binder" />

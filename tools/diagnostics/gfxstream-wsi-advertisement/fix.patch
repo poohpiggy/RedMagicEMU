@@ -1,0 +1,38 @@
+--- a/guest/vulkan/gfxstream_vk_device.cpp
++++ b/guest/vulkan/gfxstream_vk_device.cpp
+@@ -149,6 +149,8 @@
+         if (VK_SUCCESS == result) {
+             // device extensions from gfxstream
+             for (uint32_t i = 0; i < numDeviceExts; i++) {
++                if (!strcmp(extProps[i].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME))
++                    continue;
+                 for (uint32_t j = 0; j < VK_DEVICE_EXTENSION_COUNT; j++) {
+                     if (0 == strncmp(extProps[i].extensionName,
+                                      vk_device_extensions[j].extensionName,
+@@ -161,6 +163,8 @@
+             }
+             // device extensions from Mesa
+             for (uint32_t j = 0; j < VK_DEVICE_EXTENSION_COUNT; j++) {
++                if (!strcmp(vk_device_extensions[j].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME))
++                    continue;
+                 if (isMesaOnlyDeviceExtension(vk_device_extensions[j].extensionName)) {
+                     deviceExts->extensions[j] = true;
+                     break;
+@@ -278,6 +282,8 @@
+                 if (VK_SUCCESS == result) {
+                     // instance extensions from gfxstream
+                     for (uint32_t i = 0; i < numInstanceExts; i++) {
++                        if (!strcmp(extProps[i].extensionName, VK_KHR_ANDROID_SURFACE_EXTENSION_NAME))
++                            continue;
+                         for (uint32_t j = 0; j < VK_INSTANCE_EXTENSION_COUNT; j++) {
+                             if (0 == strncmp(extProps[i].extensionName,
+                                              vk_instance_extensions[j].extensionName,
+@@ -291,6 +297,8 @@
+                     }
+                     // instance extensions from Mesa
+                     for (uint32_t j = 0; j < VK_INSTANCE_EXTENSION_COUNT; j++) {
++                        if (!strcmp(vk_instance_extensions[j].extensionName, VK_KHR_ANDROID_SURFACE_EXTENSION_NAME))
++                            continue;
+                         if (isMesaOnlyInstanceExtension(vk_instance_extensions[j].extensionName)) {
+                             gfxstream_vk_instance_extensions_supported.extensions[j] = true;
+                         }

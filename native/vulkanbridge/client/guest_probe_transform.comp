@@ -1,0 +1,8 @@
+#version 450
+layout(local_size_x = 16) in;
+layout(set = 0, binding = 0, std430) buffer Payload { uint words[]; } payload;
+
+void main() {
+    uint x = 3u * gl_GlobalInvocationID.x;
+    payload.words[x] = 3u * payload.words[x] + 7u;
+}

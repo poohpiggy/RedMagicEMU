@@ -1,0 +1,21 @@
+--- a/guest/vulkan_enc/ResourceTracker.cpp
++++ b/guest/vulkan_enc/ResourceTracker.cpp
+@@ -4718,10 +4718,16 @@
+             *pFd = osHandle;
+         } else {
+ #if GFXSTREAM_ENABLE_GUEST_GOLDFISH
+-            goldfish_sync_queue_work(
++            int exportedFd = -1;
++            int queueResult = goldfish_sync_queue_work(
+                 mSyncDeviceFd, get_host_u64_VkFence(pGetFdInfo->fence) /* the handle */,
+                 GOLDFISH_SYNC_VULKAN_SEMAPHORE_SYNC /* thread handle (doubling as type field) */,
+-                pFd);
++                &exportedFd);
++            if (queueResult < 0) return VK_ERROR_UNKNOWN;
++            *pFd = exportedFd;
++#else
++            // No native sync backend can create the requested sync FD.
++            return VK_ERROR_UNKNOWN;
+ #endif
+         }
+ 

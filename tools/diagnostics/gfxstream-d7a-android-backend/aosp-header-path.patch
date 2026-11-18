@@ -1,0 +1,12 @@
+--- a/cross.ini
++++ b/cross.ini
+@@ -10,7 +10,7 @@
+ cpu = 'aarch64'
+ endian = 'little'
+ [built-in options]
+-c_args = ['-DANDROID']
+-cpp_args = ['-DANDROID']
++c_args = ['-DANDROID', '-I/var/tmp/rme-mesa-android-6ekppv9b/aosp-core/libcutils/include']
++cpp_args = ['-DANDROID', '-I/var/tmp/rme-mesa-android-6ekppv9b/aosp-core/libcutils/include']
+ c_link_args = ['-Wl,-z,max-page-size=16384']
+ cpp_link_args = ['-Wl,-z,max-page-size=16384']

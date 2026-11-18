@@ -1,12 +1,22 @@
-# 进度
+# 开发进度
+
+按阶段记录功能需求、实现及验证结果。目标 Guest 为指定的 REDMAGIC NX809J 原厂 Android 16 / API 36 / ARM64 固件。系统功能验收见[兼容矩阵](COMPATIBILITY.md)。
+
+## 0.6.2-beta GPU 阶段概览（2026-11-18）
+
+| 需求 | 实现 | 验证 |
+| --- | --- | --- |
+| 常规 APK 启动 Guest 时自动接入 Vulkan | VM 启动宿主渲染服务，并在 Guest Android 启动前安装 Vulkan 客户端。Guest 应用经 gfxstream 将命令提交到宿主 Adreno。 | Adreno 750 的 Geekbench 6.7.1 Vulkan 调优包实测 **15,263**，8 项有效。 |
+| Guest 应用使用宿主原生 OpenCL 和 FP16 | Guest 的公开 OpenCL 库经实例私有 socket 调用宿主厂商驱动。FP16 扩展与能力值取自原生驱动。 | Adreno 750 的 N64 FP16 内核校验通过。同一手机的原生 Geekbench 6.7.1 OpenCL 对照为 **14,535**。 |
+| 减少 OpenCL 传输中的等待和拷贝 | 线性缓冲区读回接入异步完成和共享槽。线性缓冲区、图像及矩形缓冲区的非阻塞上传由宿主保留独立暂存，完成后回收。 | 矩形上传包的 OpenCL 首轮 **11,128**，复测 **12,326**，两轮各 8 项有效。上一版图像上传包复测 **12,777**。图像和矩形缓冲区的异步上传均在 Adreno 上通过回归。 |
 
 ## S0 基线审计（2026-11-04）
 
-- 原目录为空；本项目从指定的 AEmulator 来源新建 checkout，以取得时的上游 main 为基线，创建 `s0-baseline-audit` 分支。不是恢复已删除的历史项目。
+- 项目从 AEmulator 上游 `main` 检出并建立独立基线，初始审计使用 `s0-baseline-audit` 分支。
 - 代码入口、构建要求、预编译资产及风险见 [BASELINE.md](BASELINE.md)。本轮没有修改产品运行逻辑。
 - 后续提供的旧版 AE 导出日志已作脱敏审阅，事实与假设见基线。指定固件未提供，固件身份和 HAL 因果未验证；旧日志不代表当前版本的运行结果。构建和真机验证状态以基线记录为准。
 - 使用本机 JDK 21 和新配置的 Android SDK，`assembleStandardDebug` 构建成功；原生组件独立重编译、安装和真机运行未验证。S0 审计已记录可用证据及限制。
-- 任务 1A 需要明确具体范围，并先完成与其相关的失败测试或最小复现；固件校验工作还需要指定固件的可信身份信息与可访问样本。
+- 进入 1A 后以最小复现验证改动。固件校验依赖可信身份信息与可访问的目标样本。
 
 ## 0.1.0 任务 1A：品牌和安装身份（2026-11-04）
 
@@ -124,7 +134,7 @@
 - JDK 21 执行 `:app:testStandardDebugUnitTest :app:assembleStandardDebug :app:assembleCloneDebug` 成功；137 项测试中 105 项通过、32 项跳过，0 失败。首次调用受本机失效的 Gradle Java 路径配置阻碍，使用命令行指定 JDK 后成功。`git diff --check` 通过；构建有既有 Kotlin 警告。未实机验证本轮改动。当前构建版本仍为 0.0.0.4，0.1.0 仅为阶段目标；未发布、推送或打标签。
 - 回滚 1C 时仅逐项恢复本轮 UI、单实例发布与对应测试改动，保留 1B 及其他原有未提交内容；不要重置工作树或删除实例数据。
 
-### 任务 1C 补充：停止期间启动的只读诊断（2026-11-04）
+### 任务 1C：准备期启动与停止竞态（2026-11-04）
 
 - 设备通过无线 ADB 连接；只读检查已安装的独立 `app.redmagicemu.clone`，版本 `0.0.0.4`，安装时间 23:16:46。其实例 `fnjnbt` 元数据声明 NX809J、API 36、arm64 和已接受的系统指纹。未重启 Guest、安装 APK 或修改设备数据。
 - 该实例现有运行日志在 23:34:15 依次记录 `stopping system`、等待显示和 GL bridge 超时、随后 `surfaceflinger started`。这与源码中准备期停止后启动工作仍可继续的竞争一致；日志顺序本身不能证明该进程最终存活，也不能单独确定所有失败的原因。当前设备 APK 不能视为本轮 1C 构建设备验收，未取得进入桌面的结果。
@@ -158,11 +168,11 @@
 - 关机后只读进程快照未看到命令行含该实例路径或 `libaemu64_36` 的进程，应用主进程与 `:vm` 进程仍在；该快照不能证明所有未登记后代均已退出。未测试准备期手动停止、取消、空间不足、Activity 重建或输入显示音量，仍待验收。应用测试包保留在关机画面，实例与设备原始包保留。
 - 启动应用及 VM 进程时设备重复显示已知 16 KB 对齐警告；只点击“确定”，没有禁用提示或调整系统策略。通知权限确认后测试包获授权。标准应用未覆盖或清除数据；原始日志未保存到仓库。1C 设备验收未通过，启动关机原因待进一步诊断。
 
-### 任务 1C 补充：上轮改动联合验证与设备连接检查（2026-11-05）
+### 任务 1C：启动同步和导入状态验证（2026-11-05）
 
-- 上轮尚未记录的工作树改动包括停止时同步进程登记、受控空间不足测试、Activity 有保存状态时避免重复处理初始 Intent，以及导入完成卡的通用引擎提示收敛。保留既有未提交内容；本轮未改产品源码。
+- 联合验证覆盖停止时的同步进程登记、模拟空间不足、Activity 状态恢复后的初始 Intent 去重，以及导入完成页的引擎提示。
 - JDK 21 执行 `:app:testStandardDebugUnitTest :app:assembleStandardDebug :app:assembleCloneDebug` 成功；176 项测试中 144 项通过、32 项跳过、0 项失败。`git diff --check` 通过；这不等于安装、设备运行或完整 VM 停止验证。受控空间不足测试不代表 Android 文件写入中实际 ENOSPC；Intent 测试不覆盖没有保存状态时的重投。
-- 上轮第二次导入时曾点击取消，但随后界面仍显示暂存或检查，尚不能确认取消生效。当前无线 ADB 设备显示 offline，尝试重连后仍不可用，之后设备列表为空；无法读取该次导入结果、待处理目录或原实例状态。需要设备恢复无线调试连接后只读核对，不得据此将 1C 判为通过。
+- 第二次导入触发取消后，界面仍显示暂存或检查。无线 ADB 离线及重连失败使本次验证未能取得导入结果、待处理目录和原实例状态，取消行为待复测。
 - 仍待验收：设备上的取消、准备期停止、空间不足、重复操作和进程重建，以及历史多实例安全处理；未排查 Guest 无法进入桌面的原因。本轮未安装 APK、清理设备数据或发布。
 
 ### 任务 1C 补充：暂存阶段取消设备检查（2026-11-05）
@@ -190,14 +200,13 @@
 - 只读复核：现有 `VmLifecycleTest.stopWaitsForBootAndRejectsLateResourceCreation` 覆盖协调器中的受控启动/停止，但未调用完整 `GuestVm.bootAsync()` 和设备路径；停止清理还可能有单独的 Guest sync 命令。完整设备验证需要可控地阻塞准入、确认 PREPARING、请求停止并释放阻塞，再检查停止结果及后续资源。设备进程扫描不能证明所有未登记后代已退出。
 - 本轮未改产品代码、未安装或删除数据，未排查 Guest 无法进入桌面的原因。准备期手动停止仍待验收，1C 未判通过。
 
-### 任务 1C 补充：准备期停止延期（2026-11-05）
+### 任务 1C：准备期停止的验收范围（2026-11-05）
 
-- 准备期手动停止的完整设备验收与必要修复留待后续版本推进；当前状态是未验证，不代表已修复或通过。此前协调器本地测试和设备诊断的证据边界保持不变。
-- ROM 暂不能进入桌面同样按既定计划留待后续版本，不作为本次判断 1C 剩余项的阻碍。1C 的其他未完成或待验收项仍需分别记录，不能由本条延期自动视为通过。
+- 1C 已完成准备期停止协调器的本地测试。准备期手动停止的设备验证和原厂 ROM 桌面启动验证均延期。
 
-### 任务 1C 补充：空间不足验收范围调整（2026-11-05）
+### 任务 1C：空间不足测试范围（2026-11-05）
 
-- 真实设备空间耗尽验收不在 1C 剩余范围。既有空间预检和受控模拟测试保留；这不代表已验证设备实际写入中发生 ENOSPC，也不改变已有测试记录。
+- 1C 覆盖空间预检和模拟空间不足。设备实际写入返回 `ENOSPC` 的场景待验证。
 
 ### 任务 1C 补充：就绪状态进程重建检查（2026-11-05）
 
@@ -205,18 +214,18 @@
 - 这是就绪态强制停止后重新启动的设备观察，不等同 Android 后台内存回收，也未覆盖导入中、Guest 运行中或失败后的进程重建；未声称原实例全部数据内容逐字节不变。未覆盖标准应用或删除数据。
 - 历史多实例仍安全拒绝启动并保留数据；生命周期锁在进程崩溃时释放，但未登记 Guest 后代可能仍存活，安全整理需要额外的崩溃恢复协调。真实设备空间耗尽验收已移出本阶段，现有检查保留。
 
-### 任务 1C 补充：历史多实例范围调整（2026-11-05）
+### 任务 1C：历史实例处理范围（2026-11-05）
 
-- 当前阶段不考虑历史多实例，历史实例整理入口或迁移不再作为 1C 剩余项。现有单实例导入发布和启动准入限制保留；此前关于旧数据与崩溃残留的审查记录保留，不将未验证情况改写为已验证。
+- 1C 采用单实例导入与启动准入。历史多实例的整理、迁移和崩溃残留处理仍为待定项。
 
 ### 任务 1C 补充：启动入口连续点击检查（2026-11-05）
 
 - 在标准应用 `:vm` 未运行、独立 clone 主页显示目标实例“准备完成”时，连续两次点击“启动”。系统 Activity/进程记录在观察窗口内显示一次 `VmActivity` 启动及一个 clone `:vm` 进程，实例列表仍只有 `xf2niq`；Guest 随后按已知情况请求关机，界面显示 `Guest powered off`。
 - 第二次点击时界面可能已切换，因此该设备观察不能证明两次调用均进入启动入口，也不能单独证明所有并发请求均被拒绝。既有 `VmLifecycleTest.duplicateBootAndBootDuringCleanupAreRejected` 覆盖底层协调器重复启动及清理期间启动；不把它称为完整 Android 端到端验证。未安装、删除实例、修改固件原包或排查 Guest 关机原因。
 
-### 任务 1C 补充：重复点击验收范围调整（2026-11-05）
+### 任务 1C：重复启动测试范围（2026-11-05）
 
-- 重复点击或并发连点不再作为 1C 剩余验收项。现有启动协调与单元测试保留；此前设备观察和其验证边界也保留，不改写为已完成的端到端验收。
+- 重复启动协调已通过单元测试。连续点击的设备观察已记录，完整端到端并发验证不列入 1C 验收。
 
 ### 任务 1C 补充：固件提取阶段取消设备检查（2026-11-05）
 
@@ -394,7 +403,7 @@
 ### 0.3.0 输入法 Binder 客户端受限诊断（2026-11-05，未完成）
 
 - 为确认 MediaCodec 列表线程的等待类型，在 API 36 ARM64 引擎增加默认关闭的诊断：启动前须在该实例私有 run 目录预建属主为应用 UID、0600、单硬链接普通文件 binder.client.trace；限定原始进程名 com.baidu.input_oem 和线程 fin-1-thread-4，只输出 pid、tid、fd、主/hw/vnd 驱动类别及 wait/recv/error，不读取 Parcel、输入内容或路径。recv 仅表示收到完整消息头，不证明事务回复。每进程最多 128 条，文件接近 64 KiB 时停止写；并发检查和写入不是原子操作，不能保证文件大小严格上限。未设置文件时启动探测一次，Binder 读取热路径不做诊断文件 I/O；删除文件停止写入，已启用进程仍会做身份/线程检查至重启。启用诊断可能改变时序，未命中不代表未经过 Binder。
-- 目标身份、线程、截断、固定格式与单线程条数限制测试先失败后通过；将易误解的 reply 改名 recv 的断言也先失败后通过，最终测试在手机 ARM64 重新通过。NDK 重建 API 36 引擎，标准和 clone Debug 构建成功；未运行完整单测，未验证并发上限、文件替换竞态、fork/重启边界或真实通信转发的全面等价性。
+- 目标身份、线程、截断、固定格式与单线程条数限制测试先失败后通过；诊断字段由 `reply` 改为 `recv`，对应断言也通过回归，最终测试在手机 ARM64 重新通过。NDK 重建 API 36 引擎，标准和 clone Debug 构建成功；未运行完整单测，未验证并发上限、文件替换竞态、fork/重启边界或真实通信转发的全面等价性。
 - Guest 正常停止后为独立 clone 创建临时诊断文件并覆盖安装；最终设备 APK 摘要与本机构建一致。启动后输入法 PID 29896 / TID 30263 的诊断记录显示主 Binder fd 264 有收到消息及最后一次等待；同窗口同 UID 只读 syscall 为 ARM64 212、fd 264，SIGQUIT 转储确认该线程在 MediaCodecList.native_getCodecCount / initCodecList 并持有 Java 列表锁。点击 ABC 后输入法主进程退出；尚未识别目标服务或未返回的事务，也未证明该线程持有 SoundDecoder 等待的原生锁。
 - 临时诊断文件已删除；运行中进程的诊断身份检查需重启后才完全关闭。未改原始固件、宿主权限或真实硬件节点，设备原始线程转储未加入 Git。文字输入仍未通过；下一步仅针对已确认的 Guest 主 Binder 通路，限制并核对目标事务及服务的发送/返回，再做根因修复和回归。
 - 回滚本次诊断仅移除 bclient.c 的诊断调用及状态、run64.c 的 bct_init 调用、binder_client_trace.h 与其测试，并重建 API 36 引擎和 APK；保留先前 self_cmdline 修正和其他未提交内容。不要删除 Guest 数据或恢复整个工作树。
@@ -962,7 +971,7 @@
 
 ### 0.4.0 息屏主题人物分割调查（2026-11-09，未修复）
 
-- 切换主题并切回后，息屏画面截到人物胸口。同期 Guest 增量日志两次记录原厂 QNN HTP 设备初始化失败、跳过分割并返回空前景，随后生成息屏缓存。对 `writeStaticImage` 的 DEX 跳转地址再次独立核对：有前景时保留根据最高点计算的位移，无前景时才使用镜面壁纸偏移；曾误读为反向，现已更正。传输初始化失败的底层原因未确定。
+- 切换主题并切回后，息屏画面截到人物胸口。同期 Guest 增量日志两次记录原厂 QNN HTP 设备初始化失败、跳过分割并返回空前景，随后生成息屏缓存。对 `writeStaticImage` 的 DEX 跳转地址再次独立核对：有前景时保留根据最高点计算的位移，无前景时才使用镜面壁纸偏移。传输初始化失败的底层原因未确定。
 - 固件另一套 TFLite 人物分割模型已在电脑 CPU 上对原厂主题图运行；候选预处理得到的人物遮罩存在误检和缺口。按从原厂 QNN 库静态分析出的最大连通域与填洞规则处理后，误检减少但仍有明显缺漏；完整预处理、算法等价性和原厂效果均未验证。主题包未发现可直接复用的独立前景图。
 - 运行中原厂 SystemUI 的 `libzte_saliency.so` 直接从签名 APK 映射，现有引擎未提供针对该库和进程的加载重定向。上述模型未接入产品；未修改原厂 APK、固件或设备数据，也未构建、安装或验证修复。兼容矩阵保留故障状态。
 - 继续验证软件后备：第三方发布的 MIT BiRefNet Lite 512 ONNX 在电脑以原厂主题图推理，人物大体完整但误选部分背景；按原厂后处理近似生成 BGRA 与最高点的离线原型覆盖空图、无效输入、重试和释放，未验证与原厂输出等价。独立 Android ARM64 宿主进程以合成输入测试模型，加载 5.465 秒、推理 2.441 秒、最大 RSS 730968 KiB，测试文件已清理；这不代表 Guest 或其他设备的表现。模型和运行库未加入项目。
@@ -978,7 +987,7 @@
 - 新实例中壁纸管理器 PNG 经 Guest Android 解码得到的 RGB 摘要与原厂主题源图一致；该结果未直接捕获 JNI 实际输入。独立 Guest 合成测试验证手动配置的 ClassLoader 可优先加载目录库，并可使用 APK 内完整路径加载合成原库；实际 SystemUI 的 `nativeLibraryDir` 已查实，但真实 ClassLoader、原厂库命名空间和委托尚未实测。新增 `native/gueststubs/aod-fixed/` 为未接线的固定遮罩 JNI 原型：模拟委托、错误/异常、遮罩文件及全尺寸离线像素测试通过，不能据此宣称产品已修复或原厂服务已实现。原厂库身份、重入、路径祖先安全、首次加载失败语义及主题切换仍待核实；原型不得默认启用。
 - 引擎对 Guest 不存在的部分 `/sys`、`/proc` 路径会回退宿主，故未在手机上进行原厂库的独立加载实验。电脑隔离测试曾用空 `/proc`、`/sys`、`/dev` 启动目标 ART 并加载合成主库，但额外合成依赖对照未通过；后续更严格隔离尝试分别因额外 FD、路由检查误判及 chroot 内 Python 布局模块缺失而在加载原厂库前停止。未加载原厂库，临时根已清理，不能据此推断真实 SystemUI 可以加载代理。
 - 2026-11-10 后续完成固定主题的 EMU 导入接线：新实例暂存期间校验目标指纹、ztecfg 变体、SystemUI APK、原厂模型、代理和单通道遮罩；仅在目标条件满足时准备运行副本。代理保留原厂可用时的调用，对指定 RGB 输入使用离线计算的遮罩，不把模型或固件文件加入 Git。Windows standard Debug 测试 608 项、失败和错误均为 0、跳过 87；另在 Linux 文件系统执行 20 项导入准备测试均通过，原生代理合成回归及全尺寸离线像素测试通过。完整源码重建的代理摘要与打包资产一致。
-- 卸载旧正式版后，安装 `0.4.0-beta` / code 8 并导入带 ztecfg 固件；期间发现初版按分析器的 KK 引擎值误判，正常取消导入后修正为启动实际使用的 N64，并重新安装、导入。最终新实例 `uxbbdn` 首次启动时，真实 SystemUI 映射了代理、APK 内的原厂 JNI 及 `libzcv.so`，自动写入人物前景、三张缓存和最高点 166，未人工改动 AOD 文件或设置。截图确认头部位置正确、动画正常，切换其他主题再切回后仍正常；只读核对切回后背景、前景与缓存仍为指定结果。该设备只安装一个 RMEMU。其他壁纸、宿主、长期使用和原厂 QNN HTP 不因此视为已验证或已实现；运行副本和回滚见 [AOD 缓存记录](AOD_THEME_CACHE.md)。
+- 卸载旧正式版后，安装 `0.4.0-beta` / code 8 并导入带 ztecfg 固件；初版导入按分析器报告的 KK 引擎选择路径。取消导入后，改用实际启动的 N64 引擎完成重装和导入。最终新实例 `uxbbdn` 首次启动时，真实 SystemUI 映射了代理、APK 内的原厂 JNI 及 `libzcv.so`，自动写入人物前景、三张缓存和最高点 166，未人工改动 AOD 文件或设置。截图确认头部位置正确、动画正常，切换其他主题再切回后仍正常；只读核对切回后背景、前景与缓存仍为指定结果。该设备只安装一个 RMEMU。其他壁纸、宿主、长期使用和原厂 QNN HTP 不因此视为已验证或已实现；运行副本和回滚见 [AOD 缓存记录](AOD_THEME_CACHE.md)。
 
 ### 0.4.0 虚拟 LTE 信号强度（2026-11-10）
 
@@ -990,17 +999,17 @@
 
 ### 0.4.0 开放虚拟 Wi-Fi（2026-11-10，未完成）
 
-- 当前阶段分支 `codex/0.4.0-1c-virtual-wifi` 基于 LTE 阶段分支创建，工作区含大量此前及本阶段的未提交改动；不要重置、自动推送、合并或发布。仅面向 NX809J 原厂 Android 16/API 36/ARM64 Guest，宿主型号不限。设备上只保留一个标准版应用，不装分身，不复制或修改原厂 ROM 归档。
+- 虚拟 Wi-Fi 在 LTE 阶段分支的基础上开发。实机测试使用单一标准版应用和既有的 NX809J 原厂 Android 16/API 36/ARM64 实例。
 - 本轮使用内部开放热点，默认 SSID `RedMagicEMU`，无需密码，不扫描宿主物理 Wi-Fi。已按需参考 AEmulator-Plus `v0.0.0.3.10`，实际基线 commit `d470c4db72c988ebfd7e16c6598dd1b48595566c`；客体源码、上游许可证和通知位于 `native/gueststubs/wifi/`。已增加 SSID、信号设置及侧边栏 Ethernet/Wi-Fi 选择；选择按实例保存，下一次启动生效。侧边栏选择及保存曾在标准版设备上实测；Wi-Fi 尚未启用，默认 Ethernet。
 - 标准源码中 `TargetWifiArtifacts.RUNTIME_READY` 和 `WifiStub.SERVICE_IMPLEMENTATION_READY` 均为 false。两份 guest JAR 和 APK 已做过构建，但后续源码有修改，不能假定现有资产与源码一致；重新构建时须核对。设备当前标准版为保留 Ethernet 的构建，不能用它声称 Wi-Fi 可用。
 - 实机临时实验曾在 `eth0` 上注册 Wi-Fi NetworkAgent，并由 Guest 完成一次 HTTPS 请求（HTTP 200）；未完成普通应用权限、设置页、DNS 独立查询、开关重连、宿主断网恢复和长期稳定性验收。服务退出后曾恢复 Ethernet，但系统原 `wifi` Binder 未自动恢复；正常重启 Guest 后原服务恢复。不要将 Ethernet 降级当作 Wi-Fi 验收。
-- 交接代码已有针对接口暂时未知状态的有界等待；`target_net_control_test.py` 曾稳定失败，断言客户端死亡后原 Wi-Fi Binder 未恢复，恢复实现处于未完成状态。目标 Guest 另实测普通进程降权后可恢复虚拟 UID 0，独立 Binder 服务收到该 UID；源码已有未装机的最小 UID 变更，但未解决消息头身份认证，也未验证启动、LTE、短信及来电回归，不能声称权限隔离已通过。
+- 当时的网络控制代码已对接口状态暂时未知的情况设置等待上限。`target_net_control_test.py` 曾稳定失败，断言客户端死亡后原 Wi-Fi Binder 未恢复，恢复实现处于未完成状态。目标 Guest 另实测普通进程降权后可恢复虚拟 UID 0，独立 Binder 服务收到该 UID；源码已有未装机的最小 UID 变更，但未解决消息头身份认证，也未验证启动、LTE、短信及来电回归，不能声称权限隔离已通过。
 - 当前方案接受仅可信客体应用的使用风险，权限与服务恢复尚未完成；该边界不等于权限验收通过。
 - 本轮后续修复了热点设置可能被启动统计旧快照覆盖的问题，并测试了开放热点十六进制 SSID 匹配；这些后续修改尚未安装设备。设备曾覆盖安装过标准调试版，侧边栏菜单可见、模式选择可保存；测试结束已选回 Ethernet。原厂 ROM 和原实例未删除。回滚应仅针对本阶段改动，先核对未提交差异和资产归属，不要使用全仓重置。
 - 非 Binder 网络生命周期小修：模拟旧 NetworkAgent 的移除通知排队后断开并重连，修复前离线测试复现旧通知误断新连接；现对通知来源与当前网络进行比对，并在同一状态锁内检查和断开，监听器在锁外通知。模拟框架回归通过，也验证当前网络的通知仍可断开连接。通知发出前若另一个线程重连，服务层状态通知的顺序仍未验证；不据此启用 Wi-Fi。未重建资产、安装或实机测试；回滚仅撤销 `WifiGuestNetwork.java` 中本次回调来源检查和 `network_agent_test.py` 对应回归，保留既有改动。
 - 非 Binder 替代路径调查：API 36 使用用户态运行引擎，通用 netlink 当前返回 family 不存在；现有 `WifiStub.kt` 仅用于 API 5–13。只读检查设备已有 Guest 运行副本的原厂 init 配置和程序字符串，确认包含 Wi-Fi HAL、`wpa_supplicant`、`wificond` 与 Qualcomm Wi-Fi 库，后三者均含 nl80211 相关字符串；字符串只能证明程序包含相关实现，不能证明实际调用顺序或兼容性。可继续研究在 Guest 用户态模拟无线控制接口并保留原厂服务，但命令集、接口生命周期和数据通道均未确定，尚无可用实现。AOSP 的 [virt_wifi](https://android.googlesource.com/kernel/common/+/1cca65ac6abc0751e6bd0dfdd9564925e2a7ff07/drivers/net/wireless/virt_wifi.c) 和 [Cuttlefish](https://android.googlesource.com/device/google/cuttlefish/+/master/shared/BoardConfig.mk) 方案依赖内核支持，不能直接套用到当前共享宿主内核的运行模型。本轮未更改 Guest 或宿主、未启动无线服务、未安装或实机联网验证。
 - AEPlus `d470c4d` 对照：其 [Wi-Fi 实现](https://github.com/somerandomusernam2/AEmulator-Plus/blob/d470c4db72c988ebfd7e16c6598dd1b48595566c/app/src/main/java/app/aemu/core/WifiEmu.kt) 使用现有网络通道，另注册 Wi-Fi 网络身份并由模拟服务提供连接信息；并非模拟无线驱动。[上游代码](https://github.com/somerandomusernam2/AEmulator-Plus/blob/d470c4db72c988ebfd7e16c6598dd1b48595566c/app/guest-wifi/java/app/aemu/stub/WifiStub.java) 对现代 Guest 接管系统 Wi-Fi 服务，注册 Wi-Fi 网络失败则可回退以太网；有网不代表 Wi-Fi 管理功能可用。项目中已有对该网络身份路径的适配，前述临时 HTTPS 试验验证过一次数据连通；不能据此证明设置页、权限或恢复通过。本轮不照搬服务接管或修改 Binder。上游 API 范围是代码声明，不证明 NX809J 固件实测兼容；本次仅源码对照，无构建或设备验证。
-- 用户随后允许处理 Binder，仍要求遵守安全检查。本次只处理连接回调与服务状态的并发顺序，不修改调用者身份、权限校验或服务恢复：先用双线程模拟测试复现旧断开通知覆盖重连；现由网络回调和服务状态转换共用转换锁，在状态锁内确认网络并断开，释放状态锁后才通知服务。模拟测试通过，包含旧通知、正常断开及移除失败时的 UNKNOWN；但测试未执行真实服务接线，初次接入及失败清理的并发时序仍待验证。隔离原型 JAR 编译通过，未替换资产、安装或启动；两道门控保持关闭。回滚仅撤销本次共享转换锁的接线及对应测试，保留先前改动。
+- Binder 修复聚焦于连接回调与服务状态的并发顺序。双线程测试复现旧断开通知覆盖重连。修复后，网络回调和服务状态转换共用转换锁，在状态锁内确认网络并断开，释放状态锁后才通知服务。调用者身份、权限校验和服务恢复沿用原实现。模拟测试覆盖旧通知、正常断开及移除失败时的 UNKNOWN。隔离原型 JAR 已编译，真实服务接线和失败清理时序待验证。正式资产和两道门控沿用当时的配置。回滚仅撤销共享转换锁接线及对应测试。
 - 后续核实：首次网络注册发生于 Guest 主线程进入事件循环之前，网络回调正常经 Handler 排队，不能仅凭首次注册未持转换锁就断定发生并发故障。增加模拟框架测试，在注册期间产生回调并于注册完成后执行，验证当前网络被断开、通知恰好一次；离线测试通过。这不验证真实服务接线或失败清理，也不是设备运行结果；本次未修改运行代码或设备。
 - 回调投递失败排查：离线试验曾观察到旧网络回调在重连后投递失败会报告故障；经复核，新旧网络代理使用同一个 Looper，`Handler.post()` 返回 false 通常意味着共享队列正在退出，不能因为回调来自旧网络便忽略故障。已撤回忽略该故障的试验修改，增加模拟测试确认该场景仍报告失败，并为并发测试添加超时保护。该测试不能证明真实 Looper 退出时的完整恢复或真实服务接线；本次没有修改运行代码、安装或启动服务。
 - 原型资产核查：使用 JDK 21 和 API 36 SDK 将当前 Wi-Fi 服务源码在隔离目录重复构建两次，均为 64 个 DEX 类，SHA-256 均为 `a0e35d44d4f1094ff375abc434cdf9f002aced06a7f2f16d0970b10552ee0604`；网络模拟回归和构建脚本两项单测通过。既有未提交资产的摘要为 `f1c445efa8ca7621491b47c80c10837d009312c7c2dee8976feb8103e53b1b62`，与当前源码构建不同；因为原型尚未通过服务接线、权限及恢复验收，未覆盖该资产，未安装或启动。两次构建结果位于本机临时目录 `rme-wifi-rebuild-c2f45dde530e4485b5c27918adb9c4bc`，不可据此声称 Wi-Fi 已可用。
@@ -1067,9 +1076,9 @@
 - 离线以目标 ROM 的 `IVold.getStorageSize()J` 事务 78 和真实 `VoldStub` 建立失败测试，确认当前默认回复 0；仅在 `%TEMP%/rme-vold-size-isolate-20261111/` 准备了 API 36 读取实例配置的原型及测试。该原型不能解决 primary 不超过阈值时服务绕过 Vold 的分支，也未接入正式 JAR 或设备；旧隔离计算模型 `%TEMP%/rme-storage-model-20261111/` 的两个条件跳转方向有误，不可用于方案判断。设备暂停时实例设置表单仍打开，未关闭或修改其内容；本轮没有安装、更改实例设置或替换引擎。
 - 为后续验证构建隔离 Guest JAR `%TEMP%/rme-vold-size-isolate-20261111/guest-build/redmagic-vold-service.jar`，SHA-256 `c870b0eb62ef666df73ad8960148ebbc48114e17945c5d4539f39f7bec14f0aa`；只包含 VoldStub 和所有权标记，离线事务分发回归通过。它没有接入启动流程或安装，不能证明原厂页面显示正确，也不分配真实空间。
 
-#### 存储容量交接（2026-11-11，未修复）
+#### Guest 存储容量显示诊断（2026-11-11，未修复）
 
-- 当前分支 `codex/0.4.0-1c-virtual-wifi`，工作区有大量此前未提交及未跟踪改动，须保留；不得 reset、clean、自动推送、合并、打标签或发布。设备只操作已有标准版 `app.redmagicemu`，不安装分身；宿主型号不限，Guest 固定为 NX809J／Android 16／API 36／ARM64。
+- 诊断对象为标准版 `app.redmagicemu` 中已有的 NX809J／Android 16／API 36／ARM64 实例。
 - 现象：实例滑块可操作，但无论选择什么，“关于手机”存储卡片始终显示宿主 512 GB。曾出现 `1 B` 截图，具体成因未查实，不能将它归因于 `vold` 返回 0。后续截图确认基带版本显示 `RedMagic Virtual Baseband`。目前这不是容量显示通过。
 - 真实定位：`GuestVm.kt` 在 Guest 启动时把 `diskMb` 写入运行副本 `/dev/.aemu-disk`；现有标准 API 36 引擎 `native/guest64/36/run64.c` 的 `statfs` 分支没有读取该文件。只读检查当前 `system_server` 和 VoldStub 使用的稳定引擎 SHA-256 为 `72767cb685adcb2f88ce29147fc4ec2feab79495e19dbecaa99561f3f93818ce`，当时文件是 1048576 MiB（1 TiB）；该设置后续可能更改，恢复工作前应重新核对，不假设当前值仍相同。
 - 已定向反编译目标 ROM 首页 `com.zte.settings.deviceinfo.aboutphone.MyDeviceInfoFragment.updateRomInfo()`：它找内部卷，调用 `StorageStatsManager.getTotalBytes(fsUuid)` 和 `ZteStorageUtils.getVolumeFreeSpace`，再格式化为剩余／总量。更正：`StorageStatsService.getTotalBytes` 的内部卷分支在 primary 不超过 512,000,000,000 字节时直接返回 primary；超过时查询内部设备容量（可能命中缓存，否则读 `IVold.getStorageSize()`），仅当舍入差不超过 3,000,000,000 字节时返回舍入值。primary 的框架实现把 `/data`、`/system` 总量相加并按十进制档位取整。静态证据在 `%TEMP%/rme-disk36-prototype-20261111/StorageStatsService_decompile.txt` 与 `settings_classes13.dex.target.txt`；ROM 与未脱敏数据不得加入 Git。
@@ -1079,16 +1088,16 @@
 - 下一步先保护手机可能未保存的“实例设置”表单；最近只读时它仍打开，未关闭或修改。之前只读界面检查留下 `/sdcard/rme-storage-trace-ui.xml`，如仍存在且确认属于本次，后续可单独清理。取得当前 system_server 实际 primary／vold／卡片统计和真实 statfs/fstatfs 调用证据后，选择只影响目标 Guest、不会误报真实剩余空间的可重建方案；先写失败测试，再隔离构建、核对资产并实机覆盖 64/128/256/512 GB、1/2 TB、切换重启、可用空间不超过宿主剩余和正常启动。不存在真实空间配额时要明确说明；不要把隔离测试或上次探针当最终验收。
 - 设备恢复操作并连接无线调试后，使用标准应用的 BOOT 入口启动原有实例，已保存设置和运行副本容量均为 1048576 MiB。短时 Root strace 在 Guest system_server 中观察到 `/data` 的 statfs 及其重定向后的宿主调用；该次跟踪没有证明调用来自容量卡片，也不能用宿主调用结果代替 Guest 最终值。独立 Guest 容量探针启动时以退出码 137 结束，未取得 primary/StorageStats 数值；未找到能确认终止原因的日志，不能据此排除低内存。两份临时探针文件已按摘要核对并清理，随后确认路径不存在。跟踪结束后 system_server 和 VoldStub 进程仍存在；未验证页面、完整启动或容量显示。本次未更换引擎或安装 APK，修复仍需真实容量链路证据。
 - 继续诊断确认上次 137 的直接原因：原探针未准备线程 Looper 就调用 `ActivityThread.systemMain()`，抛出未捕获的 RuntimeException，进程自行发送 SIGKILL；捕获异常和先调用 `Looper.prepareMainLooper()` 的对照分别验证异常及正常通过。修正探针 `%TEMP%/rme-storage-fixed-probe-20261111.py` 在现有标准引擎下运行成功：独立进程计算的 `/data`、`/system` 总量各约 240.54 GB，primary 为 512,000,000,000 字节；经 Guest Binder 查询的 `StorageStatsManager` 总量也为 512,000,000,000 字节，剩余约 120.27 GB（随时间变化）。Guest 原生 Binder 查询确认 Vold 事务 78 和 mount 事务 99 当时都为 0；这与 primary 在阈值时直接返回的正确分支相符。探针的 `/storage/emulated/0` 返回 Invalid path，不能外推页面访问权限；两份临时设备文件按摘要清理，后续独立检查路径不存在。目标 `services.jar`、`framework.jar` 与反编译来源摘要一致。
-- 此次复核纠正上文曾误读的两处 dex 跳转：`if-gtz` 在 primary 大于 512 GB 时跳至 Vold，在舍入差大于 3 GB 时跳至返回 Vold 原值。修正模型及五组边界测试位于 `%TEMP%/rme-storage-model-dex-corrected-20261111/storage_model_test.py`，仅为离线推演；旧模型及其结果无效。该模型结合现有 `/system` 统计表明，仅改 Vold 或仅改 `/data` 不能保证小容量档位，后续应调查只限定目标 Guest、可重建和回滚的更高层方案，并先建立失败测试；不得据此视为实机修复或真实配额。
+- DEX 复核确认两处实际跳转条件。`if-gtz` 在 primary 大于 512 GB 时跳至 Vold，在舍入差大于 3 GB 时跳至返回 Vold 原值。修正模型及五组边界测试位于 `%TEMP%/rme-storage-model-dex-corrected-20261111/storage_model_test.py`，仅为离线推演；旧模型及其结果无效。该模型结合现有 `/system` 统计表明，仅改 Vold 或仅改 `/data` 不能保证小容量档位，后续应调查只限定目标 Guest、可重建和回滚的更高层方案，并先建立失败测试；不得据此视为实机修复或真实配额。
 - 虚拟容量需求取消，改为删除滑块并直接读取本机容量。`SettingsSheet` 已移除容量控件和打开表单时的旧值映射，保留已有 `diskMb` 元数据；标准 Debug 单元测试与构建通过。使用 JDK 21 临时覆盖本机失效的 Gradle Java 路径，没有修改 `gradle.properties`。安装前将标准 APK 备份至 `%TEMP%/rme-standard-before-storage-ui-20261111.apk`，核对 SHA-256 与新包签名；新构建与备份比较仅 `classes7.dex` 内容不同，不能据此断言全部行为等价。Guest 关闭并重启后，已覆盖安装新包（SHA-256 `37ecb8a1cae699943a4c52aa4048c7579479f6d9d5ea59a05a094e35aca7fe45`），实例设置确认内存选项后不再出现容量滑块，打开表单后已有 `diskMb` 仍为 1048576 MiB；没有为测试保存该表单。恢复 APK 可使用上述备份覆盖安装，不能据此回滚用户数据或已保存的实例设置。
 - 当前手机实例所在宿主文件系统总量实测为 514,119,938,048 字节，Guest 路径式 `statfs` 总量受稳定引擎改写，当前服务报告的 512 GB 与真实总量并不相同。稳定引擎下，独立 Guest Java 探针通过 `Os.open("/data")` 和 `Os.fstatvfs()` 取得相同的宿主总块数和动态可用块数，临时设备文件已校验清理；此结果尚非实际容量服务修复。隔离 `services.jar` 方向验证先红后绿，候选仅改变目标方法两处跳转并返回 Vold 原值，六项离线测试和 DEX/ZIP 校验通过，原件保留在临时目录。该原型依赖 Vold 提供有效数据，不能直接安装；当前 system_server 同时映射原厂 services.odex/vdex，尚未证明它会执行补丁。不得关闭检查或移除原厂优化文件掩盖问题；下一步验证受控数据源、ART 实际加载和完整回滚，再构建安装并核验本机容量与界面。
 - 重启现有实例后，`%TEMP%/rme-host-storage-live-red-20261111.py` 比较实例所在宿主文件系统和 Guest 容量服务，实测 514,119,938,048 与 512,000,000,000 字节不相等，按预期失败。隔离 Vold 原型 `%TEMP%/rme-vold-realfs-6e4a96f585e2/` 的事务分发先红后绿；独立 Guest 进程未注册服务，仅构造原型并本地调用 Binder 事务 78，返回的 514,119,938,048 字节与宿主一致，错误 token 和尾随参数被拒绝。单独的 ART 进程用受控 StorageManager 和 `InMemoryDexClassLoader` 对照原始、单跳和双跳 DEX，分别得到预期的 512 GB、64 GB 和 61 GB；没有构造或注册系统服务。这些结果尚不代表真实 system_server 已加载补丁，也不代表正式 Vold 已替换；临时设备文件已按摘要清理。运行副本修改的所有权、独占、失败回退、ART 加载和回滚仍需验证，原型没有接入标准包。
 - 移除滑块后，该范围已通过实机验收；继续接入真实容量读取不再是本次验收要求。上述真实文件系统容量与 Guest 返回值不一致的实测及原型局限仍然有效，不代表真实容量读取已修复。
 
 
-#### 加速度计阶段交接（2026-11-12）
+#### 加速度计桥接实现与验证（2026-11-12）
 
-- 当前 checkout 为 `codex/0.4.0-1d-accelerometer`，工作区已有大量未提交与未跟踪改动，包含传感器源码、测试及两份 N64 HAL 资产；全部保留，勿 reset、clean、自动推送、合并、打标签或发布。目标 Guest 仍限定 NX809J／原厂 Android 16／API 36／ARM64／N64，不限制宿主型号。原始固件不得修改；兼容改动、重建与回滚细节见 `native/sensorshal/N64_DIAGNOSTICS.md`。
+- 加速度计桥接针对 NX809J／原厂 Android 16／API 36／ARM64 的 N64 运行副本。实现、测试、两份 N64 HAL 资产的重建与回滚记录见 `native/sensorshal/N64_DIAGNOSTICS.md`。
 - 实现现状：目标运行树准备时将原厂 `vendor/etc/sensors/hals.conf` 移至 `.aemu-parked`，避免其选择原厂 multihal；主机 `Sensors.kt`、`TargetAccelerometerProtocol.kt` 与 `native/sensorshal/n64_sensors_hal.c` 使用含 BOOTTIME 时间戳、精度和三轴的 AEM2 记录，包含会话状态栅栏。N64 ARM64 资产可用 `native/sensorshal/build_n64.py` 重建；回滚时须同时处理主客协议、两份资产及配置，不能只恢复一端。详细约束和已有离线测试命令见诊断文档；本次交接未重新运行构建或单元测试。
 - 上一轮实机：安装的标准版 APK 与当时本机 standard Debug APK 摘要一致（`5c07841cba7db9e8d788d766ccd037ff5fcb0a61e8fde9efacb57c4a25ad4358`）；目标 Guest 启动后实际映射的 vendor HAL 摘要与工作区资产一致（`58ab4df04bf890465ab63ad50ada516afd967c10848c6393b68170ba79dbbcc4`）。`dumpsys sensorservice` 枚举一个三轴加速度计，最近 50 条事件时间戳递增；静止读数约为 (-0.14, 0.16, 9.84) m/s²。之后普通 Guest 前台应用 `app.redmagicemu.accelcheck` 显示正在接收及递增事件数，实际晃动后事件读数正常。这证明此次普通应用的基本数据响应，不证明所有机型或所有功能通过。
 - 测试工具为临时 APK `%TEMP%/rme-accel-display-ydc1wf5b/accel-check.apk`，SHA-256 `75d6f98cd22d180112e297ccec05f4105a0220070951f19b84e738765efc839c`；无额外权限，前台显示 X/Y/Z 和事件数。已安装在 Guest，供实机测试；传输暂存已清理。若以后需移除，只在 Guest 内卸载 `app.redmagicemu.accelcheck`，不要卸载宿主标准版或删除实例。上次操作结束时 Guest 正在运行；本次只读 `adb devices` 已无连接，故当前手机和 Guest 状态未知，继续操作前重新核实，不要假设无线端口或前台状态仍有效。
@@ -1168,9 +1177,9 @@
 - 相机已按当前使用范围通过实机验收。此前已记录的新实例前后摄、浏览器调用、原厂普通拍照与图库/DCIM 验证仍作为具体证据；本次验收未逐项说明新测试的 APK、实例或操作，不新增逐项实测结论。
 - 图形桥实验资产尚未并入普通工作区正式构建，断线、旧帧、资源生命周期、占用恢复和其他宿主等既有未验证项不因此视为通过。权限拒绝场景不在本轮验收范围。
 
-#### 0.5.0 裁剪与阶段交接（2026-11-15）
+#### 0.5.0 依赖与资产裁剪（2026-11-15）
 
-- 当前阶段分支为 `codex/0.5.0-remove-legacy-kk`；工作区包含大量原有未提交、未跟踪和已删除文件，禁止 reset、clean 或覆盖无关内容，也不自动推送、合并、打标签、发布。项目继续使用内部 `app.aemu` 命名；目标为 REDMAGIC NX809J 原厂 Android 16/API 36/ARM64 Guest，不限制宿主型号；原 ROM、Guest 原厂服务标识、`applicationId` 和签名身份须保留。完整每轮记录和备份见 [0.5.0 迁移清单](MIGRATION-0.5.0.md)。
+- 审计目标 Guest 的启动与运行依赖，按审计结果裁剪旧资产。内部 `app.aemu` 命名、Guest 原厂服务标识、`applicationId` 和签名身份属于兼容约束。变更、验证和备份见 [0.5.0 迁移清单](MIGRATION-0.5.0.md)。
 - 前一验收测试包为 `E:\RedMagicEMU-checkpoints\0.4.0-camera-20261115\RedMagicEMU-0.5.0-beta-graphics-pruned.apk`，SHA-256 `070f18d8c8c5de9b164984868dad4c4f7f578d8ae08f405a56711e9ac7859fee`。回退后 18:39:15 Keystore2 启动、18:39:23 zygote 启动、18:39:39 系统报告启动完成，截至 18:41:12 未见二者退出。当前设备连接、安装及运行状态可能变化，本次交接未重新查询；不要把这组当时日志当作全部功能验证。
 - 设备回归发现删除 9 个旧图形资产后原厂相机直接崩溃、无法打开；这些资产已从裁剪候选移出并标记为受保护运行资产，后续测试包必须保留。两项铃声原型裁剪包含在同一基础回归记录中的包内；具体安装、启动及铃声/相机测试范围未逐项展开，不据此扩大到完整兼容验收。
 - 后续批量裁剪加 R8 的 `RedMagicEMU-0.5.0-beta-trim-r8.apk` 实机出现 zygote 137 循环，Guest 现场记录 `system_server` 因无法连接 Keystore 服务崩溃；根因尚未定位，不能归因于某个资产或 R8。该轮 24 个资产、旧导入链和 R8 配置已从精确备份安全撤回，不要使用或继续扩展这份失败包；不要清除实例、用户数据、重导入或重置来掩盖问题。恢复旧版后日志有上述恢复迹象；若再现先保存现场、定位或安全回滚，不继续裁剪。
@@ -1180,12 +1189,12 @@
 - 本轮范围调整为只删除不可用的 `ImageStore.delete` 桩及 `InstanceDeletionTest`，保留 `ImageStore.resetData` 和 `InstanceResetTest`。隔离 WSL 构建与完整测试成功，700 项、0 失败、0 错误、3 跳过；测试 APK 为 `E:\RedMagicEMU-checkpoints\0.4.0-camera-20261115\RedMagicEMU-0.5.0-beta-delete-stub-clean.apk`，SHA-256 `346b0826069064b83302aa52de8a6fcfa23ed27ecba9f3ef03e0a16301d8ee1f`。与铃声包相比仅 `classes4.dex` 变化，`engines.idx` 相同，9 个受保护图形资产逐项保留；尚未安装或实机验证。
 - 多个未接线实验合并清理时，AOD ART 查找、AOD loader、radio VINTF/canary 三组源码与测试已先备份、校验后归档，记录保留在迁移清单；另清除了 18 个有源码的可重建 Python 缓存。这些整理不减少 APK，也不代表 AOD/无线电当前实现改变。后续只选有明确依赖证据、可独立验证的小任务；不要为了删 `aemu`、32 位或实验名而破坏运行链、版权、许可和来源。
 
-#### 0.5.0 最终停止裁剪与包登记（2026-11-15）
+#### 0.5.0 裁剪完成与验收包（2026-11-15）
 
 - 0.5.0 裁剪到此结束，`E:\RedMagicEMU-checkpoints\0.4.0-camera-20261115\RedMagicEMU-0.5.0-beta-delete-stub-clean.apk` 为当前最终测试包；包大小 43,632,245 字节，SHA-256 `346b0826069064b83302aa52de8a6fcfa23ed27ecba9f3ef03e0a16301d8ee1f`，调试证书 SHA-256 `494eb713e0b14a19cb11d08e8cabb0a0b0fc25c341e57eaf0581c122527be389`，v2/v3 签名和 16 KB 对齐检查通过。该结论是包选择，不替代逐项设备回归记录。
 - 后续只读审计确认：Compose `ui-tooling` 隔离移除可省 116,948 字节；旧通用导入链及 Brotli/Junrar 隔离截断可省 238,676 字节；`material-icons-extended` 以占位图标替换的隔离上限可省 6,720,704 字节，但探测版图标视觉被替换，不能交付，正式 43 图标子集未实现。上述探测均只发生在临时 WSL 快照，未改变最终 APK 或产品源码。
 - `libclang_rt.ubsan_standalone-aarch64-android.so` 不能按“未使用”裁剪：`libeffects.so`、`libeffectsconfig.so`、`libkeymaster3device.so` 的目标 ELF `DT_NEEDED` 明确引用它。9 个旧图形资产和 SwiftShader 大资产继续保留；R8 的 zygote/SIG 137 回归仍未闭环，不作为安全裁剪项。
-- 当前停止点之后不再继续裁剪；后续如恢复需要，先确认设备连接和当前包，再针对独立任务重新建立失败验证、备份与回滚记录。未清空实例、用户数据或原始固件，未自动推送、合并、打标签或发布。
+- 此阶段保留现有实例、用户数据和原始固件。后续裁剪按迁移清单逐项复现、备份并记录回滚。
 
 #### 0.6.0 交付概览（2026-11-15）
 
@@ -1196,7 +1205,7 @@
 
 #### 0.6.0 宿主电池同步与 Guest 运行时控制（2026-11-15）
 
-- 在保留原 0.5.0 未提交工作树的前提下新建 `codex/0.6.0-battery-sync` 分支；未 commit、reset、clean、推送或发布。0.6.0 按既定需求推进，LTE 相关功能放在最后处理。
+- 电池同步在 `codex/0.6.0-battery-sync` 阶段分支实现，虚拟 LTE 在 0.6.0 的最后阶段接入。
 - 新增每实例 `batterySync` 设置，默认开启，旧实例缺少该字段时仍按开启读取；主页实例设置的“操作”区提供开关，关闭后宿主电池广播不再写入 Guest。Guest 运行后监听宿主 `ACTION_BATTERY_CHANGED`，通过 `dumpsys battery` 同步电量、充电状态和 AC/USB/无线供电来源。
 - 初版交互将原独立电池弹窗移除，把电量滑杆、未充电/AC/USB/无线选择、应用和恢复直接放入 Guest 运行时右上角浮动菜单展开的侧栏。手动修改立即可见；宿主同步开启时，后续宿主状态变化可再次覆盖手动值。该顶部菜单位置随后在“电池菜单交互微调”中改为普通按钮加弹窗，实例设置中的内联控制保留。
 - 目标单元测试 `HostBatterySyncTest`、`GuestBatteryControlTest` 通过。Windows 完整单测运行 710 项，89 项按既有环境条件跳过，仅 `InstanceRuntimeLeaseTest.anotherProcessBlocksAndDeathReleasesLock` 因跨进程文件锁未释放失败；为避免该环境差异，随后在 WSL 隔离副本 `/home/<user>/.cache/rme-wsl-build-EOnMk0DP/project-060-battery-B5SydLHj` 运行同一命令，710 项、0 失败、0 错误、3 跳过，`assembleStandardDebug` 成功。WSL APK SHA-256 为 `8fada82fd7212e237a941184f59cf56811d9e5bf33d665ba21af91220ef1359d`，大小 43,570,140 字节；Windows 构建的同一源码 APK 为 `app\build\outputs\apk\standard\debug\app-standard-debug.apk`，仅作交叉构建验证。
@@ -1297,3 +1306,366 @@
 - `RequiredLocaleCoverageTest` 同时校验五种对外语言、语言选择器和 locale config。WSL 完整 `:app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --rerun-tasks` 通过：718 项测试、0 失败、0 错误、3 跳过。其他 16 个可选 locale 及对应资源目录已删除；通用英文只作为缺省回退。
 - 2026-11-16 补齐运行态语言匹配：跟随系统时只保留支持表中的语言；未列入表中、空语言或未知旧偏好统一解析为 `en-US`，不再保留未支持 locale 的布局方向。新增 `LanguageFallbackTest` 覆盖显式选择、系统语言、未知语言、旧 `en` 别名和 locale 扩展；版本号提升到 11，供已安装 10 的测试包覆盖升级。
 - 同一提交在 WSL 使用 OpenJDK 21 完成 `:app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --rerun-tasks`：722 项测试、0 失败、0 错误、3 跳过，93 个构建任务全部执行。最终可安装 Debug APK 使用原 `494e…e389` 证书重构建，v2 签名与 16 KB 对齐通过。
+
+#### 0.6.1 GLES 缓冲区映射诊断（2026-11-16）
+
+- 安兔兔 3D Lite 12.0.3 的 Unity 子进程曾两次在 `libunity.so` 中向空地址写入并崩溃。已连接设备安装的 EMU 为 0.5.0-beta；其运行时 Guest GLES 桥和宿主 GL 桥摘要分别为 `6cc7f15ce1f58ce57bf783b4fdf8e957a881f84a8f434cf5ff94d7ac13a00c92` 和 `990c361f73fe9760a2644d7a139a3e4fe2377f22a054298f87883656b3332533`，与当前仓库的 0.6.0 图形资产一致，但不能据此认为整包一致。
+- 运行时追踪发现 Unity 在 `GL_COPY_WRITE_BUFFER` 使用 `0x36` 映射标志，连续切换不同缓冲区时大量得到空指针；一轮记录中有 8,662 对调用、4,304 次空返回。追踪未覆盖 unmap，不能逐次证明应用的完整调用状态。独立 GLES 探针在同一宿主的原生 Adreno 驱动通过，而 Guest GPU 桥对同目标多对象、跨目标同对象、删除映射对象和共享上下文场景失败；名称重用未发生，该子项跳过。
+- 使用与现有资产逐字一致的历史相机实验源码构建临时 Guest 桥诊断库，仅在安兔兔 Unity 和定向探针的 COPY_WRITE 写入及失效路径测试按对象映射。该探针的 `0x36` 显式 flush/读回由失败变为通过；安兔兔两项 GLES 3.0 场景均显示画面并返回帧率。诊断库不正确覆盖共享上下文、对象重用、跨目标及完整错误语义，不能发布或视为正式修复。
+- 实验前将实例运行副本中 EMU 自带 GLES 库备份并核对摘要，实验后已恢复，文件摘要及权限/安全标签与原值一致；原始 ROM、Guest 应用和 APK 未修改。后续修复范围限定为 EMU 端源码和 APK。测试入口为 `tools/diagnostics/gles-buffer-map/`；该映射问题的正式修复和回归尚未完成。
+- `tools/diagnostics/gles-bridge-local-test/` 新增仅用内存替身、不连接设备或 socket 的生产 GLES 编码器回归。独立复验当前六项均失败：同目标两对象、跨目标、共享上下文、销毁首个共享上下文、显式 flush、删除后名称复用；脚本按实际失败返回非零。另以 WSL Mesa 验证共享 context 中旧对象仍可绑定、同名新对象可再生成；简单按数字名称清理绑定会误伤旧对象，故本轮尝试的一行改动已撤回，本地 GLES 资产恢复为此前 `6a609982e6402da3be0f04f5381c34d6a32cf5093b43e093c08b022c0306072d`。这只是编码器与软件驱动对照，不证明真实宿主桥或安兔兔已修复。
+- 修复 EMU GLES 桥的另一项同名对象状态错误：共享上下文删除并重用 buffer 名称后，`glBindBuffer` 不再因数字名称相同而跳过实际绑定；ARRAY_BUFFER 绑定后失效顶点属性去重缓存，避免再次设置相同属性时沿用旧对象。`tools/diagnostics/gles-buffer-rebind/` 的五项生产编码器回归及 Mesa 同名缓冲和浮点属性绘制对照独立通过，修复前独立对照失败。该变更增加重复绑定及随后的属性设置命令，实际帧率影响未测；不修复 map 按目标跟踪，后者现有回归仍失败，不能称安兔兔黑屏已解决。
+- 用现有相机兼容构建脚本重建 API 36 GLES 资产，独立重建摘要一致：宿主桥仍为 `990c361f73fe9760a2644d7a139a3e4fe2377f22a054298f87883656b3332533`，新资产为 `130c61bc1b24e3b9cc72222064a57d8a4719ae385470556f37281e545b59f874`，AArch64、16 KiB 加载段对齐。替换前资产 `6a609982e6402da3be0f04f5381c34d6a32cf5093b43e093c08b022c0306072d` 备份在 `%TEMP%/rme-gles-rebind-before-8m0dfxv7/libGLES_aemu.so`；回滚需核对摘要并仅恢复本轮两处绑定/属性缓存源码与对应资产，不回退已有像素存储修复。此项尚未安装或在设备运行。
+- 从当前 HEAD 的隔离快照叠加本轮图形源码与资产，Windows 离线 `:app:assembleDebug` 成功；Debug APK 位于 `E:/RedMagicEMU/local-data/rme-root-archive-20261117/rme-gles-rebind-apk-0h9xdjg6/app/build/outputs/apk/debug/app-debug.apk`，SHA-256 `f623c98dd0f3ef4f6ae2b6ce4b11053267e0c3ac216400b31a97d42299be97fe`，独立核验 APK 内 GLES 资产与上述摘要一致。Windows 单元测试 722 项、1 项失败、89 项跳过；失败为此前记录的 `InstanceRuntimeLeaseTest.anotherProcessBlocksAndDeathReleasesLock`。该 Debug 包版本元数据仍为 0.6.0-beta/code 11，未安装或验证覆盖现有安装；map 错误、安兔兔黑屏和 VK/CL 仍未解决，不作为这些功能的修复包。
+- 为恢复安兔兔 Unity 场景显示，将已验证能出画面的映射实验接入 EMU。仅对 `com.antutu.benchmark.full.lite:unity` 的 `GL_COPY_WRITE_BUFFER`、访问标志 `0x36` 生效，按共享组保留映射内存并在对象身份有歧义时拒绝操作。生产编码器电脑回归与 ASan 各 8 项通过；通用 map 回归 15 项仍有 14 项失败。宿主写入无应答，跨目标、跨 context 和完整错误语义未实现，退休映射最多占用 8 个槽直到共享组销毁，不能视为通用 GLES 修复。详情见 `tools/diagnostics/gles-unity-map-experiment/README.md`。
+- 从冻结的 `guest.c`（SHA-256 `f8dba1fe15e09b462db799224711fdba7de0294b2101c7027153a2375be90a72`）隔离重建实验 GLES 资产，SHA-256 `f0fbecaa7f7590992d53c9c36afebce60f5506e71674fd837007430706226db9`；相机宿主库仍为 `990c361f73fe9760a2644d7a139a3e4fe2377f22a054298f87883656b3332533`。替换前 GLES 资产（SHA-256 `130c61bc1b24e3b9cc72222064a57d8a4719ae385470556f37281e545b59f874`）保存在 `%TEMP%/rme-unity-before-17c88150fb1643d5b95cacc89642af7f/libGLES_aemu.so`；回滚时核对摘要后恢复该文件并撤销对应 Unity 实验源码，保留原有像素存储及缓冲绑定修正。
+- 实验 Debug APK `E:/RedMagicEMU/local-data/rme-root-archive-20261117/rme-unity-final-gxqpe5t4/app/build/outputs/apk/debug/app-debug.apk`，SHA-256 `34bcd35747fdc99b44001af773217f3e0a3714310903e637903f8083f31ed370`；APK 内资产与上述摘要一致，离线构建成功。Windows 全量单测 722 项、1 项已知文件锁失败、89 项跳过。经核对现有 EMU 签名一致后覆盖安装成功，保留应用数据；原始 ROM 未修改。安兔兔实机结果待验证，VK/CL 仍未接入。
+- 上述首个隔离包启动既有实例时报 `Conflicting radio declaration`。核对发现 Windows `git archive` 将 radio 清单由 LF 转为 CRLF，导致资产与 0.5 APK 中的 LF 字节不一致；没有修改或删除实例中的声明，也没有关闭校验。改用工作区原始引擎资产字节重新隔离构建，205 个索引条目均校验；修正后实验 APK `E:/RedMagicEMU/local-data/rme-root-archive-20261117/rme-unity-radio-lf-c7umzq2w/app/build/outputs/apk/debug/app-debug.apk`，SHA-256 `caac8304ca8e6f468365506e402688eba7571e0bc7ebb60cb54ef7fe1490fa6f`，radio 资产与 0.5 包一致，GLES 资产仍为 `f0fbecaa7f7590992d53c9c36afebce60f5506e71674fd837007430706226db9`。保留现有网络闸门和声明检查，radio 启动 8 项及网络闸门 1 项定向测试通过；已覆盖安装并开始重试，最终实机结果待验证。
+- 修正后的实验包越过声明冲突并进入原有实例。用户提示按 Guest 电源键后画面恢复；重新运行安兔兔 Lite 12.0.3 时，第一个 GLES 场景能出画面，但随后返回原有结果页。只读检查的相关崩溃记录显示 Unity 进程两次发生空地址 `SIGSEGV`，栈顶为 `__memset_aarch64`；原结果页帧率未变化，不能作为本次成绩。失败原因尚未定位，安兔兔测试未通过。
+- 为定位空指针，对 Unity 实验路径增加有次数限制的 `unity_map_reject` 日志，覆盖 16 类本地失败原因；生产编码器日志定向测试及原 8 项电脑回归通过。基于源码 SHA-256 `bcf90765d7a54525a3c46c06816d21adf3d8c9922a81a942b5c6c41e7fcbf70f` 重建的 GLES 资产 SHA-256 `10d878fc4c3fc3a5e012b0df4f2365db9dcdcbd16cd77172426892c6575202e1`；替换前 `f0fbecaa7f7590992d53c9c36afebce60f5506e71674fd837007430706226db9` 保存在 `%TEMP%/rme-unity-diag-before-ec2a7c210ca94cd8a005bfef1fffe1ba/libGLES_aemu.so`。诊断 APK `E:/RedMagicEMU/local-data/rme-root-archive-20261117/rme-unity-diag-iwo73fef/app/build/outputs/apk/debug/app-debug.apk` SHA-256 `78165e37e7ea008110499620ddeed606aecca406e6d830ee9de0819d0f122ac7`；保留正确的 radio LF 字节与网络闸门，已覆盖安装。诊断只报告编码器已知的拒绝，不能验证宿主实际写入；本身尚未修复闪退。
+- 用户启动诊断包复测后，Unity 再次闪退；EMU 日志记录 `unity_map_reject reason=unsupported_flags_busy`，所请求的映射标志为 `0x6`（WRITE | INVALIDATE_RANGE），说明同一共享组存在 `0x36` 映射时实验实现会拒绝应用实际使用的另一种合法路径。后续需实现该路径并用解除映射后的字节写回及实机结果验证，不将旧成绩当成当前通过。
+- 将 `0x6` 加入 Unity 实验镜像路径，并在 unmap 时写回完整映射区间；`0x36` 仍按显式 flush 写入。新增双对象及两种标志混用、非零偏移写回的生产编码器测试，修复前失败；修复后 10 项普通及 ASan 回归、16 项日志回归通过。源码 SHA-256 `c76a44a0f04c0ecddd511fcc130544a7c4b755b8e9552546ac22afb1c5a812b6`；新 GLES 资产 `dbc3fcf0d9274bd89199152cb779d4244df1278b8feecbce5695d198ebb18909`，替换前诊断资产备份于 `%TEMP%/rme-unity-map06-before-bef2c9463cbe483c9dffb8fdf4ec1f2e/libGLES_aemu.so`。隔离 APK `E:/RedMagicEMU/local-data/rme-root-archive-20261117/rme-unity-map06-8hh8t403/app/build/outputs/apk/debug/app-debug.apk`，SHA-256 `3370359ced13414bdbb699d44bfbedcf909bccc3ab1a768012beb26136b559f5`，保留正确的 radio LF 与网络闸门，已覆盖安装。
+- 实机在该包下运行安兔兔 Lite 12.0.3：3D 场景正常进入，完整测试结束后结果页显示更新的两项帧率。电脑 OCR 读取孤立场景屏幕/离屏约 `66.93/73.72131` fps、海岸线约 `62.43/139.9359` fps，OCR 数字尚未由人目视复核。现有 Unity 日志无本次空指针异常及 `unity_map_reject`；这验证本次针对该测试的运行，不代表通用 GLES 映射、VK 或 OpenCL 已完成。
+- 已在电脑用 NDK 28.2 运行 `python tools/diagnostics/oes-fbo-prototype/build.py --ndk <NDK目录>`，输出的两份未 strip 库与上述现有资产摘要均一致；该脚本先对仓库桥源码应用相机实验变更再构建。独立 GLES 探针在 WSL Mesa llvmpipe 通过全部场景，包括实际发生的名称重用；这是原生 GLES 对照，不是 EMU 桥修复后的结果。
+- `tools/diagnostics/gles-map-protocol-research/` 是仅供电脑运行的独立协议研究，不接入产品。Mesa/socket 数据传输与绘制对照通过；对象地址重用、并发失效、生命周期和错误转发回归失败，ASan 还在实验代码复现悬空写入。统一脚本对安全失败返回非零；在这些问题解决前不得将原型合入 EMU 桥或替换资产。
+
+#### 0.6.1 像素存储参数与计算接口调查（2026-11-16）
+
+- EMU 的 GLES 编码器先前会把无效的对齐值、负行长度或负跳过量写入本地像素布局状态，即使宿主 GL 会拒绝它们。定向测试在旧源码上复现 3×2 RGB8 传输长度误算为 18 而非 21 字节；现在只在参数有效时更新本地状态，仍把原始调用发给宿主，由宿主报告 GL 错误。`test_pixel_store.py` 在修复前失败、修复后通过；图形读回和 YV12 现有电脑回归通过。此项不证明安兔兔映射问题已修复，也未处理扩展不支持、超大尺寸或设备行为。
+- 用 NDK 28.2 和 `tools/diagnostics/oes-fbo-prototype/build.py --ndk <NDK目录>` 重建保留相机转换的 EMU 库：宿主库仍为 `990c361f73fe9760a2644d7a139a3e4fe2377f22a054298f87883656b3332533`，更新后的 API 36 GLES 资产为 `6a609982e6402da3be0f04f5381c34d6a32cf5093b43e093c08b022c0306072d`；重复重建摘要一致。替换前资产 `6cc7f15ce1f58ce57bf783b4fdf8e957a881f84a8f434cf5ff94d7ac13a00c92` 备份于 `%TEMP%/rme-gles-pixel-store-before-1302vkcv/libGLES_aemu.so`；回滚时核对摘要、恢复该资产及本轮 `guest.c` 改动后重建。原始 ROM、设备 Guest 和已安装 APK 未改。
+- Windows JDK 21 独立输出目录 Debug APK 构建成功，APK SHA-256 `3add12d66383a1123573a7e2c95e446966ba7af2d6281a64428f37f7a8d9c3b9`；检查 APK 索引和 blob 中的 GLES 资产与新资产一致。完整单元测试 722 项中 1 项失败、89 项跳过；失败为先前记录的 Windows 跨进程文件锁测试 `InstanceRuntimeLeaseTest.anotherProcessBlocksAndDeathReleasesLock`，子进程退出后仍报锁占用。常规工作区增量构建此前另在 `compressDebugAssets` 因已有 `engines.idx.jar` 冲突失败，未清理用户既有构建产物。未安装或实机验证 APK。
+- 从当前 HEAD 创建 WSL 隔离源码快照，并叠加本轮桥源码、测试和资产；使用 JDK 21 及项目 SDK 缓存离线执行 `:app:testDebugUnitTest :app:assembleDebug`，722 项测试、0 失败、0 错误、3 跳过，构建成功。快照中的 GLES 资产与工作区逐字一致；WSL Debug APK SHA-256 `beae0bce4d4a2597d74618dba7cc3afa800f77505320659ae114dbfe1a7c98a3`。快照不包含未跟踪的其他研究目录，未安装或在设备运行。
+- Vulkan/OpenCL 源码调查：当前 N64 为 GLES 桥/软件 GLES，未发现 EMU 自带 Vulkan 或 OpenCL 计算桥。Android 的 Vulkan loader 仍需实际驱动；[Geekbench 6 官方文档](https://www.geekbench.com/doc/geekbench6-benchmark-internals.pdf)列出的 GPU Compute 最低版本为 Vulkan 1.2 和 OpenCL 1.2。后续应优先验证 EMU 用户态 Vulkan compute 到宿主公开 API 的设备、句柄、内存及同步链，再评估 OpenCL 到 Vulkan 的实现和运行时内核编译；不得直通真实硬件节点、伪造能力或把 CPU 软件 Vulkan 结果称为 GPU 加速。两者均未实现或设备验证。
+
+#### 0.6.1 Vulkan 计算的电脑端基线（2026-11-16）
+
+- 新增 `tools/diagnostics/vulkan-compute/` 独立探针；使用 Vulkan 1.2 和自带计算着色器，对 64 个整数执行变换并逐项核对。探针按驱动报告类型优先选择物理 GPU，并展示实际设备、API 及内存属性；无宿主型号硬编码。它不接入 EMU 或 Guest，不代表桥接功能已完成。
+- 本机 NDK 28.2 生成并校验 Vulkan 1.2 SPIR-V，同一着色器用于 WSL 与 Android ARM64 构建。WSL 的 llvmpipe CPU 软件 Vulkan 1.4.335 完成 64 项结果校验；错误预期和模拟 fence 超时均按预期返回失败。10 秒 fence 超时无法覆盖驱动内部所有调用卡死，模拟超时也不代表实机故障验证。
+- Android ARM64/API 29 交叉编译成功，ELF 为 AArch64、`/system/bin/linker64`，LOAD 对齐 16 KiB；生成文件 SHA-256 `549bfbe77089c3cf51daef64614a0f83491d750ed440653e71d68bde731ca2b7`，保存在忽略的 `build/diagnostics/vulkan-compute/`。用户报告宿主为骁龙 8 Gen 3；本轮未访问手机，未验证其实际驱动、Adreno 执行或 Geekbench。OpenCL、EMU Vulkan 桥及既有 GLES 缓冲区映射问题仍未修复。
+
+#### 0.6.1 Vulkan 桥握手的电脑端验证（2026-11-16）
+
+- 新增独立的 `native/vulkanbridge/` 握手协议：固定长度、小端序帧交换协议版本，区分版本拒绝、无效帧及连接错误；收发共享单一单调时钟期限，调用方保留并独占 socket。它尚未接入 EMU，也没有启动服务、实现 Vulkan 命令或提供 GPU 能力；成功握手不代表身份认证或 GPU 可用。
+- WSL 使用真实 socketpair 验证版本匹配与拒绝、分片和短写、错误帧、断连、超时及中断重试；AddressSanitizer/UndefinedBehaviorSanitizer 同样通过。对临时源码副本进行的错误注入确认短写、中断重试和总期限测试能检出相应错误。使用 NDK 28.2 交叉编译并链接 Android ARM64/API 29 测试程序成功，ELF 使用 `/system/bin/linker64` 且 LOAD 对齐为 16 KiB；未在 Android 上运行。
+- 后续接入仍需连接状态、实例隔离、授权、资源限制和实际 Vulkan 后端；OpenCL、EMU Vulkan 计算和 GLES 缓冲区映射问题仍未完成。本轮未访问手机、安装 APK 或更改设备 Guest。
+
+#### 0.6.1 Vulkan 现成传输路线的电脑端调查（2026-11-16）
+
+- 当前 N64 无 Vulkan HAL 或宿主 Vulkan 解码器。AOSP gfxstream 固定版本 `android-platform-15.0.0_r20`（提交 `d7a33801fb557cebd4f8564a8af431669b3f471d`）包含完整的 Vulkan 编解码，但其测试传输的共享地址空间和模拟 fence 依赖同进程，不能直接改成 socket 即用于 EMU；还需实现跨进程内存、同步、生命周期和错误处理。源码归档在临时目录检查，未引入仓库；实际引入时须逐项保留并核对其多种许可证。
+- 同一固定 gfxstream 版本和同标签 AOSP aemu，在 WSL 隔离目录成功编译 x86-64 Linux Vulkan-only host backend；使用 GCC 15 时通过临时编译器包装补充 `cstdint`。构建日志位于 `/var/tmp/rme-gfxstream-build.hTnuwsWV/host-build3.log`；它依赖隔离目录内的 aemu 库，尚无配套客户端、跨进程资源传输或端到端运行，也不是 Android 宿主库。
+- 随后在同一隔离目录编译固定版 Rutabaga FFI 和 gfxstream guest-test ICD，连接同进程测试后端与 llvmpipe。该链路经过若干临时兼容和诊断补丁（逐项差异保存在 `audit/`），成功执行并核对 64 项 Vulkan 计算，正确释放正常路径资源且退出 0；错误结果对照退出 1。独立复验确认宿主实际为 llvmpipe CPU，尽管测试客户端将其报告为 virtual GPU。此测试没有经过 EMU 的进程边界或 Android 驱动，也未证明设备加速。
+- 失败路径仍不安全：模拟 fence 等待失败后没有成功标志，但进程退出时出现 SIGSEGV；独立复验得到同样结果。另一个仅在真实 fence 已成功后注入假失败的对照能正常关闭并返回 1，不能证明真实超时后的未知队列可安全清理。固定版还有描述符数组和命令缓冲数组 `reserve` 后越界写入，以及对非 buffer 描述符读取应忽略字段等缺陷；临时补丁只用于推进单项实验，不能作为完整修复或接入产品的依据。
+- 保存实验补丁、关键日志、测试源码和上游许可证到 Git 忽略的 `build/diagnostics/vulkan-compute/gfxstream-evidence-d7a33801.tar.gz`，SHA-256 `dead6c1261efb1cdbeea5df27eb646babb607dbd6f40722cd2a12728fb32b97f`；该证据包不含完整源码和依赖，脚本仍依赖原临时目录，并不是独立可复现的构建包。
+- Android ARM64/API 29 的 aemu 四个依赖已在隔离 wrapper 中交叉编译，使用共享 libc++、16 KiB LOAD 对齐，并显式修正 snapshot 到 base 的链接和使用固定 LZ4。gfxstream Vulkan-only Android 目标完成 82/83 步，最终缺少 GPU 信息收集和 Vulkan 安全判定两个符号；固定版 Android.bp 使用的 Linux 实现不采集信息且恒定放行 Vulkan，本实验未采用，也未关闭未定义符号检查。Android 后端仍未链接成功，日志在 `/var/tmp/rme-gfxstream-android-config.cj2YQmgw/build.log`。
+- 为研究真正跨进程的现成传输，另在隔离目录固定 gfxstream `cf47bd2660e7217f5729c91664d36d81c1b3282a` 及其源码列出的 Rutabaga `9f22cc994019486a03086992609c0aa4769ae4b0`、Mesa `6e4a77089e1db6cb6269ec694de3a1a131f96689`；本机服务端和 Kumquat 客户端均完成构建。使用私有挂载命名空间隔离测试 socket，客户端经 socket 成功枚举 llvmpipe，尚未完成计算。默认模式的宿主 ColorBuffer 初始化失败；上游的 HostAllocation 软件模式可启动，但跨进程 `vkAllocateMemory` 返回 `-2`。GDB 确认请求到达宿主 Vulkan 驱动；实验不证明手机表现，也不能作为 EMU 产品实现。完整隔离源码、临时依赖锁文件和日志位于 `/var/tmp/rme-kumquat-research.r6Wg21lO`，未同步项目上游。
+- 针对上述实验实际的 storage buffer 和 RGBA8 image 分别查询外部内存属性：该 llvmpipe 对 OPAQUE_FD、HOST_ALLOCATION、DMA_BUF 只分别报告自身兼容，且后两者未报告可导出；gfxstream 分别请求了 `0x280` 和 `0x201` 的多类型导出组合。能力保护探针按这两个实际参数拒绝这些组合；单独 OPAQUE_FD 的正对照仅说明该 buffer 类型可导出，不证明其可直接 `mmap` 或可供跨进程通信。驱动能力和后续回退方案需在真实设备上另行验证。
+- `tools/diagnostics/vulkan-external-memory/` 新增只查询、不分配的外部内存探针，分别报告指定 storage buffer 与 RGBA8 image 的单个 handle 及 `0x201`、`0x280` 多 handle 可导出兼容性；测试覆盖缺失查询、不可导出与不兼容等边界。WSL llvmpipe 查询、无驱动负对照和 ARM64/API 29 交叉编译已独立验证；Android 探针保存于 `build/diagnostics/vulkan-compute/external-memory-probe-arm64-api29-9b564d3e`，SHA-256 `9b564d3e964514ad6d77493fa123ab241de92546e4a74e74fa4acac9323a8be9`，未在手机运行。查询使用的 image 参数与前述初始化参数不同，不应直接互相替代。
+- 后续启用上游 `VulkanExternalMemoryMode:HostAllocation,SystemBlob:enabled` 配置，在私有命名空间重新测试：服务端和客户端为不同进程，三轮 Vulkan 计算各校验 64 项通过；无服务端及错误预期对照均返回失败。独立复验也通过，跟踪显示服务端创建共享内存、通过 Unix socket 的 SCM_RIGHTS 传递 FD、客户端以 MAP_SHARED 映射。宿主依然是 llvmpipe CPU；服务端由测试发送 SIGTERM 结束，未验证优雅关闭。上游警告 SystemBlob 在非 Windows 平台未经充分测试，挂起/恢复仍有 TODO；此结果不能证明 Android、手机 GPU、Geekbench 或 EMU 接入可用。
+- 对上述固定 gfxstream 发现独立错误：没有 GL backing 时 `updateGlFromBytes` 返回成功。`tools/diagnostics/gfxstream-color-buffer/` 保存上游固定提交的最小研究补丁与回归；同一真实库测试在原版退出 1、修正版退出 0，无须同步路径行为保持不变。修正版重跑三轮跨进程 CPU Vulkan 计算通过。补丁未接入 EMU，真实 GLES backing、错误处理和生命周期尚未覆盖。
+- 保存固定版本、临时 Cargo 锁文件、能力查询、独立复验日志及上游许可证说明到 Git 忽略的 `build/diagnostics/vulkan-compute/kumquat-evidence-cf47bd26.tar.gz`，SHA-256 `08abed507b3593f0a5cc88cd098888d8f60f639b5c767f9b8d9f337b2e8907ca`；证据包不包含完整源码与构建依赖，不能单独重建。
+- Android 移植继续验证：Kumquat Rust 传输 FFI 已在隔离目录编译并严格链接为 ARM64，但完整 Mesa Vulkan HAL 最终链接缺 Android 16 的 `AHardwareBuffer_getDataSpace` LLNDK/system API，未以假符号或关闭检查绕过；API 31 分支的“未知”色彩空间在上游会被转成具体建议，不能当作无损回退。上游客户端还会宣告 Android 硬件缓冲扩展，尚未证明可以安全限定为不涉及 AHB 的纯计算。此项仅为客户端交叉构建调查，不改变宿主 APK 的 API 26 最低版本，也未改动设备 Guest。
+- Kumquat 的后续负向测试显示，仅启用 Vulkan capset 时仍可查询并创建未列出的 GLES context；断线后 context、资源的全局归属和共享凭据也未正确隔离。`tools/diagnostics/kumquat-eof/` 保存针对固定版本的独立 EOF 补丁与真实 socket 回归：原版 FD 随 30 次断线由 8 增至 38，修正版保持 8；10 次各排队两条消息均收到响应，已有和新建 Vulkan 客户端仍完成计算。测试进程组超时清理的失败与修复对照也已独立验证。该补丁只解决连接 FD，不解决 context、resource 与 fence 生命周期；均未接入产品。
+- `tools/diagnostics/kumquat-capset/` 单独保存未启用 capset 的连接级拒绝研究补丁。真实 socket 独立复验：原版对三个未启用/未知查询和两个 context 创建返回成功；修正版只关闭相应请求连接，合法 Vulkan context 及已有/新建客户端计算通过。该补丁不包含 EOF 修复，也不解决跨连接资源归属或断线回收；旧式默认 capset 回退的兼容性仍未评估，未接入产品。
+- EOF 与 capset 修改同一事件循环，已在隔离源码中合并并分别重跑两套真实 socket 回归：FD 数稳定、排队消息 10/10 完整，五项未启用请求各自关闭连接，已有及新建客户端计算均通过。合并研究补丁另存 `tools/diagnostics/kumquat-capset/combined-eof-capset.patch`，SHA-256 `83e8de9a51b34e392cd088a3b54d257cfb121ebc70e72767cb5b26b6d504bf2b`；不能与两个单项补丁重复应用，资源归属与生命周期仍未解决，未接入产品。
+- 固定 Mesa gfxstream 客户端为测试强制通告 `VK_EXT_device_memory_report`，但部分失败与宿主内部内存事件尚未验证完整。`tools/diagnostics/gfxstream-memory-report/` 保存独立研究补丁，实验中同时隐藏扩展并设置 feature=false；真实 Vulkan 复验显示原版扩展请求成功、修正版返回 `VK_ERROR_EXTENSION_NOT_PRESENT`，其余已比对能力一致，两版普通计算和错误结果对照均符合预期。测试服务异常退出、强杀和有界清理另做了独立回归。补丁尚未接入产品，也不表示该扩展已实现。
+- 另一候选 Mesa Venus 使用现有 WSL Mesa 26.0.8 virtio ICD，Ubuntu `virgl-server`/`libvirglrenderer1` 1.2.0-2ubuntu2 及依赖只在临时目录解包，用私有 socket、llvmpipe 宿主和同一 Vulkan 计算探针测试。直接 llvmpipe 64 项计算通过；经过 Venus/vtest 的客户端超时，未完成计算。首次为缺失渲染进程路径，修正临时进程路径后进入资源创建；跟踪发现 Vulkan 资源成功导出为 opaque fd，而该 vtest 只接受 DMA-BUF 或 SHM，返回 `-EINVAL`。不能将 opaque fd 当成可直接映射的 fd，也不能据此推断手机支持情况。
+- Android OpenCL 入口还涉及应用动态链接命名空间及运行时内核编译器；`libOpenCL.so` 存在不代表应用一定可访问或 OpenCL GPU 可用。上述两条 Vulkan 路线均未接入 EMU，OpenCL 尚未接入；本轮未访问设备或改动固件。
+
+#### 0.6.1 OpenCL-on-Vulkan 的电脑端基线（2026-11-16）
+
+- 在 WSL 独立目录构建 clvk `a56c4a442a4671fc08478ab39463a1da28e4a818`、clspv `545a65b5f4fda9a7c285bb7fd75eda86aa2d853b` 和 LLVM `c105848fd29d3b46eeb794bb6b10dad04f903b09`。clvk 和 clspv 分别选用上游列出的认证标签，但 clvk 提交中的 clspv 子模块原指向 `c8c27e92503d8224a1b1f10e8a4491165222f20c`，本实验显式切换为前述 clspv 标签；本实验未执行认证。子模块版本、工具包及构建配置记录于 `/var/tmp/rme-clvk-build-dEVbhfMR/MANIFEST.txt`。GCC 15 兼容处理为构建参数补 `cstdint`，并只对一个对象添加 `rsqrt` 兼容头；CMake 重新生成会覆盖后者，不能将此临时构建当作可复现的正式构建方案。固定源码保留原始许可证，未引入仓库。
+- 使用 llvmpipe CPU 软件 Vulkan，clvk 上游 `simple_test` 从 OpenCL C 源码运行时编译并执行 kernel，逐项校验 256 个整数，通过；把 clspv 路径改为不存在的文件且禁用缓存后，`clBuildProgram` 按预期返回 `-11`。成功与失败对照均已独立重跑，实验目录保留运行日志。这验证的是电脑软件计算，不是手机 GPU、Geekbench 或 EMU 内 OpenCL。
+- 新增 `tools/diagnostics/opencl-vulkan/` 可重复运行的隔离诊断，显式输入已构建的测试、库、编译器及 ICD，不自动获取或安装依赖；9 项失败处理回归和上述真实 llvmpipe 正负对照通过。该工具信任调用方提供的二进制，不能独立证明其来源或实际设备类型。
+- 固定 clvk/clspv 与前述 Mesa gfxstream/Kumquat 组合，在私有 socket 上独立复验完整 OpenCL 计算链：OpenCL C 源码经 clspv 编译、Vulkan 经独立客户端与服务端执行并校验 64 项结果。无服务端、无效内核及故意错误结果均失败；调用跟踪确认编译器及 socket 收发。客户端将虚拟设备报告为 GPU，但服务端明确选择 llvmpipe CPU。服务端 SIGTERM 退出并非优雅关闭；SystemBlob 的非 Windows 限制、隔离和 Android 接线均未解决。证据保存在 Git 忽略的 `build/diagnostics/opencl-vulkan/clvk-kumquat-evidence-cf47bd26.tar.gz`，SHA-256 `1049ac622a282a74c67466d6e2c3a4e2536825ca8cab1bbb15671b290abd7481`；证据包不是完整构建包。
+- 闭环复验脚本 `tools/diagnostics/opencl-vulkan/run-kumquat.sh` 显式接收已有组件路径，不自动下载，并使用隔离命名空间和有界进程清理；从工作区脚本独立重跑后，三项负对照与 64 项计算均符合预期。该脚本依赖的上游实验构建仍位于临时目录，未打包进 EMU。
+- 新增独立 `probe.c`：报告 OpenCL 设备类型、在线编译内核并校验 64 项结果。WSL llvmpipe CPU 正常计算通过，错误预期、无效内核按预期失败，UBSan 验证通过；设备类型由 OpenCL 实现报告。Android ARM64/API 29 探针已交叉编译、16 KiB 对齐，保存在 `build/diagnostics/opencl-vulkan/opencl-probe-arm64-api29-13b4f88b`，SHA-256 `13b4f88b898770ce294d3e99aed3e4be9402f697ced9a4e6451e2126e10631e9`，尚未在设备运行。
+- 使用通过官方 SHA-1 校验的 Linux NDK r28c，在隔离目录交叉编译 Android ARM64/API 29 clvk，启用同进程 clspv；固定 SPIR-V IL 转换器与 LLVM 主版本不一致，本次关闭 IL 路径。精简后的试验库 `build/diagnostics/opencl-vulkan/libOpenCL-arm64-api29-experimental-1444f8da.so` 为 64,359,952 字节，SHA-256 `1444f8da141eb995744ad877434a70cb1433115e24d645921a0544a0e2cf8f55`；原始库及配置日志留在 `/var/tmp/rme-clvk-android-noil.rxik0nVG`。ELF 为 AArch64，SONAME `libOpenCL.so`，LOAD 对齐 16 KiB，主要 OpenCL 接口有导出；对 NDK API 29 的依赖符号做了静态核对。上游源码和多种许可证未打包入此试验文件，未经许可证审查，不得作为发行资产；更未证明目标固件动态加载或实际运行。该库尚未接入 EMU 或安装，设备和原厂 ROM 均未操作。
+- OpenCL 探针新增工作组归约：4 组各 16 项经 `__local` 数组及 barrier 计算，逐组核对。独立复验中，原生 clvk/llvmpipe 与跨进程 clvk/gfxstream/Kumquat 均计算正确，故意错误结果对照返回失败；前者另经 UBSan 验证，后者原有负对照也通过。两条路径均为电脑软件 CPU，不能证明手机 GPU 或 Geekbench 可用。
+- 固定 clvk 对该内核的 `CL_KERNEL_LOCAL_MEM_SIZE` 报告为 0，其 `src/kernel.cpp` 明确有漏算编译期 local 分配的 FIXME；工作组计算成功不能证明该能力查询正确或实际物理本地内存类型。新版 ARM64/API 29 探针仅交叉编译，16 KiB 对齐，保存在 `build/diagnostics/opencl-vulkan/opencl-probe-arm64-api29-2c3ece5a`，SHA-256 `2c3ece5a64f105cbc47dd43e020e68ea97bf2cc14abac819339d2a53757dfb17`；旧版探针继续保留，均未在手机运行。
+- Vulkan 握手原型增加超时边界检查：`poll` 返回就绪后，如果检查时已超过整体期限则返回超时。模拟延迟恢复的 socket 回归在修改前复现错误成功、修改后通过；WSL 测试独立复跑通过，ARM64/API 29 编译通过。该原型仍未接入 EMU，不构成 Vulkan 计算实现，也不能保证线程调度导致的所有超时边界。
+- `tools/diagnostics/clvk-local-memory-report/` 保留静态与动态 local 内存查询的独立失败回归。固定 clvk 在 llvmpipe 上报告 0/96 字节，而该测试下限分别为 64/160 字节；`uint3[7]` 下限为 112 字节但报告 0，独立复跑均复现。多 kernel 的入口 interface 会保守列出其他 kernel 的变量，动态 local 还涉及特化常量；按模块或 interface 简单相加并不正确。此缺陷尚无通用修复，未接入产品。
+- Android Vulkan 客户端进一步在隔离目录使用 Android 16 官方 Soong `ndkstubgen --llndk`、对应原始 `libnativewindow`/`libsync` 符号表、NDK `liblog` 链接接口和部分 AOSP 静态属性代码，完成严格 `--no-undefined` 交叉链接；独立临时副本复验输出 SHA-256 `277da3a6e1c765d8c8e2577d9bbc56c8bd633a8194a4e2daebfa047245186e0f`，无绝对路径 DT_NEEDED 或 RUNPATH。链接期 `libhardware` 仍使用 Mesa 构建 stub，其他依赖、ABI、目标系统真实符号和加载命名空间均未完整验证；该 ELF 与生成的链接 stub 只用于诊断，未装载或接入 EMU，也不得作为发行资产。源码、构建工具与复验脚本位于 `/var/tmp/rme-llndk-android16.s64s0A7i/`，非完整可独立重建包。
+- 后续以 AOSP 官方 VNDK 34 ARM64 `libhardware.so` 替代上述 Mesa 链接 stub，同样完成严格链接，独立复验得到逐字相同的产物；最终 ELF 仍动态依赖 `libhardware.so`。该预构建属于 VNDK 34，不能证明目标 Android 16 固件的 VNDK 版本、符号、依赖链或命名空间兼容；只用于电脑端链接对照，未运行或打包。官方文件及复验脚本位于 `/var/tmp/rme-libhardware-aosp.OrdwY5up/`，原始来源与许可证见该目录材料，整体发行许可证尚未审核。
+- 旧版 gfxstream 同进程实验的失败退出崩溃进一步定位：故障注入使队列状态按未知处理时，静态 `BoxedHandleManager` 先于 `FrameBuffer` 析构，后者的 Vulkan 实例清理回调再访问已析构管理器，触发 SIGSEGV。另一对照中真实 fence 已完成且明确按完成状态显式释放，进程按预期返回失败而非崩溃。这些对照均非真实在途 GPU 超时；真实超时后的队列和线程能否安全收敛仍未知，因此没有通过强行改变析构顺序或跳过析构掩盖该问题。日志与 GDB 证据位于 `/var/tmp/rme-fence-analysis.afzYLKm9/`，未接入产品。
+- 为调查静态 local 内存报告，上游较新 clvk 固定提交 `9862fce7d1b9b68a45986ef5e15b2fb81e417246` 增加了编译器反射路径，配套 clspv 为其 gitlink `b36e501783d336e8ba2fd26c6832d6d6faf74d5d`；截至本记录仍在隔离构建，尚无可运行回归结果。新版 `device.cpp` 用当前 NDK r28c 自带 Vulkan 1.3.275 头进行 Android ARM64 编译失败；仅替换为固定 gfxstream 源码自带的 Vulkan 1.4.363 头后，该单个对象交叉编译通过，独立复验命令与日志保存在 `/var/tmp/rme-clvk-header-verify.UI5KDEA2/`。源码对新增 FMA 扩展有运行时枚举与 feature 检查；这不证明 Android 整库链接、目标驱动支持或运行成功，也未接入 EMU。
+- 上述新版固定组合后来在 WSL 隔离目录构建完成并独立复验：旧版失败的静态及动态 local 内存查询下限测试通过，报告 176/272/176 字节；实现汇总程序级静态分配，不能据此证明逐 kernel 精确统计。新版同时经 clvk → gfxstream → Kumquat 跨进程链通过逐元素和工作组归约，缺服务器、坏内核及错误预期均按预期失败；宿主是 llvmpipe CPU，测试服务 SIGTERM 强制结束。这是电脑研究构建，未完成新版 Android 整库构建、EMU 接入或手机 GPU 验证；版本、构建和复现见 `tools/diagnostics/clvk-local-memory-report/README.md`。
+- `tools/diagnostics/gfxstream-missing-properties2/` 保存固定 gfxstream 的独立研究补丁：当模拟 loader 同时缺少 `vkGetPhysicalDeviceProperties2` 核心名和 KHR 别名时，原版宿主崩溃，补丁版销毁已创建实例并逐层返回初始化失败；对新建源码副本重建后独立复验，正常和只缺 KHR 别名的 CPU 计算对照通过。只缺核心名的异常 loader 还会在后续实例 decoder 路径失败，尚未修复；这些均为电脑故障注入，未接入产品或在 Android 运行。
+- 新版 clvk/配套 clspv 后续在隔离目录完成 Android ARM64/API 29 整库交叉链接，启用同进程 OpenCL C 编译器、关闭 SPIR-V IL；使用固定 gfxstream 的 Vulkan 1.4.363 头及上游 `CLSPV_EXTERNAL_LIBCLC_DIR` 复用相同 LLVM 版本的 SPIR-V bitcode。精简调试信息的研究库 `build/diagnostics/opencl-vulkan/libOpenCL-arm64-api29-newclvk-experimental-a3c729d8.so` 为 97,543,200 字节，SHA-256 `a3c729d81a07da65a50213e787569ce0205cea4d16746d09939b5b5ea9554430`，ELF LOAD 对齐 16 KiB；工作组探针以严格未定义符号检查成功链接。独立静态检查中，探针、该库和 NDK C++ 运行库的强未定义符号均在指定库或 NDK API 29 stub 找到候选导出；弱符号、Android 加载命名空间和实际运行未验证。该库未接入 EMU 或 APK，依赖及许可证尚未完整审查，不得作为发行资产。
+- 同一研究库与 NDK API 26 接口静态对照，有 `vkGetPhysicalDeviceFeatures2` 和 5 项 `posix_spawn` 强符号找不到候选导出，首次出现在 API 28 stub；但产物按 API 29 构建，此对照不能证明 API 28 可加载，也不应更改宿主 App 的最低 API。所需系统库取决于实际加载该库的进程及其命名空间；比较脚本和日志位于 `/var/tmp/rme-clvk-api-analysis.otdfHOj8/`，未执行 Android 加载。
+- `tools/diagnostics/gfxstream-android-window-type/` 保存固定 gfxstream 的单项研究补丁：Android GLES 关闭时改用 NDK EGL 头提供的原生窗口类型。独立复验在原版复现类型断言和真实源码编译失败，补丁版 GLES 开关两种配置的 ARM64 对象编译及 Linux 类型对照通过。只验证单对象编译；Android 被误判为 X11、Vulkan-only 的 GLES 同步引用、窗口有效性和完整宿主后端链接仍未解决，补丁未接入产品。
+- 以红魔原厂镜像为对照，只读检查本机 `super.img` 副本的 LP/EROFS 元数据及图形文件。`vendor/build.prop` 声明 REDMAGIC、NX809J、平台 `canoe`；镜像内存在 AArch64 的 `vendor/lib64/hw/vulkan.adreno.so`、`vendor/lib64/libOpenCL.so`、`libOpenCL_adreno.so`、`libadreno_compiler_cl.so`、`libgsl.so`，以及 `system/lib64/libvulkan.so`。原厂 Vulkan 驱动直接依赖 `libgsl.so`、Adreno 工具库和 QTI 显示 mapper 等；OpenCL 加载器及 Adreno 实现中分别有 `libOpenCL_adreno.so`、`libgsl.so` 和动态加载的字符串线索，不能单凭字符串证明运行时调用。上述检查仅读镜像并在内存解析指定 ELF，未导出固件内容、修改镜像或访问手机。该静态结果不能证明原厂驱动在模拟器或任意宿主可直接运行。
+- 镜像 OpenCL 进一步静态复核：原厂 `libOpenCL.so` 导出 196 个 `cl` 前缀符号，包含平台枚举、源码建程序、构建和提交计算等入口；`libOpenCL_adreno.so` 导出 8 个 `cl` 符号，包括 `clIcdGetPlatformIDsKHR`。主库包含 ICD 配置路径及动态加载名称字符串，镜像原始 `system/vendor` 指向 `/vendor`，对应 `vendor/Khronos/OpenCL/vendors` 目录未找到。这些是 ICD 分发及配置路径的线索，不证明实际加载流程或在线编译能力；也不能排除其他配置来源或回退逻辑。
+- 只读原厂库配置的定向检查与独立复验：`vendor/etc/public.libraries.txt` 包含 `libOpenCL.so`，`system/etc/public.libraries.txt` 包含 `libvulkan.so`；system 的 `linker.config.pb` 包含 `libvulkan.so` 字符串，但本次未解析其 protobuf 字段。实际实例的链接器配置在运行时生成，故原厂清单只能证明所列库名，不能证明某个应用或模拟实例能够加载或运行这些库。仅读取指定配置中的图形条目，未修改镜像或设备。
+- 项目当前源码启动的是 EMU 自带 GLES 桥，N64 的 HWUI 仍设为 `skiagl`；检查 API 36 资源与接线未见现成 Vulkan/OpenCL 桥。仅凭源码不能断言已有实例实际保留或加载了哪些原厂库；需要后续通过允许的正常功能测试验证，不能为了实验修改设备 Guest 或真实硬件节点。
+- `tools/diagnostics/gfxstream-color-buffer-nogles/` 保存 Vulkan-only 编译研究补丁和对照：5 个同步方法改用现有跨配置 getter，不改原同步返回逻辑。独立复验中 Android/Linux GLES=0 原版对象编译失败、候选通过，Linux GLES=1 对照通过；GLES=1 构建的运行时 Vulkan-only 路径使用 llvmpipe 验证真实图像写入、读取、同步、错误句柄和正常释放。完整 GLES=0 后端仍因其他源文件错误不能链接，GL/Vulkan 双 backing 和 Android 运行未验证；补丁未接入产品。
+- 2026-11-16 对手机宿主进行只读能力查询。系统属性报告 Redmi 24117RK2CC、Android 17/API 37、SoC 标识 SM8650；系统 Vulkan 查询报告 Adreno 750、Vulkan API 1.3.128、Qualcomm Adreno 驱动，并声明外部内存、FD、Android 硬件缓冲及外部 fence/semaphore FD 扩展。系统报告的 compute shared memory 为 32768 字节，最大工作组 invocation 为 1024；这些是驱动查询结果，不等于特定外部句柄组合或 GPU 计算已经运行。宿主存在 OpenCL 库，不能由文件存在推断应用可加载或可用。设备上的 EMU 为 0.5.0-beta/versionCode 8，并非本工作区修改后的构建；未安装、推送或启动测试程序，也未读取或修改设备 Guest。
+- 2026-11-17 在同一手机宿主临时运行 Vulkan 计算探针。驱动报告 Adreno 750、Vulkan 1.3.128，离屏计算 64 项全部逐项校验通过，进程退出 0；故意错误预期的对照检测到 1 项不符并返回失败。外部内存探针对指定 storage buffer 和 RGBA8 图像报告 AHardwareBuffer 可导入导出；DMA-BUF 和 host allocation 扩展未通告，`0x201`/`0x280` 组合结果为 unknown。该探针只查询属性，不创建设备、分配 GPU 内存或传递句柄；不能把 unknown 解释成支持或不支持，也不证明跨进程同步。
+- 手机宿主通过 shell 使用原有高通 `libOpenCL.so` 运行源码编译和计算探针：驱动报告 QUALCOMM Adreno 750/GPU，64 项逐元素计算和 4 组各 16 项的 local 内存归约通过；`CL_KERNEL_LOCAL_MEM_SIZE` 报告 64 字节，无效内核返回构建失败，故意错误的预期返回失败。宿主 `vendor/etc/public.libraries.txt` 列有 `libOpenCL.so`，`system/etc/public.libraries.txt` 列有 `libvulkan.so`；shell 环境使用 `/vendor/lib64` 的加载结果不能证明普通应用或 EMU 的链接命名空间也可用。测试只使用宿主临时目录，执行后确认各次临时探针文件已删除；没有安装 APK，也没有读取或修改设备 Guest。上述均非 EMU 内测试，不代表 Geekbench 已可用。
+- 只读比较原厂 NX809J 镜像和此次手机宿主的四个对应图形文件：`libOpenCL.so`、`libOpenCL_adreno.so`、`vulkan.adreno.so` 和 `libgsl.so` 的 SHA-256 均不同。镜像侧通过 EROFS 读取流在内存计算摘要，手机侧只读取已有文件；未复制驱动或修改镜像。摘要差异只说明文件不逐字相同，不能据此断定接口兼容或不兼容。
+- 新增独立 `tools/diagnostics/opencl-vulkan/device-info.c` 能力查询，WSL 正常枚举及缺失驱动负对照通过，ARM64/API 29 交叉编译与 16 KiB 对齐检查通过。手机宿主的临时测试报告 Adreno 750、OpenCL 3.0、OpenCL C 3.0、图像支持、在线编译器及 `cl_khr_fp16`；探针仅查询属性，不创建 context 或计算任务，执行后临时文件已删除。该报告不证明任何应用或 EMU 的 OpenCL 接入已完成。
+- 设备信息探针增加定向外部内存扩展报告，WSL 正反对照及 UBSan 构建通过、Android ARM64 交叉编译通过；手机宿主的 Qualcomm OpenCL 报告 `cl_qcom_ext_host_ptr` 和 `cl_qcom_android_native_buffer_host_ptr`，未报告 `cl_khr_external_memory` 或 `cl_khr_external_memory_android_hardware_buffer`。该查询只列驱动通告的扩展，没有进行 OpenCL/native-buffer 导入或跨进程测试，不能推断已实现互通；宿主临时探针文件已删除。
+- 2026-11-17 手机宿主使用公开 NDK/Vulkan API 运行独立 AHardwareBuffer BLOB 单进程读写探针：CPU 写入的 64 个整数经 Vulkan 拷贝后逐项校验通过；Vulkan 写入后 CPU 逐项读回通过；故意错误预期检测到 1 项不符并退出 1。ARM64/API 29 二进制独立重建摘要一致（`af298263227563291555da91445b875a0ebb1d2d7cbcc1391d32d282aee5406a`），正常和负向进程退出后均确认宿主临时探针文件已删除。此结果仅覆盖该 BLOB 的单进程 CPU↔Vulkan 数据传输，不证明图像资源、跨进程传输或 EMU 可用；没有操作设备 Guest。
+- `tools/diagnostics/vulkan-ahb-export/` 验证相反方向的 Vulkan 分配并导出 AHB BLOB，buffer usage 使用固定候选后端的 INDEX、VERTEX、STORAGE、STORAGE_TEXEL、TRANSFER_SRC 和 TRANSFER_DST 组合。手机宿主确实成功导出 256 字节 BLOB；其报告的 usage `0x10000ff` 不含本探针接受的 CPU read/write 用途，因此 CPU lock 和往返未执行，探针明确返回不支持而非宣称计算通过。电脑上的数据校验、不支持负对照、ARM64 构建和手机测试二进制摘要已独立复验；手机临时文件已删除。只证明该条件下单进程导出成功，不证明后续重导入、其他尺寸、跨进程或 EMU 可用。
+- 同日将已分别验证的 Android 窗口类型及 color-buffer GLES=0 两项研究补丁应用于全新固定 gfxstream 源码副本，Android ARM64 Vulkan-only 离线编译中这两个对象成功；标准 GLES3 头解决实验脚手架的格式枚举缺失后，`frame_buffer.cpp` 仍有 20 个涉及未受保护 GLES 类型、读回与条件编译声明的错误，未进入最终链接。未屏蔽调用或关闭窗口检查；配置、完整错误及脚手架差异保存在 `/var/tmp/rme-android-vk-offline.nVNDSuyG`，该研究后端尚未接入 EMU。
+- `tools/diagnostics/gfxstream-framebuffer-vkdecl/` 保存进一步的单项研究补丁：将 Vulkan 状态 getter 原样移出 GLES 条件块。独立红绿复验显示 Android GLES=0 的该条成员缺失错误消失，Linux GLES=1 的原版与候选 getter 机器码及重定位一致；Android 对象仍因其他问题编译失败，整个后端未链接，补丁未接入 EMU。
+- `tools/diagnostics/gfxstream-angle-bgr10-format/` 保存独立格式声明研究补丁：将固定源码已有的 `GL_BGR10_A2_ANGLEX` 定义原样放入两种配置可见的共享头。独立复验显示 Android GLES=0 对该常量的编译错误消失；原源码格式转换函数切片的 GLES=1 原版和 GLES=0/1 候选对数值、映射及无效格式对照一致。实际 llvmpipe 不支持该格式的 Vulkan 图像创建，Android 对象仍有其他编译错误，不能将上述结果解释为图像读写或完整后端通过；补丁未接入产品。
+- 固定候选后端的 `ReadbackWorker` 目前只有 GLES 实现；Vulkan 的 ColorBuffer 直接读回不能直接替代其异步显示读回、回调、显示注册与线程退出流程，且现有部分 `void` 包装丢失底层 Vulkan 读回错误。已有 llvmpipe RGBA 直接读回仅证明特定单次路径，不能证明异步、多显示、BGRA 或失败通知语义。此项尚无经过完整行为验证的修复，未添加空 worker 或虚报读回成功。
+- 对照固定 gfxstream 源码与手机实际 Vulkan 查询：Android 平台默认外部内存模式为 AndroidAHB，要求的 AHB、dedicated allocation、memory requirements 2 和 external memory 扩展均在本次手机驱动声明中；此前 llvmpipe 实验使用的 HostAllocation/SystemBlob 路径需要手机未通告的 `VK_EXT_external_memory_host`，不能直接沿用。源码中 ColorBuffer 使用 AHB 分配后导入，而普通 VkBuffer 路径涉及 Vulkan 分配后导出 AHB；手机已测的 BLOB 导入只能证明其特定单进程方向，不能替代对这两条实际路径的验证。固定 Kumquat 对 AHB 的相关描述和句柄传递存在未完成的适配；不修改安全检查或设备 Guest 的前提下，Android 端到端仍未接通。
+- 新增仅 Debug 可手动触发的宿主 OpenCL 探针：在 EMU `:vm` 进程通过公开库名加载 OpenCL，选择报告可用且带在线编译器的 GPU，编译内核并检查 64 项结果；入口在宿主日志面板，普通启动不执行，不新增对外入口。独立 WSL 模拟驱动 9 项测试及 Debug/Release 编译检查通过，包括多平台选择和失败对照；厂商驱动调用可能阻塞或崩溃，失败不会伪报通过。诊断 APK `E:/RedMagicEMU/local-data/rme-root-archive-20261117/rme-opencl-host-7uaimsiz/app/build/outputs/apk/debug/app-debug.apk`，SHA-256 `ca5bbe722d46eadc42851beb8ef79575b42ae7be676aec59a763f577f8d992d4`，保留通过安兔兔复测的 GLES 资产及现有安全配置，已覆盖安装。
+- 实机运行时，EMU `:vm` 宿主日志面板显示 `OpenCL reported GPU: 64/64 values verified`；结果由电脑 OCR 识别，测试没有提供 GPU 型号。此前手机 shell 探针报告 Adreno 750，但不能以此替代本次进程内型号查询。该结果证明指定宿主应用进程可执行这一简单 OpenCL 内核，不证明 Guest OpenCL 桥、Geekbench GPU、跨进程内存或 Vulkan 已接通。
+- 继续建立仅 Debug 手动触发的本地 `socketpair` OpenCL 平台/设备查询往返，使用会话内虚拟 ID，不传宿主裸指针；这一阶段尚未接 Guest，也不执行跨进程计算。独立复验 24 项协议/错误测试、9 项原计算探针测试通过；WSL 真实 clvk/llvmpipe 直查与本地往返查询一致（软件 CPU）。手机覆盖安装 `E:/RedMagicEMU/local-data/rme-root-archive-20261117/rme-opencl-discovery-4km1ypqw/app/build/outputs/apk/debug/app-debug.apk`，SHA-256 `0de747d1fd8b51831dffae12a29070ac3f4f7880b31c105cbbd150477a660c1b`；包内保留此前实机 GLES 资产、radio LF 和现有网络闸门。
+- 手机 EMU `:vm` 进程手动运行该探针，宿主日志 OCR 显示本地往返枚举到 `QUALCOMM Adreno 750`、`OpenCL 3.0`、设备类型 `0x4`（GPU），并显示同次独立 GPU 计算 `64/64 values verified`。这证明该手机和应用进程下的本地往返枚举以及独立简单内核运算；仍未证明 Guest OpenCL、Geekbench 或 Vulkan 可用。
+- 新增仅 Debug 手动执行的宿主 Vulkan 计算探针，复用现有 64 项计算验证；WSL llvmpipe 软件计算、错误预期、无 ICD、注入 fence 失败及不确定完成状态下禁止同进程重试对照通过。Debug/Release 离线构建成功，Release 不包含探针原生库；Windows 722 项单元测试仍为已记录的 1 项文件锁失败、89 项跳过。合并 Vulkan 和 OpenCL 宿主探针的调试包 `E:/RedMagicEMU/local-data/rme-root-archive-20261117/rme-vkcl-host-cs_v8npl/app/build/outputs/apk/debug/app-debug.apk` SHA-256 `fc145f8169df612884ce5827094b9ab401fed172f957ab2dfeb001620e862420`，保留 GLES 和 radio 正确资产，已覆盖安装。
+- 手机 EMU `:vm` 进程手动运行该 Vulkan 探针，宿主日志经 OCR 显示 Adreno 750、集成 GPU、Vulkan 1.3.128，`VULKAN_COMPUTE_OK words=64`、`PROBE_STATUS=OK`。这是宿主应用进程的简单 Vulkan 计算结果，不证明 Guest Vulkan HAL、跨进程资源或 Geekbench 已接通。
+- Guest 的 Geekbench 6 Vulkan 成绩出现异常，随后只读核对同次运行日志。`AdrenoVK-0` 明确报告 Geekbench 进程加载 `/vendor/lib64/hw/vulkan.adreno.so`，驱动版本 `0842.23`。Geekbench 同次日志显示 workload `303`、`401`、`406`、`407`、`503`、`504`、`601` 未通过结果校验，因此这些测试结果不能作为有效 GPU 性能成绩。此次确认 Guest 能加载原厂用户态驱动并进入测试流程。Guest 计算正确性和实际 GPU 执行路径当时仍待验证。
+- 继续只读检查该实例的运行树：`dev/kgsl-3d0`、`dev/ion` 不存在，`dev/dri` 目录为空；API 36 runner 对 Guest `/dev/ion` 特判为 memfd，Guest 设备路径一般映射到运行树，现有源码未发现 Guest Vulkan 到宿主 Vulkan 的计算桥。以上不能排除其他间接路径，也不能单凭文件状态确定本次校验失败的根因。计时源码检查未发现对 `clock_gettime` 的专用缩放；现有 `GuestRunner` 会将普通诊断程序路径解析到 Guest 运行树，还会尝试写入进程账本，故未向 Guest 放入或运行诊断程序。本轮没有代码修复或新 APK。
+- `tools/diagnostics/vulkan-hal-abi/` 离线检查固定 gfxstream Android HAL 入口：在 Linux 将上游原文件按 C 编译并使用明确返回失败的三个测试替身时，模块 `vk0` 打开和三个函数指针检查通过；无效名称触发断言、关闭返回 -1，整体检查如实返回失败。这两项是探索性行为检查，不代表 Android 加载器一定调用相关路径。原文件使用 NDK 编译为 ARM64 对象并能看到 `HMI` 符号；没有链接真实后端、运行 Android loader、接入 EMU 或修改设备。此检查不证明 Vulkan 计算可用。
+- 本阶段验证 Vulkan 客户端与宿主构建。采用 gfxstream `d7a33801fb557cebd4f8564a8af431669b3f471d` 构建 Android ARM64 客户端和宿主。同源原始 HAL、HostConnection、QEMU pipe 源文件编译为对象，但尚未完成 Vulkan 编码器或 HAL 的完整链接；不同修订的客户端和后端不能假设互通。宿主 GLES+Vulkan 构建复现 Android 误包含桌面 `GL/glx.h`；`tools/diagnostics/gfxstream-android-gldispatch/` 保存单项条件修正及电脑对照，原版 Android 对象失败、修正后编译通过，Linux 对象对照一致。完整后端仍有窗口类型编译错误，Vulkan-only 构建还有平台 GPU 信息符号未解决；没有运行 GLES、修改 Guest、安装设备或完成 Vulkan 桥。
+- `tools/diagnostics/gfxstream-android-platform-define/` 保存该固定版本 Android 宿主交叉构建的配置修正：NDK 预定义 `__ANDROID__`，上游原生窗口分支却检查 `ANDROID`；只在 Android C/C++ 构建中加 `-DANDROID`，使用原有 Android 分支。电脑红绿复验中三个对象的原始窗口类型错误均复现、添加宏后编译通过，Linux 类型断言保持不变；全新 Meson 构建同时应用上一条 GLX 条件修正，四个相关对象编译通过。`FrameBuffer.cpp` 越过类型错误后仍缺 `cutils/native_handle.h`，完整后端链接、设备运行和 Guest Vulkan 均未验证；未运行 GLES、修改安全检查或设备。
+- `tools/diagnostics/gfxstream-d7a-android-backend/` 记录继续构建：选用同源 Android 原生窗口实现、真实 AOSP libcutils 头、NDK `-landroid` 和真实 composer 解码器后，176 步构建进入严格最终链接，但仍因缺少 `getGpuInfoListNative` 和 `isVulkanSafeToUseNative` 两个 GPU 信息与可用性检查符号失败；未加入无条件放行实现。复验脚本核对窗口源选择、重新编译 FrameBuffer 对象，并核对最终日志恰有这两个未定义符号。同源 Guest 客户端虽然能编译若干 ARM64 对象，但 Vulkan 初始化和宿主可见内存仍依赖当前 EMU 未提供的 VirtGpu/Goldfish 接口，QEMU pipe 本身不能解决；后端与 Guest Vulkan 尚不可用，没有安装设备或修改 Guest。
+- 只读核对上述 GPU 检查：系统 Vulkan 枚举可以查询部分设备属性，但无法无损提供现有 `GpuInfo` 的所有字段；空设备列表会使现有黑名单查询无匹配，不能把它当成失败即拒绝。Windows 原实现还检查已知不良驱动或 loader 版本，单凭枚举成功不能等价替代。现有固定版本的检查结果是否被完整后端启动链消费也未证实；此外能力检查应覆盖后端实际选中的设备，不能只检查另一块 GPU。因此本轮未为两个缺失符号添加空实现或无条件放行，也未将 Vulkan 枚举成功等同于安全判定。
+- 只读检查 d7a 的非直映射复制路径：Guest 默认始终使用直映射，未建立 EMU 内存后端；备用 `flush`/`invalidate` 对部分映射的 `VK_WHOLE_SIZE` 长度处理需要实际映射区间，但现有客户端没有保存该区间，host 也收不到该元数据。修正需覆盖 map/unmap 生命周期、变换和两端编码，并同步修改生成器；不能只用 allocation 大小代替映射末尾。该备用路径未启用，未证明其导致本次 Geekbench 错误，本轮没有为其添加未经双端验证的补丁。
+- 宿主 Vulkan 计算通路要求使用真实 GPU。`native/vulkanbridge/gpu_select.c` 按驱动报告选择支持 Vulkan 1.2 及以上、具有非空计算队列的集成或独立 GPU，并拒绝 CPU、虚拟和未知设备。调用方继续执行原有检查并管理实例生命周期。替身 loader、llvmpipe CPU 拒绝和 ARM64 构建均通过。队列族数量变化的回归在增加复核后通过。手机宿主探针报告 Adreno 750、Vulkan 1.3.128、计算队列族 0，退出码 0。该阶段验证了宿主设备选择，Guest Vulkan 计算尚待接入。
+- 在 `native/vulkanbridge/gpu_device.c` 增加使用上述选择器的宿主 Vulkan 设备生命周期组件：调用真实 `vkCreateDevice` 并核对返回值，取得计算队列后向调用方交付；失败时不交付句柄，空队列会销毁已创建设备。伪 loader 覆盖拒绝 CPU、入口缺失、创建设备失败或返回空句柄、空队列清理及重复关闭/重新打开；电脑回归、ASan/UBSan 和 Android ARM64 构建通过。手机宿主使用同源码 CLI 成功创建和销毁驱动报告的 Adreno 750 逻辑设备及计算队列，退出 0，临时文件已删除。调用者须维护 instance 和设备独占生命周期并在销毁前完成工作；此组件尚未接入产品或 Guest，该手机运行未提交计算任务。
+- `native/vulkanbridge/gpu_buffer.c` 增加宿主单进程 storage/transfer buffer 的创建、实际内存需求查询、分配、绑定与销毁；包括必需的专用分配、跳过未启用特性的特殊内存类型、错误清理、本组件活跃分配数及活跃 buffer 阻止关闭 device。调用方仍须对设备上所有外部分配统一计数、保证同步与资源生命周期；该组件未实现映射、数据传输或计算。电脑 fake dispatch 负向测试、ASan/UBSan、GPU-only CPU 拒绝对照及 Android ARM64 构建通过；手机宿主在驱动报告的 Adreno 750 上成功创建、绑定并释放 65536 字节 storage buffer，测试程序退出 0，临时文件已删除。此测试未提交 GPU 计算，组件未接产品或 Guest。
+- `native/vulkanbridge/gpu_submission.c` 增加宿主单进程队列提交及 fence 生命周期：超时保持 pending 并允许再次等待；等待内存不足保留 pending；等待返回设备丢失时报告失败并只允许按该等待覆盖范围清理；提交结果未知时保留资源且阻止后续任务。活跃提交会阻止本组件 buffer 和 device 销毁，调用者仍须对其他 Vulkan 对象、命令缓冲及队列进行同步和生命周期管理。电脑 fake dispatch、ASan/UBSan、CPU 拒绝及 ARM64 构建通过；最终构建手机宿主在驱动报告的 Adreno 750 上成功执行空提交、等待 fence 并清理，退出 0、临时文件已删除。空提交没有着色器或结果校验，组件未接入产品或 Guest，不能证明 Geekbench 可用。
+- `tools/diagnostics/vulkanbridge-compute/` 将上述选择、设备、buffer 和提交组件连接到单进程宿主 Vulkan 计算测试：手机宿主报告 Adreno 750、Vulkan 1.3.128，真实 shader 运算 64 项逐项校验通过且退出 0；同一程序故意错误预期时报告 1 项不符并退出 1。两次运行使用宿主临时文件，结束后已删除。该测试使用的是手机 shell 进程而非 EMU `:vm` 或 Guest，不证明新组件已接入产品、Guest Vulkan、OpenCL 或 Geekbench。
+- 新增 `native/vulkanbridge/gpu_compute.c` 宿主单进程计算组件：调用方提供事先验证的 SPIR-V、入口、一个 storage buffer 和 dispatch 组数；组件创建描述符、管线和命令、提交并等待，保护在用 buffer，处理失败、超时及设备丢失。当前屏障只覆盖宿主写入→计算→宿主读取，其他 GPU 任务间依赖、shader 合法性/feature 与访问边界由调用方负责，不能作为直接暴露给 Guest 的完整 Vulkan 接口。fake 生命周期、错误、ASan/UBSan、CPU 设备拒绝及 ARM64 离线构建通过；同摘要 `926957f5c3bb3b2be5b4b935303062f8c068f3b1353a1c39cb6a240057d8d4ef` 的测试程序在手机宿主 Adreno 750 执行 64 项结果校验通过，错误预期对照按预期失败，临时文件已删除。本项尚未接入 EMU 或 Guest。
+- 固定 d7a 候选后端中发现 `createGlobalVkEmulation` 丢弃 `vkCreateDevice` 返回值并检查旧 `res`，可能在创建设备失败后继续初始化。`tools/diagnostics/gfxstream-createdevice-result/` 保存单行修正和对真实初始化函数的电脑隔离回归：注入创建失败时原版错误地继续到设备 dispatch 边界，修正版提前返回；成功替身两版均抵达边界。测试使用 llvmpipe 查询和设备创建替身，不创建真实设备；补丁尚未接入产品，失败后的全局状态清理与重试未修复或验证。
+- `tools/diagnostics/gfxstream-physical-device-selection/` 保存针对固定 d7a 候选后端的设备选择研究补丁：只选择驱动报告的集成或独立 GPU、Vulkan 1.2 以上且同一非空队列族同时支持 graphics 和 compute，并使用该队列族创建设备；仅有分离队列族的设备目前明确拒绝。隔离测试调用真实初始化选择逻辑，以 llvmpipe 句柄和模拟属性执行 11 个红绿场景，覆盖 CPU/virtual 拒绝、非零 API variant、多设备及队列族选择；模拟属性不是实机 GPU。补丁尚未接入产品，与此前设备创建返回值补丁独立；未验证 Android 后端、Guest 或 Geekbench。
+- 在全新 `/var/tmp/rme-d7a-vk-merged-android.IFuEeE2h/` 隔离副本中，设备创建返回值及物理设备选择两份研究补丁按顺序以零 fuzz 应用，组合后的 `VkCommonOperations.cpp.o` 成功交叉编译为 Android ARM64；完整后端仍在严格链接时因 `getGpuInfoListNative`、`isVulkanSafeToUseNative` 两项缺失失败。未添加空实现或关闭检查；无可用 Android 后端、没有接入 Guest、没有发布或安装 APK。
+- 修正 EMU GLES 编码器的一项独立缺陷：`glBufferData` 的 usage 不属于宿主 GLES3 的九种有效值时，原实现仍覆盖本地索引影子；现保留旧影子并继续原样发送调用，让宿主报告错误。完整生产编码器的本机测试在修复前对五个无效值失败，修复后九个有效值、五个无效值及命令字节检查通过；像素存储、缓冲读取和 YV12 既有电脑测试通过。使用既有相机实验构建脚本及 NDK 28.2 重建，宿主实验库摘要仍为 `990c361f73fe9760a2644d7a139a3e4fe2377f22a054298f87883656b3332533`，API 36 GLES 资产更新为 `d8baf388f89e806482976bec06c0085364743036ea36f7231419737c9c0793c0`；替换前资产 `dbc3fcf0d9274bd89199152cb779d4244df1278b8feecbce5695d198ebb18909` 保存在 `%TEMP%/rme-bufferdata-before-884pkl22/libGLES_aemu.so`，核对后可恢复。此项不覆盖 ES2 特定 usage 差异或其他宿主拒绝原因，也不修复 Vulkan；未修改 Guest 或进行设备验证。
+- 上述资产使用独立新快照离线构建 Debug APK 成功：`E:/RedMagicEMU/local-data/rme-root-archive-20261117/rme-gles-bufferdata-apk-4hf0wpjt/app/build/outputs/apk/debug/app-debug.apk`，SHA-256 `a303836eba569ca1e36bf63662b8b16719cbbc551192145cc7718d3b02e3bc58`。包内 205 项引擎资产与工作区逐字一致，radio 清单仍为 LF 且 SHA-256 `3140b6d05c2e61decb8a5e9ba27afc98b2e1d03b94e9177360f5dfc25c8bb4d7`，签名与已安装的上一实验包一致；未安装或运行该 APK。
+
+#### 0.6.1 宿主 Vulkan 服务基础（2026-11-17）
+
+- 新增仅供 EMU 自用的宿主服务进程：创建 Vulkan 1.2 实例并选择驱动报告的真实 GPU、创建逻辑设备和计算队列；使用父子进程管道报告就绪及关闭，不提供网络监听、Guest 协议或着色器入口。EMU 仅对启用 GPU 的 NX809J/API 36/ARM64 N64 实例在后台启动该进程，并随实例停止回收；启动失败不会被报告为成功，也不会阻止 Guest 启动。服务就绪不等于 Guest Vulkan 可用。
+- 服务检查调用方传入的父 PID 并使用 Linux 父进程退出信号；启动超时、强制终止和未确认退出会被记录，未确认清理会保留实例以便重试。WSL 使用模拟 Vulkan 的 6 项进程测试、4 项父进程死亡测试及真实 llvmpipe CPU 拒绝对照通过；这不能替代 Android 应用进程或驱动卡死场景的实机验证。独立输出目录的 23 项 JVM 定向测试通过，覆盖服务、实例协调和原有 GuestVm 初始化；完整 Windows 测试中 `InstanceRuntimeLeaseTest.anotherProcessBlocksAndDeathReleasesLock` 在子进程退出后重新取锁失败，原因未确定，未宣称全套通过。
+- Windows NDK 28.2 通过 `native/vulkanbridge/build_host_service.ps1 -Ndk <NDK目录>` 可重建 ARM64/API 29、16 KiB 对齐的服务，脚本默认输出到新建的临时目录且拒绝覆盖指定的现有文件；打包文件 `app/src/main/jniLibs/arm64-v8a/libaemuvkhost.so` 的 SHA-256 为 `f0bea08341871fd4bdf817e29fa9eef1978274e00d304eeee43abce97ded80ff`。需要回滚时，仅撤销 `GuestVm.kt` 中本项宿主服务接线，移除本项新增的宿主管理器、协调器及该打包二进制并重新构建；保留已有 Vulkan 研究组件及无关改动。
+- 独立 Debug APK 在 `%TEMP%/rme-vk-service-final-aaf5180aa97940e486b0da066871d4b0/app-build/outputs/apk/debug/app-debug.apk`，SHA-256 `67d6f039ab7abb5bb23872c386e816656aa1d337508ae452cd144f4175ebacb6`；包内服务与上述二进制一致，205 项引擎资产与当前工作区逐字一致。此版本没有安装或在手机上运行，没有修改用户导入的固件包、Guest 文件或宿主系统；APK 提取后能否在目标手机应用环境执行尚未验证。现有 Guest 应用的 Vulkan 客户端和命令、资源与同步通路仍缺失，不能用于宣称 Geekbench GPU 可用。
+- 宿主 GPU 队列选择现在在首个合格物理设备内优先选非空的 graphics+compute 共用队列；没有共用队列时仍选择原来的首个非空 compute 队列，不改变物理设备排序，也不保证回退队列支持图形。新增模拟设备测试在旧逻辑选中队列 0 而预期为 1 时失败，修复后通过；其余设备、buffer、提交、计算模拟测试、llvmpipe CPU 拒绝、10 项宿主服务进程测试和 Android ARM64 构建通过。旧逻辑的源码按本轮反向差异重建于 `%TEMP%/rme-vk-queue-before-652037aed05740799f2e4209f88b7c9f/gpu_select.c`；该目录还保存了改动前服务二进制，恢复前须核对摘要。重建后的服务 SHA-256 为 `1b8f6c40726644244c338c7b2f3b2f442aa78e08c7945cb18fa19f2b784e171d`。
+- 新的独立 Debug APK 为 `%TEMP%/rme-vk-queue-apk-bd67d697c72c4692a5177c56c3691088/app-build/outputs/apk/debug/app-debug.apk`，SHA-256 `53f8e3c61c6046afce975e9d6c1e57ac4307eb949565acd17c8280eede5b1bce`；包内服务与重建文件一致，205 项引擎资产与当前工作区逐字一致。未访问手机或安装 APK；此项只修正宿主队列选择，不接通 Guest Vulkan。
+- 在 `native/vulkanbridge/gpu_device.c` 增加可选的 Vulkan 1.0 核心设备特性请求：仅查询当前已选物理 GPU，逐项拒绝不支持的特性，设备及队列均创建成功后才报告实际启用的特性；非零请求规范化为 `VK_TRUE`，原接口仍以 NULL 特性创建，不查询或启用任何可选特性。调用方仍须保证所请求特性组合满足 Vulkan 依赖；此接口不处理 1.1/1.2 特性链、扩展、其他 GPU 回退或 Guest 着色器。当前宿主服务仍使用原接口，新接口没有 Guest 调用方。
+- 电脑端模拟 Vulkan 测试覆盖 55 个核心特性逐项拒绝、请求规范化、查询缺失、创建失败、空队列及旧接口兼容；相关设备、buffer、提交和计算测试、真实 llvmpipe CPU 拒绝、10 项宿主服务进程测试、ASan/UBSan 和 Android ARM64 交叉编译均通过。Windows NDK 重建服务二进制 SHA-256 `b4d10f7a269ff9361f7ac23d29a6999b11229a232d377e8030bc79c96ee63259`；改动前的 `gpu_device.c`、`gpu_device.h` 及服务二进制备份在 `%TEMP%/rme-vk-features-before-87956ee418564602aa5b8f1dd26e36b0/`，回滚前核对摘要并同步撤销本项测试及说明。没有重建或安装 APK，也没有连接手机或修改导入包、Guest 文件；这些结果不证明 Guest Vulkan 可用。
+- 固定 gfxstream `d7a33801fb557cebd4f8564a8af431669b3f471d` 客户端的 `VK_HOST_CONNECTION` 在连接为空时先解引用再检查编码器。`tools/diagnostics/gfxstream-null-host-connection/` 保存最小研究补丁和真实源码宏的独立回归：原版三种返回类型均发生 SIGSEGV，修正版对连接为空、编码器为空和正常连接共 9 种情况通过。修正版诊断源码使用 NDK/AOSP 头编译为 Android ARM64 对象，消除临时路径后独立重建 SHA-256 均为 `158aef0824733dcbc3919b59db47acc971accd257a079b68ebb1cea0dccc4efd`。补丁尚未接入 EMU，宏级测试不能证明完整客户端、宿主服务或 Guest Vulkan 可用。
+- 对同一固定版本的 18 个 Vulkan 编码器源文件完成 ARM64/API 35 对象级交叉编译；其中 16 个使用同源 Mesa 诊断头，另外两个在其前使用 NDK 和 AOSP Android 16 硬件缓冲头，混用头文件的 ABI 尚未验证，不可用于运行或发行。清单、源码/对象摘要和逐项重建命令记录于 `/var/tmp/rme-encoder-aosp-headers-1_c96kym/OBJECTS-MANIFEST.txt`；三个代表对象在独立目录重建后逐字一致。可重定位合并后仍有 122 个未定义符号，包括标准运行时及 VirtGpu、GoldfishAddressSpace、Stream 等依赖，合并不代表共享库链接成功。未操作手机、修改 Guest 或导入包，也未执行此前被拒绝的双端映射回归。
+- 进一步使用 `tools/diagnostics/gfxstream-d7a-vulkan-encoder/` 对这 18 个编码器源统一编译参数和头文件顺序，避免上一次混用头文件：NDK 硬件缓冲、data_space、rect 和已有 AOSP Android 16 vndk/graphics 头均以实际编译依赖核对。旧 Mesa 硬件缓冲头导致两个对象缺少格式常量的失败已独立复现；统一头顺序后，三次独立构建的 18 个 AArch64 REL 对象及输入摘要一致，合并对象 SHA-256 均为 `65650c14dce86ec3740c857b933102504cceab44660c06f4a59324da08877c2f`。仍实际引用两个同源 Mesa 硬件兼容头 `hardware/hardware.h`、`hardware/hwvulkan.h`，其 Android 16 ABI 未验证；合并对象仍有 122 个不同未定义符号，按名称粗分项目/Mesa 36、C/C++ 及编译运行时 84、Android 平台 2，不能当作共享库已链接。脚本依赖本机固定版本源码、既有生成头及工具链，非独立发行构建；未操作手机、修改 Guest 或导入包，也未运行客户端。
+- 使用 `tools/diagnostics/gfxstream-d7a-base-link/` 对固定版本 `Android.bp` 中的真实 `Stream.cpp`、`StreamSerializing.cpp` 和 `AndroidSubAllocator.cpp` 交叉编译，并仅以 `ld.lld -r` 与上述编码器对象合并核对符号。原 122 个未定义符号有 14 个由这三个对象提供，但它们引入 25 个新未定义符号，合并后共 133 个，包括 MemStream 和 C++ 运行时；不代表共享库链接成功。三次独立构建得到相同合并对象 SHA-256 `0bbf21e731f1c9a2bfdaf7c2690e68dd6ac0d453b354ac37c2918225a010cf4c`；脚本记录输入、命令和符号差集。
+- 静态审查发现上述上游 Stream 在短读、无容量参数的 buffer 读取及无上限的数组数量方面存在边界限制，SubAllocator 的越界检查只记录信息；本轮没有运行这些代码，不能把它们直接暴露给不可信 Guest。现有两个 Mesa 硬件兼容头的 Android 16 ABI、客户端加载、传输和剩余依赖仍未解决。未操作手机、修改 Guest 或导入包，也未执行此前被拒绝的双端映射回归。
+- 使用 `tools/diagnostics/gfxstream-d7a-memstream/` 编译固定版本真实 `MemStream.cpp` 并与上一编码器加基础对象合并；`llvm-nm` 未定义符号从 133 个降为 131 个，恰好解决 `MemStream::load/save` 两项，没有引入新的未定义符号。进一步使用 NDK ARM64/API 35 的 `libc++_shared`、`liblog`、`libandroid` 链接接口和 `--no-undefined` 做真实共享链接对照：原对象报告 25 个不同的未定义符号，加入该对象后降为 23 个，链接仍失败且没有生成共享库。三次独立构建的合并 REL 摘要均为 `e4477501de21dbef459498600796f90c5d953ed32dcd95f22c845d8966beb9e5`；此结果不包括完整 Vulkan 客户端、应用入口或宿主解码器，不能证明目标 Android 动态链接环境或 Guest GPU 可用。
+- 对上游 MemStream 的静态审查发现 `load` 忽略缓冲读取失败，流内长度可驱动无上限分配；本轮只编译并分析符号，没有执行该组件或将它暴露给 Guest。未操作手机、修改 Guest 或导入包，也未重试此前被拒绝的双端映射回归。
+- 使用 `tools/diagnostics/gfxstream-d7a-vk-object/` 交叉编译固定版本真实 Mesa `vk_object.c` 及其 sparse_array、hash_table、ralloc、u_printf 和既有生成 enum 源，并与上一编码器对象做严格 Android 链接对照：`vk_object_free/zalloc` 两项缺失得到解决，严格链接错误 23→21，仍无共享库；`llvm-nm` 未定义项因新增库依赖由 131→139。三次独立构建的合并 REL 摘要为 `71c0653cf47a41f71d38b48dfe120b725e3bf73514a55df89b4a964d9cbab663`。该构建未链接上游 WSI dummy 同步对象，因为其真实宿主等待路径尚未验证；固定版本生成头、Android 宏、两个 Mesa 硬件兼容头及实际设备 ABI 均未完整验证，未操作手机、Guest 或导入包。
+- 复核发现此前编码器手工配置没有定义 Android.bp 默认开启的 `GFXSTREAM_ENABLE_GUEST_GOLDFISH`：宏 0 且无 Virtio native sync 时部分 fence/QSRI 分支可能未写入 FD 却返回成功；宏 1 则编入依赖 `/dev/goldfish_sync` 的 open/ioctl 路径，且部分调用未检查返回，不能证明同步可用。`tools/diagnostics/gfxstream-d7a-goldfish-config/` 对宏 0、宏 1、宏 1 加 Android.bp 部分编译选项各编译全部 18 个 ARM64 对象；三次独立重建的 54 项对象和输入摘要一致，宏 0 全部复现旧对象，单改宏只改变 ResourceTracker，加入其余选项又改变两个对象。该构建保留手工参数、旧生成头和两个 Mesa 硬件兼容头，非完整 Soong 或目标 ABI 验证；未运行对象、访问设备节点、修改 Guest 或导入包，也未重试此前被拒绝的双端映射回归。
+- `tools/diagnostics/gfxstream-d7a-fence-fd/` 为固定 gfxstream `on_vkGetFenceFdKHR` 保存单项研究补丁：宏 0 且无 native sync 时返回 `VK_ERROR_UNKNOWN`，不清除原 fence 的 FD 状态或读取未写入的输出。提取真实完整方法并使用进程内替身的测试在原版对 SUCCESS/NOT_READY 两种 fence 状态复现错误成功及所有权变化，补丁后宏 0/1 和 native 成功/失败等对照通过；补丁后的完整 ResourceTracker 分别以宏 0/1 编译为 ARM64 对象并独立复验摘要一致。该补丁未接入 EMU；QSRI 和宏 1 的 Goldfish queue_work 失败处理仍未修复，未访问真实 fence FD、手机、Guest 或设备节点。
+- `tools/diagnostics/gfxstream-d7a-qsri-fd/` 保留未完成的 QSRI 研究测试及候选补丁；替身测试提示无同步后端可能错误报告成功、native 导出失败时可能使用未初始化的局部 FD，但受控替身的数值不能推断实机表现。候选返回 `VK_ERROR_UNKNOWN`，独立源码审查发现该值可能在 Android present 结果聚合中触发取决于构建配置的断言；目标固件的具体调用链和构建配置未确认，因此该候选禁止接入或打包。未运行 Guest、真实 fence FD 或设备节点。
+- 通过 EMU 正常入口启动既有实例，并用 Root 输入触发「重试」，Guest 到达锁屏。只读检查发现，在未手动启动 Geekbench 时，该 Guest 的 zygote 已映射其运行树内 `/system/lib64/libvulkan.so`；因此在应用启动后才试图改变首次库加载路径不能直接替换该已有映射。此观察不证明其首次加载时序、所有进程的加载行为或新的客户端可用；没有修改导入包、宿主系统设置或真实硬件节点。
+
+#### Vulkan 客户端连接（2026-11-17）
+
+- 新增 `native/vulkanbridge/client/emu_pipe.c`：使用 Guest 本地 Unix socket 发送上游 `opengles` 或 `GLProcessPipe` 连接前缀及后续字节流。电脑端测试覆盖两种连接、收发、服务缺失和断线，Android ARM64 对象编译成功。测试对端不包含渲染器；客户端尚未完整链接、打包或接入 Guest，宿主解码及同步仍未完成，不能证明 GPU 渲染可用。没有修改原始导入包或手机系统。
+- 客户端连接层和本地同源 AndroidPipe 进程服务的集成测试取得真实非零进程 ID，断连后服务端回收会话；测试未初始化渲染器，且同 PID 授权仅适用于测试。`gfxstream_vk_CreateInstance` 的只读输入改写及若干失败路径资源清理问题已在 `tools/diagnostics/gfxstream-instance-create/` 形成候选补丁，通过提取上游函数的回归测试并编译 Android ARM64 对象，尚未实机验证。
+- 候选客户端重新使用一致的 Android 平台宏构建同源 Mesa runtime、通用 WSI 和部分编码组件；目前严格链接仍有未解析依赖。通用 WSI 不包含 Android 窗口交换链；Guest 图形缓冲与宿主 ColorBuffer、同步栅栏，以及 VM 的真实渲染器初始化和实例授权仍未接通。尚不能输出 Guest Vulkan 画面。
+- 同源 AndroidPipe 通道新增唤醒、Unix socket 会话和主屏参数接线；真实进程管道测试、连接限制测试及缺失回调时拒绝启动的测试通过，相关对象交叉编译为 ARM64。主屏参数目前只接收调用方提供的数据，尚未接产品 VM；没有启用渲染器或替换现有 GLES。
+- `tools/diagnostics/gfxstream-device-uuid/` 验证渲染器的实际物理设备选择可与外部提供的设备及驱动 UUID 绑定；合成设备数据测试和 ARM64 编译通过。真实 provider 及 Android GPU 信息判断仍未实现，该补丁未接入产品，不能据此启动渲染器或证明 GPU 可用。
+- 修正候选客户端 QEMU 进程管道：初始化失败时保持可重试并向 HostConnection 返回失败，正确处理有效 fd 0。基于实际源码提取的 9 个测试场景通过，修正已接入电脑端候选构建并通过 ARM64 严格链接；尚未安装或验证 Guest Vulkan。
+- 修正候选客户端 `vkAcquireImageANDROID` 的 fence 等待失败处理：失败时关闭传入的 fence、释放已持有的锁并返回错误，不再继续提交；电脑端提取实际源码的替身测试通过，18 个编码器编译及诊断链接通过。真实 fence、Guest 窗口和 GPU 同步尚未验证。
+- 候选客户端新增 Android 原生窗口的创建、销毁与实例分配器分发，并根据目标 Android 接口连接窗口；CPU 分发测试及 ARM64 离线链接通过。swapchain、图像队列和呈现仍缺失，相关扩展暂不公开；未在手机或 Guest 执行，不能证明渲染可用。
+- 添加候选的 Android 窗口图像队列、slot 及 acquire/present 内部流程；CPU 替身测试验证了 fence 复制、转交与失败清理，Android ARM64 编译和离线链接通过。尚缺有效的 Guest 图像与宿主 ColorBuffer 资源连接，不公开不完整扩展，未运行真实 fence 或 GPU。
+- 候选的 swapchain 生命周期已接入直接 Vulkan 分发，但真实共享图像 provider 尚缺，创建时返回错误，相关扩展仍不公开。宿主 gfxstream 与 AndroidPipe、显示及生命周期候选对象在不启用额外 UUID 实验、保留现有设备选择检查并加入 GPU 信息候选时，离线严格链接仍缺原有 `isVulkanSafeToUseNative` 符号；没有生成可运行的宿主后端。
+- Android Vulkan GPU 信息候选从 loader 查询物理设备属性，合成设备测试及 ARM64 编译通过；上游入口为 void，真实接入仍须检查独立失败状态并保留驱动判断，当前未接产品或运行真实 GPU。
+- 进一步修复候选 Vulkan 客户端的窗口查询分发：EMU 自有 surface 不再被 Mesa 当作其他布局解读；没有真实可呈现 provider 时返回错误。原生 buffer 图像创建也会拒绝无连接或无效宿主句柄。相关 CPU 回归、ARM64 编译和离线链接通过；真实共享图像与 Guest 渲染仍未实现。
+- Android native-buffer 版本枚举已修正为当前编码器实际提供的 spec 7；修正后离线测试和 Android ARM64 链接通过。宿主单屏 pose 及 GPU 信息查询失败传播已补充候选接线；宿主严格链接仍因缺少真实 `isVulkanSafeToUseNative` 实现而失败。以上未在 Guest 或真实 GPU 运行。
+- 修正候选客户端 fence 导出对 Goldfish 队列失败的处理：返回错误并保留调用方输出和已记录状态。实际函数提取的替身测试先失败后通过，18 个 encoder 均重新编译为 ARM64 并完成离线严格链接；未运行真实 fence、Guest 或 GPU。
+- 新增隔离的 Android Vulkan surface 候选，按实例获取真实 `vkCreateAndroidSurfaceKHR` 并仅在扩展可用时启用；合成 dispatch 测试与 ARM64 编译通过。宿主渲染器、Surface 生命周期、Guest swapchain 图像身份与 present 协议仍未完整接通；未安装到手机、未修改宿主系统或 Guest 包。
+- 新增 EMU 应用内独立 Vulkan 窗口的 JNI 引用管理候选；替身测试与 ARM64 编译通过。该接口尚未接 UI 或打包，Surface 销毁前同步停止 swapchain 的握手和真实 Guest Vulkan 实例绑定仍未实现，不能显示画面。
+- Vulkan 客户端候选结合真实上游属性实现、编码组件和只读提取的目标固件系统库后，通过 `--no-undefined` ARM64 离线链接。此前一次链接使用了 Android 配置不完整的 HostConnection，后来重编并补齐真实图形辅助组件和系统窗口库后重新通过。产物依赖 NDK 与系统两套 C++ 运行库以及多个平台私有库，Android linker namespace、运行时 ABI、加载入口、同步和窗口链路均未验证；没有打包或安装，不能证明 Guest 可用。
+
+- 电脑端新增 EMU 私有 `:vulkan` Surface Binder 服务，使用 Android `Surface` 传递窗口，服务未导出且目前始终返回未就绪；AIDL、Kotlin 编译和窗口引用释放替身测试通过。服务尚未绑定界面、JNI 或渲染器，也没有完成窗口销毁同步及进程退出检测；本轮未安装或操作手机，Guest Vulkan 仍不能显示画面。
+- 隔离的纯 Vulkan 后端构建修正了 Android ARM64 原生窗口类型，类型测试先失败后通过，全部对象已编译到严格链接阶段。加入 GPU 信息候选后仍缺实际的驱动判断实现；该构建使用窗口 stub，尚不能呈现画面，也没有安装或运行在手机上。
+- 隔离的 gfxstream 句柄候选修复了反向索引删除及不同对象类型共用同一原始值时互相覆盖的问题；真实实体容器的电脑端测试和 Android ARM64 编译通过。同类型跨设备碰撞、交换链图像登记及运行时隔离尚未解决，该候选没有接入产品。
+- 候选客户端在窗口队列提交失败后将交换链标记为失效，后续 acquire/present 返回过期错误，销毁时仍归还已取得的缓冲；失败测试先复现重复提交，再通过完整 CPU 窗口流程回归及 ARM64 编译。真实窗口、fence 和 GPU 尚未验证。
+- 修正候选 Surface 接口的 C/C++ 链接声明：跨语言链接先失败后通过，Android ARM64 同库严格链接及引用管理测试通过；尚未接入实际解码器。另有图像视图设备匹配隔离候选通过替身回归与 ARM64 编译，交换链图像登记和呈现仍未完成。本轮没有操作手机或修改导入包。
+- 隔离的交换链元数据候选在实际 decoder 成功创建后保存设备与图像基础参数、复制队列族数组，并在销毁或设备清理时删除；原版失败、候选通过 CPU 替身回归，两个完整 decoder 文件通过 Android ARM64 编译。扩展链、图像登记、快照和显示仍未实现，候选尚未接入产品。全量 `:app:testDebugUnitTest` 执行 745 项，1 项 `InstanceRuntimeLeaseTest.anotherProcessBlocksAndDeathReleasesLock` 在子进程退出后重取锁时报占用，89 项跳过；该项与本轮图形修改无直接关联，未修改。
+- 隔离的交换链图像登记候选可在限定条件下保存稳定 box，处理不完整枚举并在销毁时保留驱动拥有的图像；实际方法提取的 CPU 替身测试和 Android ARM64 编译通过。普通图像后续创建可能覆盖同值记录，客户端加载、Surface 协议和 present 尚未接通；候选未部署，不能显示 Guest 画面。
+- 交换链登记已迁入隔离的 decoder 生成流程，并与 Surface 查询、销毁和 present 返回值候选联合生成；相关 CPU 替身测试、Guest 7 个和宿主 9 个 ARM64 对象编译通过，宿主对象可重定位合并解析了 Surface 序列化符号。尚无 Surface 创建、协议协商、最终渲染器链接或真实 GPU 运行，不能开放 WSI。纯 Vulkan 启动控制候选通过实际 Guest 编码与进程管道替身测试，但尚未接入产品。
+
+#### E 盘构建快照整理（2026-11-17）
+
+- 将本次工作留在 E 盘根目录的 10 个 `rme-*` 构建快照目录及 3 个对应 tar 原样移入 `E:/RedMagicEMU/local-data/rme-root-archive-20261117/`；原路径和新路径记录在该目录的 `original-paths.csv`。此项仅移动，没有删除或释放空间；如需回滚，可按清单将对应条目移回原路径。项目进度中 9 个受影响的 APK 路径已更新，9 个 APK 的 SHA-256 与原记录一致；其他目录、用户固件和手机未改动。
+
+#### Guest Vulkan 宿主后端严格链接（2026-11-18）
+
+- Android Vulkan-only 候选原先因缺少 `isVulkanSafeToUseNative()` 无法严格链接。现在复用固定的 64 项 Vulkan 计算和读回，后端只选择该次计算对应的设备和驱动 UUID，保留原有黑名单及设备检查。新入口在替身测试覆盖通过、黑名单拒绝、空 UUID、计算错误及未完成提交，另以真实 llvmpipe 验证 CPU 设备被拒绝。
+- 固定 gfxstream d7a Android 后端首次用本轮入口完成 `--no-undefined` 严格链接。产物 `build/diagnostics/rme-vulkan-preflight.q5lYSKNw/backend/libgfxstream-wsi-candidate.so` 为 AArch64，LOAD 对齐 16 KiB，依赖 Android Vulkan loader。SHA-256 `053e1f29d58d5bccc56fe7f5288303e6490b3151bbd0f5b441404e7a6d6ec820`。重建和回滚见 [GPU 信息与启动计算](../tools/diagnostics/gfxstream-android-gpuinfo/README.md)。
+- WSL 在现有独立 Kumquat 路径复验了 Vulkan 64 项计算、OpenCL 64 项计算和工作组规约，均通过。宿主实际为 llvmpipe 软件 Vulkan，此结果不属于上述 ARM64 后端。现有另一套宿主服务的进程回归 14 项中 2 项因缺少预期的设备日志行失败，1 项在 stderr 已满后等待退出超时；本轮未修改该服务。
+- ADB 当前没有在线设备。候选后端未接入 APK 或手机运行，仍需接通 EMU 宿主会话、Guest Vulkan 加载与传输，并以 Adreno 上的实际计算结果验收。Guest OpenCL、Geekbench 和窗口呈现尚未验收。没有改动固件或运行树。
+
+#### Guest Vulkan 计算通道绑定（2026-11-18）
+
+- 单个已认证进程的真实 `GLProcessPipe` ID 绑定到 Vulkan-only 渲染通道。工作线程取得宿主进程令牌，再用真实 ID 校验 `rcSetPuid`。进程资源存在且令牌有效时才能进入 Vulkan 解码。进程管道断开会停止接收、撤销令牌并关闭图形 socket，在调用方完成渲染线程排空前保留进程管道。运行时仍需 EMU 提供认证及排空函数。
+- WSL 实际 EMU Unix socket 客户端和同版本 AndroidPipe 验证了 ID 正配、错配拒绝、撤销后拒绝和排空回调顺序。上游 RC 编码器单独复验通过。这些测试没有启动真实渲染线程或 GPU。配对后的 ARM64 宿主候选库严格链接通过，16 KiB 对齐。产物 `build/diagnostics/rme-vulkan-bound.m05FAXjz/backend/libgfxstream-wsi-candidate.so`，SHA-256 `f66babe6ab03ea8ccae3aa6dc7d181a0263ff9b0ac931b714549b325f7e98f10`。重建及回滚见 [Vulkan-only RenderControl](../tools/diagnostics/gfxstream-vulkanonly-rc/README.md)，使用上一节构建参数可重建上一版。
+- 本轮选择先接计算通道，WSI 仍关闭。APK 尚待接入宿主生命周期及 Guest 客户端加载。ADB 无在线设备，Adreno 及 Guest OpenCL 的端到端运行仍待验证。
+
+#### EMU Vulkan 宿主启动测试 APK（2026-11-18）
+
+- 在可选 Debug 构建中接入目标 VM 的 gfxstream 宿主子进程。它使用现有显示参数、GPU 选择和 VM 停止流程，只在 Vulkan 设备有效后向 EMU 报告就绪，并通过 `RedMagicEMU-Vulkan` 记录实际设备名及版本。此启动试验暂未开放 Guest 连接。上游无窗口关闭时访问空 PostWorker 的问题先以提取实际分支的空指针检查复现，修复后分支测试通过。
+- APK 位于 `build/diagnostics/rme-vulkan-startup.54yZOWIw/redmagicemu-vulkan-host-startup-debug.apk`，SHA-256 `0c886600879fe5800b4b4892b788bcf39c1cd730bd3e49b6b14f963fbe0d069d`。独立 `:app:assembleDebug` 成功，签名和包名校验通过。7 个 ARM64 宿主文件的 APK 解压摘要与构建清单相符，16 KiB LOAD 对齐；205 个引擎条目与工作区逐字一致。定向测试 22 项通过，全量 746 项中有既有 Windows 问题 `InstanceRuntimeLeaseTest.anotherProcessBlocksAndDeathReleasesLock` 失败，89 项跳过。
+- ADB 无在线设备，未安装或验证手机上的真实启动和停止。仍需完成 Guest Vulkan 客户端加载、端到端 GPU 命令与 OpenCL 接入。构建与回滚见 [Android 调试启动](../tools/diagnostics/gfxstream-androidpipe-channel/README.md#android-debug-renderer-startup)。回滚 APK 时省略 Gradle 属性重建，现有固件和运行副本无需还原。
+
+#### EMU Vulkan 宿主启动真机验证（2026-11-18）
+
+- 无线 ADB 连通后核对设备现装 APK 与新包签名相同，备份现装 APK 后执行覆盖安装。设备安装后的摘要与上述启动测试包一致。覆盖安装前的 APK 保存为 `build/diagnostics/rme-vulkan-startup.54yZOWIw/device-before-startup-test.apk`，SHA-256 `fc145f8169df612884ce5827094b9ab401fed172f957ab2dfeb001620e862420`。
+- 从 EMU 入口启动既有 GPU 已启用的 NX809J/API 36/ARM64 实例，通过 Root 输入触发「重试」。宿主应用的 `:vm` 进程启动 Vulkan 子进程，日志报告 `Adreno (TM) 750 (Vulkan 1.3.128)`。子进程实际映射了 `libgfxstream_backend.so`、Android `libvulkan.so` 与 `vulkan.adreno.so`。Guest 在同次运行中报告 46 秒完成启动。
+- 通过 Guest 的关机请求测试停止。Vulkan 子进程在 `:vm` 父进程仍存活时消失，未见 Vulkan 清理失败，Guest Keeper 服务已停止。测试包保留在手机上，Guest 已关机。该轮验证宿主启动和停止，Guest Vulkan 指令与 OpenCL 仍未接入此包。
+
+#### Guest Vulkan 设备枚举真机验证（2026-11-18）
+
+- 一次性宿主进程以调试应用 UID 启动实际 N64 Guest 探针。探针用已链接的 gfxstream Vulkan 编码器，经 EMU Unix socket、真实进程管道和宿主 decoder 查询物理设备。Guest linker 路径由 N64 已有的进程级 `AEMU64_LIBPATH` 提供，候选库只装载到探针进程。
+- 两次实机运行均退出 0。Guest 的实例创建、物理设备枚举及属性查询成功，返回 `Adreno (TM) 750`、vendor `0x5143`、device `0x43051401`、Guest API `1.3.0`；宿主选卡日志报告实际驱动 `1.3.128`。停服对照连接以 `-ENOENT` 失败且进程退出 1。已有 Unix socket/PUID 回归通过，已核对 socket 和手机上的测试暂存文件清理完成。
+- 真机产物为 `build/diagnostics/rme-guest-encoder.cEKdO2qU/build/guest/rme-vulkan-device-probe`（SHA-256 `36a675cec12a9596e22269b1baf40180f518b69555ce1e85d45d5fb19e2623e3`）和 `build/diagnostics/rme-guest-vk.lr60duLl/host/jniLibs/arm64-v8a/libgfxstream_backend.so`（SHA-256 `07b42bcf4a79a6230f683d4bc33418761f54b3a520a61f5a765aa71cb85c60a7`）。[重建和运行说明](../native/vulkanbridge/client/EMU_PIPE.md#guest-device-enumeration-probe)。
+- 本次沿用已安装的启动测试 APK 和原厂 ROM。普通应用 loader、着色器计算与读回、OpenCL 和呈现仍待验证。
+
+#### Guest Vulkan 计算及查询读回真机验证（2026-11-18）
+
+- 沿用 N64 探针、gfxstream 编码器及独占进程的 Unix socket。在 Guest 中创建 Vulkan 设备和两条计算管线，经 `vkCmdUpdateBuffer` 上传 64 项输入。GPU 上第一条管线计算 `3 * input + 7` 并写入间接派发参数，第二条管线使用该结果派发。Guest 等待 fence 后调用 `vkGetQueryPoolResults`，用两个已知直接派发校准计数，再逐项验算。两份 SPIR-V 均通过 Vulkan 1.1 验证。
+- Adreno 750 两次实际运行通过，Guest 两次取得 64/64 正确结果，校准为每工作组 64 次调用。故意改错第一项预期时，Guest 读到 1408、预期 1472，只报 1 项不符且退出 1。既有 Unix socket/PUID 回归通过，手机上的测试暂存及 socket 已清理。APK 与固件未替换。
+- 探针 `build/diagnostics/rme-guest-compute-client.D5zyUBBA/build/guest/rme-vulkan-device-probe`，SHA-256 `3e501310255f35562c105e123e630fc9811265decf6ac499fe875b17ab18b7c9`。宿主库 `build/diagnostics/rme-guest-compute-host.O28T4c7z/host/jniLibs/arm64-v8a/libgfxstream_backend.so`，SHA-256 `acb42cd9ccf711cce239617c5a78c703bc604eb41acf5a56529345615465701b`。[重建及正负对照说明](../native/vulkanbridge/client/EMU_PIPE.md#guest-device-enumeration-probe)。
+- 此结果覆盖 Guest 提交的真实 Vulkan compute 和基于管线统计查询的读回。通用缓冲区映射、普通 Guest 应用、OpenCL 及呈现仍待接入验证。
+
+#### Guest Vulkan 缓冲区字节读回真机验证（2026-11-18）
+
+- 复用上轮 ARM64 宿主库。Guest 等待 Adreno 750 上的计算 fence 后，用同源 gfxstream 编码向现有复制路径请求一段显式的 768 字节范围，偏移为 0。宿主从已映射的 host-visible Vulkan 内存回传数据，Guest 从 socket 接收并检查 64 个运算结果和同一范围内其余 128 个字。
+- 两次实机均返回 `GUEST_VULKAN_BUFFER_READBACK_OK values=64 bytes=768` 并正常退出。错值对照在第 0 项读到 22、预期 23，只报告一项不符，退出 1。原有查询式计算用例重跑 64/64 正确。手机上的测试暂存及 socket 已清理。
+- 探针 `build/diagnostics/rme-guest-readback-client.irOgqhwC/build/guest/rme-vulkan-device-probe`，SHA-256 `7bbe3870b72968b5dca30cc48667d5ccd53a115080821bfbb6673767080afd6b`。[使用说明](../native/vulkanbridge/client/EMU_PIPE.md#guest-device-enumeration-probe)。此轮验证了探针的实际缓冲区字节回传。应用侧 `vkMapMemory` 生命周期、写回、普通 Guest 应用及 OpenCL 仍待接入。
+
+#### Guest 公开 Vulkan 接口与共享缓冲区真机验证（2026-11-18）
+
+- Guest 公共 Vulkan 客户端通过 Unix socket 绑定宿主签发的进程 ID，枚举 Adreno 750 和 Vulkan 1.3。旧宿主上同一公共接口探针在实例版本查询失败。新宿主对已认证通道提供标准 Vulkan 调用，跳过该 Guest 没有的 VirtGpu capset。
+- 在本机 Adreno 750 上验证 host-visible coherent BLOB 导出。宿主使用 AHardwareBuffer 导出的数据 FD，Guest 使用 Linux DMA-BUF 映射并按 CPU 访问方向执行同步。先验证独立跨进程试验，再接入同源 gfxstream 的分配、映射和回收。公开接口探针使用两个缓冲区，分别核对 GPU 读入的 64 个 Guest 写入值和 GPU 写回的 64 个值，并正常销毁设备。
+- 完整公开探针最初缺少同源 command pool 对象，随后发现 Mesa 运行库与客户端的 futex 宏不一致，销毁设备时访问了错误的队列链表偏移。补齐 command pool 对象并统一构建后，探针通过。旧传输可空 layer name 解码修正后，同次实机探针同时枚举 6 个实例扩展并通过缓冲区测试。
+- 调试启动使用应用管理器返回的 Geekbench PID，并检查该进程的 Guest 根路径及真实运行器，随后由宿主持 pidfd 和 socket 对端凭据绑定进程。确认安装的 Geekbench 6 已经创建宿主 Vulkan 实例。该次 Android 界面的 API 下拉框仍只列 OpenCL，尚无完整 Geekbench Vulkan 成绩。
+- `stage_guest_vulkan_runtime.py` 可重建或回退测试实例的 Vulkan 兼容库。原始导入固件保留，运行树原版 `libvulkan.so` 的 SHA-256 为 `2c6f896fb194b656acf18a5a4405a536b8acb467bbe8213f97acfac60289c296`，已实际恢复并核对过该摘要。当前实验映射只验证了这台设备的 BLOB 布局、缓冲区和单进程计算，同步、图像资源和其他宿主仍待覆盖。
+- Geekbench 6.7.1 在计算 API 初始化时也查找五个 Android Vulkan 交换链入口。实例级查找补齐这些真实入口，设备级查找继续核对呈现支持。修正后，GPU API 下拉框重新显示 Vulkan，Geekbench 在宿主 Adreno 750 上创建了计算设备。
+- 将原生缓冲区统一转换成 AHardwareBuffer 的试验在绑定设备本地内存时返回 5。加入设备本地缓冲区后，公开 API 探针复现了同一错误。改用 `RME_VULKAN_SHARED_MEMORY=cached` 后，原生 Vulkan 驱动直接决定缓冲区内存要求，Guest 通过 memfd 映射 CPU 缓存页，显式 flush/invalidate 同步到真实 Vulkan 内存。真机探针经设备本地缓冲区往返校验 64 个值通过。
+- NX809J Android 16 Guest 中已安装的 Geekbench 6.7.1 完成 Vulkan GPU 测试，得分 **14,578**，设备为 **Adreno (TM) 750**。应用本地历史将整轮标记为完整、有效，8 个工作负载均有效且有分。配对宿主日志记录了 Adreno 上的实际计算派发与读回。
+- 成绩来自带 Vulkan 调用跟踪的调试宿主和可回退的 Guest 运行副本。客户端 SHA-256 为 `45d0c273482b3d7833c5dffdb77f897c70d4ad454a0be4c88575451521c03c97`，宿主后端 SHA-256 为 `4e525bfe29ed8574147cbcc05d335df82352ac3fed9ce37867e88a8f4fe5cbdd`。常规 APK 自动接入和 OpenCL 仍待验证。[重建与回退说明](../native/vulkanbridge/client/EMU_PIPE.md#public-vulkan-abi-and-mapped-buffers)。
+
+#### 常规 APK 自动接入 Vulkan 与 OpenCL（2026-11-18）
+
+- GPU 开启的 NX809J/API 36/ARM64 实例从 APK 启动时，VM 自行启动 Adreno 宿主 renderer、等待私有 socket 就绪，并在启动 Guest Android 之前安装 APK 中的客户端库。每个 Guest runner 进程使用独立的 GLProcessPipe 及资源身份。退出时先关闭属于该进程的渲染流，等待其工作线程退出，再关闭进程管道。原始固件保留，运行副本的库和 OpenCL 公共声明有备份。[构建与回退](../native/vulkanbridge/client/EMU_PIPE.md#normal-apk-with-the-gpu-bridge)。
+- OpenCL 使用 clvk 和同进程 clspv，将实时编译的内核通过这条 Vulkan 通路送至 Adreno。工作组归约探针在 Guest 对 64 个输入得到正确结果。首次运行 Geekbench OpenCL 时，clspv 的 8 位向量降级生成了无效的 `OpConvertUToF`。补齐线协议的 FP16/INT8 结构协商后，真机 Guest 的扩展和 Vulkan 1.2 核心结构查询均与宿主一致。clvk 随后按核心版本与实际特性位识别已纳入 Vulkan 核心的 8 位及 16 位存储能力，继续执行原有 SPIR-V 验证。独立的 `uchar4 -> float4` 编译对照复现了降级失败，并验证使用 INT8 的 SPIR-V。
+- OpenCL 在 Edge Detection 曾卡在宿主驱动销毁命令池。为跨线程的命令池销毁和命令缓冲释放加入同一传输通道的完成确认后，宿主退出了该调用，随后暴露出 clvk 在只读映射解除时对已失效的 `CL_MEM_USE_HOST_PTR` 进行回写。clvk 现在仅回写以写权限映射的数据。更新后的 Release APK 经正常启动完成 OpenCL 全测，应用本地结果为 **4,239**，Adreno 750，8 个工作负载均有效。
+- 同一已签名 Release APK 随后完成 Geekbench 6.7.1 Vulkan 全测，得分 **15,047**，Adreno 750，8 项均有效。两次结果均由应用本地数据库确认为完整、有效。在手机上核对了安装 APK 与 `build/diagnostics/rme-geekbench-cached-host/RedMagicEMU-GPU.apk` 的 SHA-256 `470252ff516e091d40b3b40f2ff830bb0745e1dd934bdadbfa91bf516ebe07af` 一致。APK 内的 7 个宿主文件、6 个 Guest 文件及 14 份上游许可文件已核对。
+- Release 构建、VM 与运行库定向单元测试、AndroidPipe、公开 Vulkan ABI 和 RenderControl 协商测试通过。Windows 全量 JVM 测试仍有既有的 `InstanceRuntimeLeaseTest.anotherProcessBlocksAndDeathReleasesLock` 文件锁用例失败。真机验收范围为 NX809J Guest 与本次 Adreno 750 上的 GPU 计算。
+
+#### 原生 OpenCL 宿主桥 Windows 验证（2026-11-18）
+
+- 同一 C 调度器分别在测试客户端进程内运行和通过匿名管道交给独立宿主进程运行。Windows OpenCL ICD 直接选择 RTX 3080（驱动 617.14），由原生 OpenCL 驱动编译和执行内核。每个样本逐字校验输出，另验证编译失败日志、失败后继续执行上一份内核及释放缓冲区后的错误码。
+- 四组工作负载各测 300 次。65,536 个工作项各迭代 32,768 次时，合并提交和读回的管道路径从直调的 2,075.7 微秒增至 2,131.7 微秒（+2.7%），原生 GPU 事件耗时分别为 1,776.1 和 1,760.3 微秒。读回 256 KiB 的较短负载使用共享内存回复时，从直调的 286.7 微秒增至 321.8 微秒（+12.2%），同一负载用管道回传为 339.6 微秒（+18.5%）。64 项小任务合并提交和读回为 61.1 微秒，直调为 54.5 微秒。这些时间包含同步和读回，编译和首次上传单列在计时范围之外。
+- 同一验证程序也在 AMD `gfx1036` 驱动 3652.0 上通过四组负载的编译和结果校验，每组各测 50 次。已构建同源 Android ARM64 调度库，接入 Android 宿主和 Guest 公开 OpenCL ABI 后仍需在 NX809J 上重跑 Geekbench 6。[构建、协议及复测](../native/openclbridge/README.md)。
+
+#### 常规 APK 接入原生 OpenCL（2026-11-18）
+
+- 常规 GPU 启动流程安装公开 `libOpenCL.so`。带原生 OpenCL 标记的 APK 同时从 `:vm` 启动 `libaemuclhost.so`，通过实例私有的 `/dev/socket/aemucl` 将 OpenCL C 和计算命令送至宿主 `libOpenCL.so`。服务复用 Vulkan 的 Guest runner、进程祖先和根目录身份检查，用 pidfd 绑定来宾进程。宿主没有可用驱动时，Guest OpenCL 枚举返回无平台，GPU 渲染继续沿用原有流程。
+- WSL 的公开 ABI 测试程序通过本机匿名管道使用 Windows NVIDIA 原生 OpenCL 驱动，识别 RTX 3080。逐元素计算、工作组归约、2D 图像采样、带行间距传输、矩形读回、跨队列事件、`CL_MEM_USE_HOST_PTR` 映射和回写、源码编译与链接、二进制程序重载均通过。故意错误的内核和预期输出分别触发真实构建日志和结果校验失败。本地 Geekbench 6 二进制中的 81 个 OpenCL 函数名全部可解析，用户事件等尚无跨进程实现。
+- Android ARM64 客户端和宿主库、Release APK 构建及 VM 定向 JVM 测试通过。APK 的 Vulkan 和 GLES 载荷与上次实测 APK 逐字节一致，签名证书也相同。产物 `build/diagnostics/opencl-native/RedMagicEMU-NativeOpenCL.apk`，SHA-256 `56e25ac1a6a029c7f811a73de9245166ea07be2c8569553798e640bbcaf6a1ce`。Android 安装、常规启动和 Adreno 上的 Geekbench 6 分数待手机复测。[重建与回退](../native/openclbridge/README.md#regular-android-apk)。
+
+#### Adreno 原生 OpenCL 实机验收与传输剖析（2026-11-18）
+
+- 常规启动上述签名 APK。宿主 `:vm` 同时映射桥接库与厂商 `libOpenCL_adreno.so`，Geekbench 进程连接实例私有 OpenCL socket。NX809J Guest 的 Geekbench 6.7.1 OpenCL **10,096**，用时 100.47 秒，设备为 QUALCOMM Adreno 750，8 项全有效。相同 APK 的 Vulkan **15,421**，用时 182.00 秒，同一 GPU，8 项全有效。
+- 关闭 Guest 后，将实例中同版本 APK 通过宿主包管理器安装，原生 Geekbench 6.7.1 OpenCL **14,535**，用时 80.00 秒，8 项全有效。Guest 总分为宿主的 69.5%，Background Blur 为 28.2%，Face Detection 为 53.6%，Particle Physics 为 55.3%。
+- 带 `-Profile` 的 Guest 对照跑得 **9,731**，8 项全有效。单一进程连接中缓冲区上传 7.07 GB、读回 4.10 GB，宿主读写这两类 socket 载荷累计约 5.05 秒。记录了 28,305 次等待和 29,796 次释放，等待包含驱动及真正的 GPU 执行时间。
+- 关闭 Guest 后在同一宿主运行原生 Vulkan，Geekbench 6.7.1 **16,286**，136.47 秒，8 项全有效。未调优 Guest Vulkan 总分为该次宿主的 94.7%。
+- 将至少 64 KiB 的 OpenCL 读写放到宿主创建的共享 memfd，在小命令上合并消息段。WSL 测试逐字核对 256 KiB 和 2 MiB 数据，Windows 原生 RTX 3080 路径同时覆盖没有共享映射的模式。安装到真机后，核实 Geekbench 和宿主进程同时映射了共享 memfd。共享内存版实机 OpenCL **9,936**，98.75 秒，8 项全有效。相对 **10,096** 的首次结果，整轮用时略缩短，分数未提高。
+- Vulkan Guest 编码器开启 `-O2`，重链保持既有 Vulkan 宿主库、传输、前端和清理同步。ARM64 `libvulkan.so` 从 35,527,880 缩至 16,951,536 字节，公开符号、SONAME、动态依赖和 16 KiB 对齐一致。PC 上相同生成的 `vkCmdDispatch` 编码体七组中位数从 319.614 降至 77.457 ns，采样线数据和校验值一致。这一计时涵盖 CPU 编码。[构建入口](../native/vulkanbridge/client/rebuild_encoder_candidates.py)。
+- 调优 APK `build/diagnostics/opencl-native/RedMagicEMU-GPU-Tuned.apk` 的 SHA-256 为 `cb6caabf458861a765bb8610ba39b2f27ed09abd6f5549ca0b7efa78168876f7`，安装后核对一致。该版 Vulkan **15,263**，193.04 秒，8 项全有效。本次整轮分数较此前低 1.0%，CPU 编码对照的提速尚未反映在 Geekbench 总分上。
+- 在共享内存版本上，本地维护 OpenCL 事件引用，最后一次释放通过有序单向命令交给宿主。WSL 和 Windows RTX 3080 公共 ABI 测试通过，覆盖引用计数、回调、释放后拒绝旧句柄、跨队列依赖和程序二进制。相同调优 APK 在 NX809J Guest 的 OpenCL 为 **10,459**，96.65 秒，8 项全有效。较首轮 10,096 高 3.6%，为本机原生 14,535 的 72.0%。
+
+#### OpenCL 事件释放随请求发送（2026-11-18）
+
+- 宿主声明支持后，Guest 将一个已释放的事件 ID 附在下一条请求中，宿主先完成该释放再处理新请求。连续释放时单独发出前一个 ID，连接退出时回收剩余事件。新 Guest 配前版宿主的公开 ABI 测试通过。
+- RTX 3080 上 512 轮事件提交、等待、释放的真实驱动对照中，独立释放请求由 512 降至 0，请求合计由 1,544 降至 1,032（−33.2%），事件和常规模块测试通过。WSL 共享内存对照同时通过。
+- 签名包 `build/diagnostics/opencl-native/RedMagicEMU-GPU-InlineRelease.apk` 的 SHA-256 为 `e34176ff351a9b54fdce9aebfff650dd3c81754de6398059a45abdaa3fd9818c`。核对安装 APK 和 Guest 库后，实机 OpenCL 得 **10,413**，96.97 秒，8 项全有效。前版为 **10,459**、96.65 秒。本轮请求数下降，Geekbench 单次总分没有提高。
+
+#### OpenCL 线性缓冲区异步上传（2026-11-18）
+
+- 线性缓冲区的非阻塞写提交给驱动时保留 `CL_FALSE`。宿主为传输保留独立数据，按原生事件完成回调回收，单连接暂存上限为 128 MiB。暂存空间用尽时当前写使用同步路径。
+- WSL 的真驱动延迟对照把两个 512 KiB 写挂在宿主测试事件后面，直到 Guest 发出 `clFinish` 才放行。旧桥在首个请求因传给驱动 `CL_TRUE` 被拒绝。新桥在共享映射被复用后仍逐字节读回两段不同数据，且覆盖依赖事件与无返回事件的上传。Windows RTX 3080 的公共 ABI、数据回读和事件请求对照同时通过。
+- 签名 APK `build/diagnostics/opencl-native/RedMagicEMU-GPU-AsyncUpload.apk` 的 SHA-256 为 `41021c8b9aff4d327b6fced5d4ebe205f5a8b6bfd1a39406ec0aca7d1239fb61`，安装后核对一致。Guest Geekbench 6.7.1 OpenCL **10,435**，97.11 秒，8 项全有效。上版 **10,413**、96.97 秒。此轮恢复了异步上传路径，单次跑分对照未显示明显收益。
+
+#### Adreno OpenCL 跨进程缓冲区对照（2026-11-18）
+
+- 手机宿主报告 SM8650（骁龙 8 Gen 3）、Adreno 750。驱动通告 `cl_qcom_android_ahardwarebuffer_host_ptr` 和 `cl_qcom_dmabuf_host_ptr`。探针实测前者，在 OpenCL 进程导入两个 4 MiB AHardwareBuffer BLOB，另一个进程通过 Unix socket 接收缓存型 DMA-BUF，使用 `mmap` 和 `DMA_BUF_IOCTL_SYNC` 读写。每项实验各跑三轮，每轮每种路径 24 个计时样本，逐字匹配 CPU 参考值。故意改动预期值的对照在普通映射和 AHardwareBuffer 两种模式下都退出 1。
+- 普通 memfd 的 `CL_MEM_USE_HOST_PTR` 映射模式中，数据就绪时间约为同轮读写基线的 2.2–3.0 倍。AHardwareBuffer 模式中，粒子类合成负载的就绪时间在三轮内下降 46–52%，模糊类合成负载下降 1–48%。GPU 内核事件主要落在 143–160 微秒，收益来自数据传输和同步路径。每轮的原始汇总保存在 `build/diagnostics/opencl-native/shared-buffer-{map,ahb}-adreno.txt`。
+- 以上为两个宿主进程的对照。源码、Android ARM64 构建和 16 KiB 对齐检查见[探针说明](../native/openclbridge/README.md#adreno-shared-buffer-probe)。
+
+#### NX809J N64 Guest 上的 Adreno 共享缓冲区对照（2026-11-18）
+
+- 用已安装 APK 的原有 API 36 N64 runner 启动临时 Guest 计算探针的 CPU 端。宿主通过私有 Unix 流发送 memfd 基线和 Android Hardware Buffer 的数据 DMA-BUF。Guest 使用现有 runner 的 `recvmsg`、`mmap` 和 `DMA_BUF_IOCTL_SYNC` 完成读写。256 KiB、1 MiB、4 MiB 各三轮，逐字校验均通过，故意错一字的负对照各退出 1。探针以实例所有者 UID 从 ADB 临时启动，覆盖 N64 数据路径。APK 的普通应用和正式 OpenCL socket 尚未使用该分配方式。
+- 数据就绪时间按同轮普通读写计，模糊类负载在 1 MiB 的三轮慢 12–31%，在 4 MiB 的三轮慢 3–22%。256 KiB 模糊负载和三种尺寸的粒子类负载均有波动。另以相同二进制交替运行三个宿主/Guest 对照，4 MiB 两边都出现加速及减速。GPU 内核事件耗时接近，直接共享也需要 CPU 缓存同步。当前结果不足以支持启用该路径。
+- NDK ARM64 构建及 16 KiB 段对齐检查通过，手机上的临时二进制已移除。日志位于 `build/diagnostics/opencl-native/shared-buffer-n64-*-adreno.txt` 及 `shared-buffer-n64-1024-paired.txt`。本轮产物为探针和对照记录，未安装新 APK 或生成新的 Geekbench 分数。
+
+#### OpenCL FP16 能力通告对照（2026-11-18）
+
+- 旧桥返回空的设备扩展列表，同一查询通道从 Adreno 750 读到 `CL_DEVICE_HALF_FP_CONFIG=0x16`。对照桥只在宿主设备实际通告 `cl_khr_fp16` 时返回该扩展名。标准 OpenCL 客户端按返回值选择编译半精度内核，检查该扩展名的长度查询以及过小缓冲区的返回码。[Khronos FP16 扩展](https://registry.khronos.org/OpenCL/specs/unified/html/OpenCL_API.html#cl_khr_fp16)。
+- 实机独立 socket 对照以及 NX809J API 36 N64 运行器均通过 `half4` 缓冲区读写和算术验证，各核对 16 个半精度结果。Windows RTX 3080 的原生驱动未通告该扩展，桥上负对照及常规公开 ABI 套件通过。另有一条带向量常量的 `convert_half4` 内核会触发 Adreno 编译器的内部类型检查错误，原生直连以状态 134 退出。该用例记录为厂商驱动限制。
+- 对照 APK `build/diagnostics/opencl-native/RedMagicEMU-GPU-FP16.apk` 通过签名校验且安装后 SHA-256 确认为 `e2177daaa47979d676db105a580fd15635cdf56d51b96ba5db8a3c2a55905138`。与异步上传基线的内容对照仅改变 OpenCL 宿主库和签名条目。
+- 常规启动的 NX809J Guest 在 Geekbench 6.7.1 OpenCL 实测 **12,570**，91.40 秒，Adreno 750，8 项全有效。上一版为 **10,435**、97.11 秒，本次总分提高 20.5%，达到同一手机原生 **14,535** 的 86.5%。Background Blur 从 2,261 到 3,895，Particle Physics 从 27,604 到 47,902。Gaussian Blur、Feature Matching、Stereo Matching 的单次得分略低。成绩从 Guest 本地数据库核对，另保留结果页和逐项记录。Vulkan 沿用同一已验收载荷。
+
+#### OpenCL 缓冲区图像视图对照（2026-11-18）
+
+- 按同一手机的逐项结果，FP16 Guest 的 Background Blur 为原生的 66.7%，Particle Physics 为 74.7%。驱动通告 `cl_khr_image2d_from_buffer`，两个对齐查询均返回 64 像素。现有桥可传递图像关联的缓冲区句柄，但吞掉了扩展名，两个查询都返回 `CL_INVALID_VALUE`。[扩展规范](https://registry.khronos.org/OpenCL/specs/unified/html/OpenCL_API.html#cl_khr_image2d_from_buffer)。
+- 临时桥验证转发扩展名和对齐值后，可以创建关联原缓冲区的只读采样路径。在 1024×1024 RGBA 的五点模糊实验中，比较预先写入的数据通过独立图像拷贝和直接图像视图。NX809J N64 Guest 各轮交替测量 25 个样本，两条路径均逐字匹配 CPU 输出。省掉一次显式缓冲区到图像拷贝后，三轮中位就绪时间分别由 2,726.4、2,374.9、2,589.9 微秒降为 2,036.8、2,201.6、2,199.7 微秒。驱动的模糊内核事件接近，单次拷贝的 GPU 事件约 142–144 微秒。独立宿主进程对照三轮均加速，额外一次宿主 IPC 对照略慢，记录了不同运行条件下的波动。
+- 这一轮验证使用 `build/diagnostics/opencl-native/abi_host-image2d.c` 和临时探针。N64 日志在 `build/diagnostics/opencl-native/image2d-n64/round-*.txt`。常规 APK 的接入和 Geekbench 使用情况仍待整轮对照。
+
+#### OpenCL 缓冲区图像视图的常规 APK 对照（2026-11-18）
+
+- OpenCL 宿主将 `cl_khr_image2d_from_buffer` 加入原生支持时可通告的扩展，转发驱动的行距及基地址对齐查询。图像描述和句柄关联沿用现有 ABI。Adreno 750 上，旧桥的公开接口测试因缺扩展名退出。新桥使用 64 像素对齐构造带填充的图像，关联句柄一致，32 个 RGBA 像素逐字匹配。FP16 实机正对照与 RTX 3080 的扩展负对照、公开 ABI 回归通过。
+- 已安装并比对签名包 `build/diagnostics/opencl-native/RedMagicEMU-GPU-Image2D.apk`，SHA-256 为 `b71112ef5202281f8eda1cb0d7b60b86ab293fc4cabdc0c913606583331b0663`。与已实测的 FP16 包相比，变动的载荷为 OpenCL 宿主库。实例通过正常 APK 启动入口启动。
+- 图像视图候选在 Geekbench 6.7.1 OpenCL 得 **10,964**，96.34 秒，Adreno 750，8 项全有效。相比 FP16 包前一次的 **12,570** 下降 12.8%。Background Blur 从 3,895 到 2,007，Face Detection 从 3,000 到 1,984，Particle Physics 从 47,902 到 49,079。尚未记录到 Geekbench 实际使用图像视图的调用证据。
+- 恢复已签名且验过哈希的 FP16 APK，以及相同的默认桥源码，重建的两个 OpenCL 库与原 FP16 库逐字节一致。恢复后重新正常启动并跑得 **12,291**，92.86 秒，8 项全有效，比候选高 12.1%。按本次对照保留 FP16 路径。候选的改动源码存档于 `build/diagnostics/opencl-native/image2d-candidate-source`，结果为 `adreno-guest-image2d.json` 和 `adreno-guest-image2d-fp16-recheck.json`。
+
+#### OpenCL 非阻塞读回复现（2026-11-18）
+
+- Guest 的 `clEnqueueReadBuffer(CL_FALSE)` 已在线协议中传递非阻塞标志。宿主 `READ_BUFFER` 固定以 `CL_TRUE` 提交，待驱动写入本次回复缓冲区后才返回。较早的 Geekbench 剖析记录 660 次线性读回，其中 440 次请求非阻塞。这一计数来自 FP16 前的测试包。
+- 在同一台 Adreno 750 上，给一次 256 字节读回添加一个约 400 毫秒后放行的原生 OpenCL 用户事件。直接调用 `CL_FALSE` 在 0.02 毫秒返回，事件起初为 `CL_QUEUED`，数据约 402 毫秒后就绪。NX809J N64 Guest 经私有试验桥调用同一 API 时，驱动收到 `CL_TRUE`，调用约 403 毫秒后才返回，事件已完成。两边都核对了 64 个输出值。日志在 `build/diagnostics/opencl-native/async-read-repro`。
+- 本轮为可重跑的复现。恢复非阻塞语义需要让独立结果缓冲区一直活到读回完成，并在 Guest 观察到完成状态之前写入调用者的内存。[OpenCL 读回规范](https://registry.khronos.org/OpenCL/specs/unified/html/OpenCL_API.html#clEnqueueReadBuffer)。
+
+#### OpenCL 线性缓冲区非阻塞读回（2026-11-18）
+
+- 配对桥声明支持后，宿主以 `CL_FALSE` 提交，每笔读回持有独立暂存及原生事件。完成数据在下一次 API 回复前送到 Guest，应用观察到事件完成或排空队列前已写入应用的目标内存。宿主保留单连接 128 MiB 的未交付读回暂存。大结果可复用 Guest 已确认的共享映射。旧宿主使用原来的协议。
+- Adreno 测试驱动将两笔 512 KiB 读回挂起，旧版在提交时因 `CL_TRUE` 失败。修复后事件依赖、无返回事件的读回、状态轮询、`clWaitForEvents` 和 `clFinish` 全部逐字节通过。强制让 Guest 的共享内存 `mmap` 失败，仍通过流式传输拿到正确结果。N64 上同一个定时对照由 **403.09 毫秒**阻塞提交缩短到 **0.58 毫秒**，等 GPU 放行约 **415.14 毫秒**后 64 个值正确。RTX 3080 的公开 ABI 套件和新 Guest 配旧宿主的测试通过。
+- 最终签名包为 `build/diagnostics/opencl-native/RedMagicEMU-GPU-AsyncRead.apk`，SHA-256 `7e7cff7e95ebe615df41a5d6f362ba70b5b14eec550a9cb00c0cdaaea771a0ac`。OpenCL 客户端与宿主库从同次 Android ARM64 构建替换，Guest 资源索引已按新哈希重建。回退使用 `RedMagicEMU-GPU-FP16.apk` 覆盖安装后按正常流程重启 Guest。
+- 安装最终签名包并通过常规入口启动，核对安装包、Guest 客户端库以及宿主加载的厂商驱动。Geekbench 6.7.1 OpenCL 实测 **11,825**，92.76 秒，Adreno 750，8 项全有效。此前 FP16 复测 **12,291**、92.86 秒，本轮确认读回语义修复，单次总分低 3.8%。
+
+#### OpenCL 异步读回直接写入共享槽的对照（2026-11-18）
+
+- 现有 AsyncRead 先让驱动写入独立的宿主暂存，然后通过共享传输区或 socket 把结果交给 Guest。对照让 Adreno 的 `clEnqueueReadBuffer(CL_FALSE)` 直接把两笔同时挂起的读回写进专用 memfd 的两个槽。两条路径用相同的 N64 Guest 消费端，写入目标缓冲后逐字节校验。每种尺寸各三轮，每轮每条路径 24 个样本。
+- 两笔各 4 MiB 的读回，从提交到宿主数据就绪的中位时间由 8.07、9.01、8.39 毫秒降至 6.68、8.02、7.16 毫秒，下降 11.0–17.2%。原路径两笔结果的宿主拷贝合计约 1.44–1.77 毫秒。对照的暂存路径将两笔都送入共享内存，单独比较这一层拷贝。时间包含等待驱动完成与宿主拷贝，分配、Guest 通知和结果校验在计时之外。
+- 源码、运行脚本和三轮输出位于 `build/diagnostics/opencl-native/readback-slot-probe`。手机临时文件已移除。本轮测试独立共享槽，尚未接入常规 APK，Geekbench 收益仍待验证。
+
+#### 常规 APK 接入 OpenCL 异步读回共享槽（2026-11-18）
+
+- 支持的 socket 宿主按连接分配大小固定的 memfd，包含四个 16 MiB 的独立槽。64 KiB 至 16 MiB 的异步读回可以让 Adreno 直接写入空槽。Guest 收到完成通知后直接复制到应用缓冲区，省掉宿主中间拷贝。槽随原生事件和有序回复回收，超尺寸、满槽、无共享映射及未提供此能力的宿主继续用已有路径。
+- 旧桥在驱动目的地址检查中失败。新桥发送五笔带不同数据的挂起读回，驱动前四笔直接写共享槽，第五笔回退，事件完成后全部逐字节校验通过。强制让两类 Guest 映射都失败，socket 回退通过。原有 N64 运行器的真驱动延迟测试和 Windows RTX 3080 公开 ABI 测试通过。
+- 签名包 `build/diagnostics/opencl-native/RedMagicEMU-GPU-ReadbackSlots.apk`，SHA-256 `9b9c1dd27b0ee1d954cab222b81ed51a9fa9c7c25f0c1f0e3bad9d2444b8f024`。OpenCL 客户端与宿主库以及配对 Guest 索引从同一次构建替换。回退使用 `RedMagicEMU-GPU-AsyncRead.apk` 覆盖安装后按常规流程重启 Guest。
+- 安装包和 Guest 库哈希通过核对。常规启动后，Geekbench 6.7.1 OpenCL 在 Adreno 750 实测 **12,202**，90.71 秒，8 项全有效，较上版 **11,825** 高 3.2%。宿主和 Geekbench Guest 进程同时映射同一个 `rme-cl-readback` memfd，分别为可写和只读。该分数来自单次整轮对照。
+
+#### OpenCL 非阻塞图像上传复现（2026-11-18）
+
+- 在同一台 Adreno 750 上给 `clEnqueueWriteImage(CL_FALSE)` 加一个约 400 毫秒后放行的依赖。直接调用厂商驱动，提交耗时 **0.020 毫秒**，返回时事件处于 `CL_QUEUED`。用当前源码构建 Guest 客户端和宿主测试程序，经独立 socket 调用时，厂商驱动收到 `CL_TRUE`，提交耗时 **404.470 毫秒**，返回时事件已完成。两边均通过 16 像素校验，带行间距的输出缓冲区填充字节保持原值。
+- 复现代码、脚本和日志位于 `build/diagnostics/opencl-native/async-image-upload-repro`。本轮使用独立测试程序，未更新常规 APK 或重跑 Geekbench。
+
+#### 常规 APK 接入 OpenCL 非阻塞图像上传（2026-11-18）
+
+- `clEnqueueWriteImage(CL_FALSE)` 将非阻塞标志传给宿主，宿主以 `CL_FALSE` 提交已经按行打包的像素，并在原生事件完成前保留暂存。调用者不取回事件时，宿主仍获取内部事件以回收暂存。与线性写入共用 128 MiB 的上传额度。图像上传暂存不足时返回 `CL_OUT_OF_HOST_MEMORY`。旧宿主继续按同步图像上传处理请求。
+- Adreno 750 回归测试让两笔 128 KiB 图像上传保持挂起，第二笔依赖第一笔且不取回事件。旧桥因向驱动传入 `CL_TRUE` 失败。修复后，Adreno 独立桥和 NX809J N64 Guest 均通过像素、行填充和线性上传校验。400 毫秒依赖对照中，独立桥的提交耗时由 **404.470 毫秒**降到 **0.350 毫秒**，返回时事件仍在排队，约 **404.095 毫秒**后数据就绪。Windows RTX 3080 的公开 ABI 套件通过。
+- 以 ReadbackSlots APK 为基底，替换配对宿主和 Guest 库并重建 Guest 索引。签名包 `build/diagnostics/opencl-native/RedMagicEMU-GPU-AsyncImageUpload.apk`，SHA-256 `31f869263d543355658b05d37294bfafd48e82bfb79635fc422c694b682c0a77`。核对了签名、对齐、504 个非签名条目、手机安装 APK 和实际加载路径中的 Guest 库。回退使用 `RedMagicEMU-GPU-ReadbackSlots.apk` 覆盖安装，再按常规流程启动 Guest。
+- 常规入口启动 NX809J Guest 后，Geekbench 6.7.1 OpenCL 在 Adreno 750 首轮 **11,375**（93.64 秒），复测 **12,777**（89.99 秒），两轮各 8 项均有效。上一版记录为 **12,202**。首轮分差主要集中在 Background Blur 和 Face Detection。这两轮确认功能通过，尚无法从分数波动确定修复对总分的影响。使用当前桥另跑 N64 FP16 测试通过，16 个结果正确，半精度配置为 `0x16`。
+
+#### 常规 APK 接入 OpenCL 非阻塞矩形缓冲区上传（2026-11-18）
+
+- `clEnqueueWriteBufferRect(CL_FALSE)` 保留非阻塞标志。宿主沿用线性缓冲区和图像上传的暂存与事件回收机制。矩形数据按原有协议紧密打包，目标的行距、层距和偏移传给原生驱动。暂存不足时返回 `CL_OUT_OF_HOST_MEMORY`。旧宿主仍使用原有同步路径。
+- Adreno 用原生事件把两笔各 128 KiB 的写入挂起到 `clFinish`。旧版因传入 `CL_TRUE` 被测试驱动拒绝。修复后，独立桥和 NX809J N64 Guest 均通过。源和目标采用不同的行距和层距，两笔写入的偏移也不同。第二笔等待第一笔且不取回事件。测试逐字节检查整个目标缓冲区，包含写入区域外的内容。RTX 3080 公开 ABI 套件和 N64 Adreno FP16 内核也通过。
+- 签名包 `build/diagnostics/opencl-native/RedMagicEMU-GPU-AsyncRectUpload.apk`，SHA-256 `157245225149c564a11bea10e5e11faffc7d3567588aece3c23b405953f8023f`。以 AsyncImageUpload 为基底替换成对宿主库、Guest 库和 Guest 索引，并校验 APK 签名、对齐和全部 504 个非签名条目。回退时覆盖安装 `RedMagicEMU-GPU-AsyncImageUpload.apk` 后重启 Guest。
+- 核对手机上的安装包和运行时 Guest 库哈希。常规入口的 Adreno 750 Geekbench 6.7.1 OpenCL 首轮 **11,128**（93.89 秒），复测 **12,326**（90.69 秒），两轮各 8 项均有效。上一版两轮分别为 **11,375**、**12,777**，本轮没有测到总分提升。用当前 Guest 配上版 Windows 宿主运行公开 ABI 套件也通过。

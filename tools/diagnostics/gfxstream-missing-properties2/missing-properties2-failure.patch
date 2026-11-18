@@ -1,0 +1,27 @@
+--- a/host/vulkan/vk_common_operations.cpp
++++ b/host/vulkan/vk_common_operations.cpp
+@@ -1030,8 +1030,9 @@
+ 
+         if (!emulation->mGetPhysicalDeviceProperties2Func) {
+             GFXSTREAM_ERROR(
+-                "Warning: device claims to support ID properties "
+-                "but vkGetPhysicalDeviceProperties2 could not be found");
++                "Cannot initialize Vulkan: vkGetPhysicalDeviceProperties2 "
++                "and its KHR alias are unavailable");
++            return nullptr;
+         }
+     }
+ 
+--- a/host/virtio_gpu_gfxstream_renderer.cpp
++++ b/host/virtio_gpu_gfxstream_renderer.cpp
+@@ -329,6 +329,10 @@
+         renderer = InitRenderer(displayWidth, displayHeight, rendererFlags, features);
+     }
+ 
++    if (!renderer) {
++        return nullptr;
++    }
++
+     FrameBuffer::waitUntilInitialized();
+ 
+     return renderer;

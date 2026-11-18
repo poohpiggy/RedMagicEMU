@@ -1,0 +1,83 @@
+--- a/guest/OpenglSystemCommon/ProcessPipe.cpp
++++ b/guest/OpenglSystemCommon/ProcessPipe.cpp
+@@ -32,7 +32,7 @@
+ 
+ #endif // !__Fuchsia__
+ 
+-static QEMU_PIPE_HANDLE sProcPipe = 0;
++static QEMU_PIPE_HANDLE sProcPipe = QEMU_PIPE_INVALID_HANDLE;
+ // sProcUID is a unique ID per process assigned by the host.
+ // It is different from getpid().
+ static uint64_t           sProcUID = 0;
+@@ -62,7 +62,7 @@
+ static void sQemuPipeInit() {
+     sProcPipe = qemu_pipe_open("GLProcessPipe");
+     if (!qemu_pipe_valid(sProcPipe)) {
+-        sProcPipe = 0;
++        sProcPipe = QEMU_PIPE_INVALID_HANDLE;
+         ALOGW("Process pipe failed");
+         return;
+     }
+@@ -70,7 +70,7 @@
+     int32_t confirmInt = 100;
+     if (qemu_pipe_write_fully(sProcPipe, &confirmInt, sizeof(confirmInt))) { // failed
+         qemu_pipe_close(sProcPipe);
+-        sProcPipe = 0;
++        sProcPipe = QEMU_PIPE_INVALID_HANDLE;
+         ALOGW("Process pipe failed");
+         return;
+     }
+@@ -78,7 +78,7 @@
+     // Ask the host for per-process unique ID
+     if (qemu_pipe_read_fully(sProcPipe, &sProcUID, sizeof(sProcUID))) {
+         qemu_pipe_close(sProcPipe);
+-        sProcPipe = 0;
++        sProcPipe = QEMU_PIPE_INVALID_HANDLE;
+         sProcUID = 0;
+         ALOGW("Process pipe failed");
+         return;
+@@ -124,18 +124,19 @@
+         std::lock_guard<std::mutex> lock(sNeedInitMutex);
+ 
+         if (sNeedInit) {
+-            sNeedInit = false;
+             processPipeDoInit(noRenderControlEnc);
+ 
+             if (noRenderControlEnc) {
++                sNeedInit = false;
+                 return true;
+             }
+ 
+ #ifndef __Fuchsia__
+-            if (!sProcPipe && !sVirtioGpuPipeStream) {
++            if (!qemu_pipe_valid(sProcPipe) && !sVirtioGpuPipeStream) {
+                 return false;
+             }
+ #endif
++            sNeedInit = false;
+         }
+     }
+ 
+@@ -169,7 +170,7 @@
+     if (isPipe) {
+         if (qemu_pipe_valid(sProcPipe)) {
+             qemu_pipe_close(sProcPipe);
+-            sProcPipe = 0;
++            sProcPipe = QEMU_PIPE_INVALID_HANDLE;
+         }
+     } else {
+ #ifndef __Fuchsia__
+--- a/guest/OpenglSystemCommon/HostConnection.cpp
++++ b/guest/OpenglSystemCommon/HostConnection.cpp
+@@ -301,7 +301,10 @@
+     }
+ 
+     auto fd = (connType == HOST_CONNECTION_VIRTIO_GPU_ADDRESS_SPACE) ? con->m_rendernodeFd : -1;
+-    processPipeInit(fd, connType, noRenderControlEnc);
++    if (!processPipeInit(fd, connType, noRenderControlEnc)) {
++        ALOGE("Failed to initialize process pipe\n");
++        return nullptr;
++    }
+     if (!noRenderControlEnc && capset == kCapsetGfxStreamVulkan) {
+         con->rcEncoder();
+     }

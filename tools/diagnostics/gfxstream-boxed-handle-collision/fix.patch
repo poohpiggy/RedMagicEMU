@@ -1,0 +1,42 @@
+--- a/host/vulkan/VkDecoderGlobalState.cpp
++++ b/host/vulkan/VkDecoderGlobalState.cpp
+@@ -236,13 +236,20 @@
+         return res;
+     }
+ 
++    // The caller must hold lock. A different live box may have replaced
++    // this reverse-map entry after sharing the same underlying value.
++    void eraseReverseMappingIfMatches(uint64_t underlying, uint64_t boxed) {
++        auto it = reverseMap.find(underlying);
++        if (it != reverseMap.end() && it->second == boxed) reverseMap.erase(it);
++    }
++
+     void update(uint64_t handle, const T& item, BoxedHandleTypeTag tag) {
+         auto storedItem = store.get(handle);
+         uint64_t oldHandle = (uint64_t)storedItem->underlying;
+         *storedItem = item;
+         AutoLock l(lock);
+         if (oldHandle) {
+-            reverseMap.erase(oldHandle);
++            eraseReverseMappingIfMatches(oldHandle, handle);
+         }
+         reverseMap[(uint64_t)(item.underlying)] = handle;
+     }
+@@ -251,7 +258,7 @@
+         auto item = get(h);
+         if (item) {
+             AutoLock l(lock);
+-            reverseMap.erase((uint64_t)(item->underlying));
++            eraseReverseMappingIfMatches((uint64_t)(item->underlying), h);
+         }
+         store.remove(h);
+     }
+@@ -272,6 +279,8 @@
+             if (r.callback) {
+                 r.callback();
+             }
++            auto item = get(h);
++            if (item) eraseReverseMappingIfMatches((uint64_t)(item->underlying), h);
+             store.remove(h);
+         }
+         delayedRemovesList.clear();

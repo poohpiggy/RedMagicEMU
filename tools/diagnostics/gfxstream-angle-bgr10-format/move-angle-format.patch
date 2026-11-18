@@ -1,0 +1,32 @@
+--- a/host/common/include/gfxstream/host/gl_enums.h
++++ b/host/common/include/gfxstream/host/gl_enums.h
+@@ -14,6 +14,9 @@
+ 
+ #pragma once
+ 
++// From ANGLE "src/common/angleutils.h"
++#define GL_BGR10_A2_ANGLEX 0x6AF9
++
+ namespace gfxstream {
+ namespace host {
+ namespace gl {
+--- a/host/gl/color_buffer_gl.h
++++ b/host/gl/color_buffer_gl.h
+@@ -30,6 +30,7 @@
+ #include "context_helper.h"
+ #include "gfxstream/ManagedDescriptor.h"
+ #include "gfxstream/host/features.h"
++#include "gfxstream/host/gl_enums.h"
+ #include "gfxstream/host/gfxstream_format.h"
+ #include "gfxstream/host/hwc2.h"
+ #include "gfxstream/host/handle.h"
+@@ -37,9 +38,6 @@
+ #include "render-utils/Renderer.h"
+ #include "render-utils/stream.h"
+ 
+-// From ANGLE "src/common/angleutils.h"
+-#define GL_BGR10_A2_ANGLEX 0x6AF9
+-
+ // A class used to model a guest color buffer, and used to implement several
+ // related things:
+ //

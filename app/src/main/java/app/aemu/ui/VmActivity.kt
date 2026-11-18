@@ -138,6 +138,8 @@ import app.aemu.core.GuestLog
 import app.aemu.core.GuestVm
 import app.aemu.core.HostBatteryBridge
 import app.aemu.core.HostBatteryProtocol
+import app.aemu.core.HostOpenClProbe
+import app.aemu.core.HostVulkanProbe
 import app.aemu.core.ImageStore
 import app.aemu.core.InputService
 import kotlinx.coroutines.delay
@@ -1739,6 +1741,24 @@ class VmActivity : ComponentActivity() {
                     SegmentedButton(selected = guestTab, onClick = { guestTab = true }, shape = SegmentedButtonDefaults.itemShape(1, 2)) {
                         Text(stringResource(R.string.guest_log), maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
+                }
+                if (app.aemu.BuildConfig.DEBUG && !guestTab) {
+                    TextButton(onClick = {
+                        val started = HostOpenClProbe.start { result ->
+                            runOnUiThread {
+                                if (!isFinishing && !isDestroyed) logLines.add("OpenCL: $result")
+                            }
+                        }
+                        logLines.add(if (started) "OpenCL: probing host GPU..." else "OpenCL: probe already running")
+                    }) { Text("Probe host OpenCL (debug)") }
+                    TextButton(onClick = {
+                        val started = HostVulkanProbe.start { result ->
+                            runOnUiThread {
+                                if (!isFinishing && !isDestroyed) logLines.add("Vulkan: $result")
+                            }
+                        }
+                        logLines.add(if (started) "Vulkan: probing host compute..." else "Vulkan: probe already running")
+                    }) { Text("Probe host Vulkan (debug)") }
                 }
                 Spacer(Modifier.height(8.dp))
                 val st = rememberLazyListState()

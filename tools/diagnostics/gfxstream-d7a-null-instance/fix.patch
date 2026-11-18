@@ -1,0 +1,11 @@
+--- a/guest/vulkan/gfxstream_vk_device.cpp
++++ b/guest/vulkan/gfxstream_vk_device.cpp
+@@ -637,7 +637,7 @@
+ 
+ PFN_vkVoidFunction gfxstream_vk_GetInstanceProcAddr(VkInstance _instance, const char* pName) {
+     VK_FROM_HANDLE(gfxstream_vk_instance, instance, _instance);
+-    return vk_instance_get_proc_addr(&instance->vk, &gfxstream_vk_instance_entrypoints, pName);
++    return vk_instance_get_proc_addr(instance ? &instance->vk : nullptr, &gfxstream_vk_instance_entrypoints, pName);
+ }
+ 
+ PFN_vkVoidFunction gfxstream_vk_GetDeviceProcAddr(VkDevice _device, const char* pName) {

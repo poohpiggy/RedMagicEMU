@@ -1,0 +1,26 @@
+--- a/guest/qemupipe/qemu_pipe_common.cpp
++++ b/guest/qemupipe/qemu_pipe_common.cpp
+@@ -12,6 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
++#include <errno.h>
+ #include <qemu_pipe_bp.h>
+ 
+ int qemu_pipe_read_fully(QEMU_PIPE_HANDLE pipe, void* buffer, int size) {
+@@ -20,6 +21,7 @@
+     while (size > 0) {
+       int n = QEMU_PIPE_RETRY(qemu_pipe_read(pipe, p, size));
+       if (n < 0) return n;
++      if (n == 0) return -EPIPE;
+ 
+       p += n;
+       size -= n;
+@@ -34,6 +36,7 @@
+     while (size > 0) {
+       int n = QEMU_PIPE_RETRY(qemu_pipe_write(pipe, p, size));
+       if (n < 0) return n;
++      if (n == 0) return -EIO;
+ 
+       p += n;
+       size -= n;

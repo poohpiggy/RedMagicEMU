@@ -1,0 +1,11 @@
+--- a/host/meson.build
++++ b/host/meson.build
+@@ -221,6 +221,8 @@
+ 
+ if not use_gles
+   files_lib_gfxstream_backend += files('NativeSubWindow_stub.cpp')
++elif host_machine.system() == 'android'
++  files_lib_gfxstream_backend += files('NativeSubWindow_android.cpp')
+ elif host_machine.system() == 'darwin'
+   files_lib_gfxstream_backend += files('NativeSubWindow_cocoa.mm')
+ elif host_machine.system() == 'windows'
