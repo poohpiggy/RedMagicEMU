@@ -3,7 +3,7 @@
  * no longer takes a HAL 1 device; a vendor camera application also needs a HAL 3 device for its vendor tags).
  *
  * The host side is the one of camera_hal.c: one unix socket connection per opened camera, /dev/socket/aemu_cam,
- * text commands ("open <id>", "start", "stop", "shot", "close"), frames back as
+ * text commands ("open <id>", "start", "stop", "shot [left top width height]", "close"), frames back as
  *     int32 type, int32 width, int32 height, int32 length, then <length> bytes
  *     type 1: RGBA_8888 (640x480) followed by NV21; type 2: JPEG of a picture.
  *
@@ -17,6 +17,7 @@
  */
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
 #include "camera_tags_aosp.h"
 
 extern int socket(int domain, int type, int proto);
@@ -41,6 +42,7 @@ extern int clock_gettime(int clock, struct timespec64 *ts);
 #define EXPORT __attribute__((visibility("default")))
 #define W 640
 #define H 480
+#define MAX_ZOOM 4
 #define JPEG_MAX (1 << 20)
 
 struct hw_module;
@@ -156,6 +158,7 @@ struct camera3 {
 struct ro_entry { size_t index; uint32_t tag; uint8_t type; size_t count; const void *data; };
 static void *(*md_alloc)(size_t entries, size_t data);
 static int (*md_add)(void *m, uint32_t tag, const void *data, size_t count);
+static int (*md_update)(void *m, size_t index, const void *data, size_t count, void *entry);
 static int (*md_append)(void *dst, const void *src);
 static size_t (*md_entries)(const void *m);
 static size_t (*md_data)(const void *m);
@@ -166,13 +169,14 @@ static int md_ready(void) {
     void *h = dlopen("libcamera_metadata.so", 2);
     if (!h) return 0;
     md_add = dlsym(h, "add_camera_metadata_entry");
+    md_update = dlsym(h, "update_camera_metadata_entry");
     md_append = dlsym(h, "append_camera_metadata");
     md_entries = dlsym(h, "get_camera_metadata_entry_count");
     md_data = dlsym(h, "get_camera_metadata_data_count");
     md_free = dlsym(h, "free_camera_metadata");
     md_find = dlsym(h, "find_camera_metadata_ro_entry");
     void *a = dlsym(h, "allocate_camera_metadata");
-    if (!md_add || !md_append || !md_entries || !md_data || !md_free || !md_find || !a) return 0;
+    if (!md_add || !md_update || !md_append || !md_entries || !md_data || !md_free || !md_find || !a) return 0;
     md_alloc = a;
     return 1;
 }
@@ -230,7 +234,7 @@ static const struct ent STATIC[] = {
     /* No session parameters are supported. Keep the empty entry present for
      * clients that do not handle a null session-key list. */
     { REQUEST_AVAILABLE_SESSION_KEYS, 0, (const int32_t[]){0} },
-    F(SCALER_AVAILABLE_MAX_DIGITAL_ZOOM, 1.0f),
+    F(SCALER_AVAILABLE_MAX_DIGITAL_ZOOM, MAX_ZOOM),
     I(SCALER_AVAILABLE_STREAM_CONFIGURATIONS, SIZES(FORMAT_IMPLEMENTATION_DEFINED), SIZES(FORMAT_YCBCR_420_888),
       FORMAT_BLOB, 640, 480, 0),
     L(SCALER_AVAILABLE_MIN_FRAME_DURATIONS, DURATIONS(FORMAT_IMPLEMENTATION_DEFINED, 33333333),
@@ -409,28 +413,55 @@ static uint64_t now_ns(void) {
     return (uint64_t)ts.sec * 1000000000ull + (uint64_t)ts.nsec;
 }
 
-static void put_rgba(unsigned char *dst, int dw, int dh, const unsigned char *src) {
-    if (dw == W && dh == H) { copy(dst, src, (unsigned long)W * H * 4); return; }
+struct crop { int left, top, width, height; };
+
+static struct crop request_crop(const void *settings) {
+    struct ro_entry entry;
+    if (!settings || md_find(settings, SCALER_CROP_REGION, &entry) != 0 || entry.count != 4)
+        return (struct crop){0, 0, W, H};
+
+    /* CameraService maps CONTROL_ZOOM_RATIO to the center-only crop region. */
+    const int32_t *crop = entry.data;
+    int width = crop[2], height = crop[3];
+    if (width <= 0 || height <= 0) return (struct crop){0, 0, W, H};
+    if (width < W / MAX_ZOOM) width = W / MAX_ZOOM;
+    if (height < H / MAX_ZOOM) height = H / MAX_ZOOM;
+    if (width > W) width = W;
+    if (height > H) height = H;
+    return (struct crop){(W - width) / 2, (H - height) / 2, width, height};
+}
+
+static void put_rgba(unsigned char *dst, int dw, int dh, const unsigned char *src, struct crop crop) {
+    if (dw == W && dh == H && crop.width == W && crop.height == H) {
+        copy(dst, src, (unsigned long)W * H * 4);
+        return;
+    }
     for (int y = 0; y < dh; y++) {
-        const uint32_t *row = (const uint32_t *)(src + (unsigned long)(y * H / dh) * W * 4);
+        const uint32_t *row = (const uint32_t *)src + (crop.top + y * crop.height / dh) * W + crop.left;
         uint32_t *o = (uint32_t *)(dst + (unsigned long)y * dw * 4);
-        for (int x = 0; x < dw; x++) o[x] = row[x * W / dw];
+        for (int x = 0; x < dw; x++) o[x] = row[x * crop.width / dw];
     }
 }
-static void put_nv21(unsigned char *dst, int dw, int dh, const unsigned char *src) {
-    if (dw == W && dh == H) { copy(dst, src, (unsigned long)W * H * 3 / 2); return; }
+static void put_nv21(unsigned char *dst, int dw, int dh, const unsigned char *src, struct crop crop) {
+    if (dw == W && dh == H && crop.width == W && crop.height == H) {
+        copy(dst, src, (unsigned long)W * H * 3 / 2);
+        return;
+    }
     for (int y = 0; y < dh; y++) {
-        const unsigned char *row = src + (unsigned long)(y * H / dh) * W;
+        const unsigned char *row = src + (crop.top + y * crop.height / dh) * W + crop.left;
         unsigned char *o = dst + (unsigned long)y * dw;
-        for (int x = 0; x < dw; x++) o[x] = row[x * W / dw];
+        for (int x = 0; x < dw; x++) o[x] = row[x * crop.width / dw];
     }
     const unsigned char *suv = src + W * H;
     unsigned char *duv = dst + (unsigned long)dw * dh;
-    int cw = dw / 2, ch = dh / 2;
-    for (int y = 0; y < ch; y++) {
-        const unsigned char *row = suv + (unsigned long)(y * (H / 2) / ch) * W;
-        unsigned char *o = duv + (unsigned long)y * dw;
-        for (int x = 0; x < cw; x++) { int sx = x * (W / 2) / cw; o[2 * x] = row[2 * sx]; o[2 * x + 1] = row[2 * sx + 1]; }
+    for (int y = 0; y < dh; y += 2) {
+        const unsigned char *row = suv + ((crop.top + y * crop.height / dh) / 2) * W;
+        unsigned char *o = duv + (unsigned long)(y / 2) * dw;
+        for (int x = 0; x < dw; x += 2) {
+            int sx = (crop.left + x * crop.width / dw) & ~1;
+            o[x] = row[sx];
+            o[x + 1] = row[sx + 1];
+        }
     }
 }
 
@@ -467,7 +498,7 @@ static void *reader(void *arg) {
 /* ---- requests ---- */
 static void *result_metadata(struct camera3 *d, uint64_t ts) {
     const void *s = d->last ? d->last : d->templates[1];
-    void *m = md_alloc((s ? md_entries(s) : 0) + 12, (s ? md_data(s) : 0) + 160);
+    void *m = md_alloc((s ? md_entries(s) : 0) + 13, (s ? md_data(s) : 0) + 160);
     if (!m) return 0;
     if (s) md_append(m, s);
     static const uint8_t converged = 2, zero = 0, depth = 1;
@@ -526,6 +557,7 @@ static void answer(struct camera3 *d, struct request *r) {
         else preview = 1;
     }
     if (r->settings) { if (d->last) md_free(d->last); d->last = r->settings; r->settings = 0; }
+    struct crop crop = request_crop(d->last);
 
     /* the picture: the host compresses the next frame; otherwise the next preview frame (a third of a second at
      * most: nothing comes while the phone's camera permission is being asked) */
@@ -533,7 +565,12 @@ static void answer(struct camera3 *d, struct request *r) {
     unsigned jseq = d->jpeg_seq, fseq = d->frame_seq;
     pthread_mutex_unlock(d->lock);
     if (blob) {
-        say(d, "shot\n");
+        char cmd[48];
+        if (crop.width == W && crop.height == H) say(d, "shot\n");
+        else {
+            snprintf(cmd, sizeof(cmd), "shot %d %d %d %d\n", crop.left, crop.top, crop.width, crop.height);
+            say(d, cmd);
+        }
         for (int i = 0; i < 1500 && d->running && !has_new_frame(d, fseq, jseq, 0, 1); i++) usleep(2000);
         /* The host stops preview for JPEG. Frames received before that JPEG
          * cannot satisfy a preview output of this mixed request. */
@@ -579,8 +616,9 @@ static void answer(struct camera3 *d, struct request *r) {
                 b->status = 0;
             }
         } else if (d->frame) {
-            if (s->format == FORMAT_YCBCR_420_888) put_nv21(va, (int)s->width, (int)s->height, d->frame + W * H * 4);
-            else put_rgba(va, (int)s->width, (int)s->height, d->frame);
+            if (s->format == FORMAT_YCBCR_420_888)
+                put_nv21(va, (int)s->width, (int)s->height, d->frame + W * H * 4, crop);
+            else put_rgba(va, (int)s->width, (int)s->height, d->frame, crop);
             b->status = 0;
         }
         g->unlock(g, *b->buffer);
@@ -588,6 +626,14 @@ static void answer(struct camera3 *d, struct request *r) {
     pthread_mutex_unlock(d->lock);
 
     void *meta = result_metadata(d, ts);
+    if (meta) {
+        const int32_t region[] = { crop.left, crop.top, crop.width, crop.height };
+        struct ro_entry entry;
+        if (md_find(meta, SCALER_CROP_REGION, &entry) == 0)
+            md_update(meta, entry.index, region, COUNT(region), 0);
+        else
+            md_add(meta, SCALER_CROP_REGION, region, COUNT(region));
+    }
     struct capture_result res = { r->frame, meta, (uint32_t)r->nbuf, r->bufs, 0, 1 };
     d->cb->result(d->cb, &res);
     if (meta) md_free(meta);
@@ -614,6 +660,7 @@ static int d_configure(struct camera3 *d, struct stream_config *c) {
         if (!s || s->type != 0 /* CAMERA3_STREAM_OUTPUT */) return -22;
         if (s->format == FORMAT_IMPLEMENTATION_DEFINED) s->format = FORMAT_RGBA_8888;
         if (s->format != FORMAT_RGBA_8888 && s->format != FORMAT_YCBCR_420_888 && s->format != FORMAT_BLOB) return -22;
+        if (s->format == FORMAT_YCBCR_420_888 && ((s->width | s->height) & 1)) return -22;
         s->usage |= USAGE_SW_WRITE_OFTEN;
         s->max_buffers = 4;
     }

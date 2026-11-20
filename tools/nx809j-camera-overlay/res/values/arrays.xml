@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Keep the first entry (720p) in the stock tab. Its preference filter
+         removes a tab with one entry, including the single-frame-rate tab.
+         VideoFragment handles the absent quality tab before reading the FPS tab. -->
+    <string-array name="back_video_quality_tab_entryvalues">
+        <item>5</item>
+    </string-array>
+    <!-- Video camera switching looks up the new camera's default profile
+         before it can filter the settings. The virtual front camera has 720p. -->
+    <string name="front_video_quality_default" translatable="false">5</string>
+</resources>

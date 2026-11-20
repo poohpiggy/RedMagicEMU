@@ -23,7 +23,7 @@ import java.nio.ByteOrder
 
 /**
  * The phone's cameras for the guest. The emulator's camera HAL (native/camerahal) connects to /dev/socket/aemu_cam
- * and sends "open <0 back | 1 front>", "start", "stop", "shot", "close"; frames go back as
+ * and sends "open <0 back | 1 front>", "start", "stop", "shot [left top width height]", "close"; frames go back as
  *     int32 type, width, height, length + data — type 1: RGBA_8888 then NV21 (preview), type 2: JPEG (picture),
  *     type 3: NV21 only (preview, after "nv21").
  * "zoom <ratio×100>": digital zoom of every frame (preview, recording and picture).
@@ -56,6 +56,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         @Volatile private var reader: ImageReader? = null
         @Volatile private var streaming = false
         @Volatile private var shot = false
+        @Volatile private var shotCrop: Rect? = null
         @Volatile private var onlyNv21 = false
         @Volatile private var overlay = 0
         @Volatile private var upright = false
@@ -99,7 +100,10 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                         }
                         "start" -> streaming = true
                         "stop" -> streaming = false
-                        "shot" -> shot = true
+                        "shot" -> {
+                            shotCrop = if (api == 36) parseShotCrop(p) else null
+                            shot = true
+                        }
                         "nv21" -> onlyNv21 = true
                         "upright" -> upright = true
                         "size" -> {
@@ -211,7 +215,9 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                     shot = true
                 }
                 if (shot) {
+                    val crop = shotCrop
                     shot = false
+                    if (crop != null) cropNv21(crop.left, crop.top, crop.width(), crop.height())
                     val jpg = ByteArrayOutputStream(200_000)
                     YuvImage(nv21, ImageFormat.NV21, W, H, null).compressToJpeg(Rect(0, 0, W, H), 92, jpg)
                     streaming = false   // a picture stops the preview until the guest starts it again (its "start"
@@ -368,9 +374,24 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             return sized
         }
 
+        private fun parseShotCrop(command: List<String>): Rect? {
+            if (command.size != 5) return null
+            val left = command[1].toIntOrNull() ?: return null
+            val top = command[2].toIntOrNull() ?: return null
+            val width = command[3].toIntOrNull() ?: return null
+            val height = command[4].toIntOrNull() ?: return null
+            if (left !in 0 until W || top !in 0 until H || width !in 1..(W - left) || height !in 1..(H - top)) return null
+            return Rect(left, top, left + width, top + height)
+        }
+
         /** digital zoom: the centre 1/ratio of the frame scaled back to W×H (nearest pixel) */
         private fun zoomNv21(z: Int) {
-            val cw = W * 100 / z; val ch = H * 100 / z; val x0 = (W - cw) / 2; val y0 = (H - ch) / 2
+            val cw = W * 100 / z
+            val ch = H * 100 / z
+            cropNv21((W - cw) / 2, (H - ch) / 2, cw, ch)
+        }
+
+        private fun cropNv21(x0: Int, y0: Int, cw: Int, ch: Int) {
             for (y in 0 until H) {
                 val sr = (y0 + y * ch / H) * W + x0
                 for (x in 0 until W) zbuf[y * W + x] = nv21[sr + x * cw / W]

@@ -10,10 +10,29 @@ static unsigned char preview_output[W * H * 4];
 static unsigned char jpeg_output[JPEG_MAX];
 static int preview_handle[8], jpeg_handle[8];
 static int notified_error, notified_shutter, results, bad_result, lock_calls;
-static int fake_metadata;
-static void *fake_md_alloc(size_t entries, size_t bytes) { (void)entries; (void)bytes; return &fake_metadata; }
+static int fake_metadata, fake_result_metadata;
+static int32_t requested_crop[4];
+static int32_t reported_crop[4];
+static void *fake_md_alloc(size_t entries, size_t bytes) { (void)entries; (void)bytes; return &fake_result_metadata; }
 static int fake_md_add(void *m, uint32_t tag, const void *p, size_t n) { (void)m; (void)tag; (void)p; (void)n; return 0; }
 static void fake_md_free(void *m) { (void)m; }
+static size_t fake_md_count(const void *m) { (void)m; return 0; }
+static int fake_md_append(void *dst, const void *src) {
+    (void)dst;
+    if (src == &fake_metadata) copy(reported_crop, requested_crop, sizeof(reported_crop));
+    return 0;
+}
+static int fake_md_find(const void *m, uint32_t tag, struct ro_entry *entry) {
+    if (tag != SCALER_CROP_REGION || (m != &fake_metadata && m != &fake_result_metadata)) return -1;
+    *entry = (struct ro_entry){ .count = 4, .data = m == &fake_metadata ? requested_crop : reported_crop };
+    return 0;
+}
+static int fake_md_update(void *m, size_t index, const void *data, size_t count, void *entry) {
+    (void)index; (void)entry;
+    if (m != &fake_result_metadata || count != 4) return -1;
+    copy(reported_crop, data, sizeof(reported_crop));
+    return 0;
+}
 
 static int fake_lock(const struct gralloc_module *g, const void *handle, int usage,
                      int l, int t, int w, int h, void **out) {
@@ -52,6 +71,10 @@ static void *deliver(void *arg) {
     if (a->preview && a->preview_before_jpeg) {
         pthread_mutex_lock(a->d->lock);
         a->d->frame[0] = 42;
+        a->d->frame[(120 * W + 160) * 4] = 99;
+        a->d->frame[W * H * 4 + 120 * W + 160] = 88;
+        a->d->frame[W * H * 5 + 60 * W + 160] = 77;
+        a->d->frame[W * H * 5 + 60 * W + 161] = 66;
         a->d->frame_seq++;
         pthread_mutex_unlock(a->d->lock);
         usleep(30000);
@@ -135,8 +158,48 @@ static int queue_lifetime_case(void) {
     return 0;
 }
 
+static int zoom_case(int format, int zoomed) {
+    struct camera3 d = { .running = 1, .fd = -1, .cb = &callbacks };
+    struct stream preview = { .width = W, .height = H, .format = format };
+    const void *handle = preview_handle;
+    struct request req = { .frame = 73, .nbuf = 1, .settings = &fake_metadata };
+    req.bufs[0] = (struct stream_buffer){ .stream = &preview, .buffer = &handle, .acquire_fence = -1 };
+    requested_crop[0] = 0;
+    requested_crop[1] = 0;
+    requested_crop[2] = zoomed ? 320 : 640;
+    requested_crop[3] = zoomed ? 240 : 480;
+    d.frame = calloc(1, W * H * 4 + W * H * 3 / 2);
+    if (!d.frame) return 1;
+    struct arrival a = { &d, 1, 0, 1 };
+    long sender;
+    notified_error = notified_shutter = results = bad_result = lock_calls = 0;
+    if (pthread_create(&sender, 0, deliver, &a)) { free(d.frame); return 1; }
+    answer(&d, &req);
+    pthread_join(sender, 0);
+    free(d.frame);
+    int expected = format == FORMAT_RGBA_8888 ? (zoomed ? 99 : 42) : (zoomed ? 88 : 0);
+    if (notified_error || notified_shutter != 1 || results != 1 || bad_result ||
+        preview_output[0] != expected || (format == FORMAT_YCBCR_420_888 && zoomed &&
+        (preview_output[W * H] != 77 || preview_output[W * H + 1] != 66))) {
+        fprintf(stderr, "crop format=%d zoomed=%d: first pixel %d, expected %d\n",
+                format, zoomed, preview_output[0], expected);
+        return 1;
+    }
+    if (reported_crop[0] != (zoomed ? 160 : 0) || reported_crop[1] != (zoomed ? 120 : 0)) {
+        fprintf(stderr, "reported crop does not match the centered output\n");
+        return 1;
+    }
+    return 0;
+}
+
 int main(void) {
     md_alloc = fake_md_alloc; md_add = fake_md_add; md_free = fake_md_free;
+    md_entries = fake_md_count; md_data = fake_md_count; md_append = fake_md_append;
+    md_find = fake_md_find;
+    md_update = fake_md_update;
+    g_gralloc = &fake_gralloc;
+    if (zoom_case(FORMAT_RGBA_8888, 0) || zoom_case(FORMAT_RGBA_8888, 1) ||
+        zoom_case(FORMAT_YCBCR_420_888, 0) || zoom_case(FORMAT_YCBCR_420_888, 1)) return 1;
     if (run_case(0, 0, 0, 0) || run_case(1, 0, 0, 0) || run_case(1, 0, 1, 0) ||
         run_case(1, 1, 0, 0) || run_case(1, 1, 1, 1) || run_case(1, 1, 1, 0) ||
         queue_lifetime_case()) return 1;

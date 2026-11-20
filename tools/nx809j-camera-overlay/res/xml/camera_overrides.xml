@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<overlay>
+    <item target="array/pref_back_video_quality_tab_entryvalues"
+        value="@array/back_video_quality_tab_entryvalues" />
+    <item target="string/pref_front_video_quality_default"
+        value="@string/front_video_quality_default" />
+</overlay>
