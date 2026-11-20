@@ -16,7 +16,10 @@ import android.media.ImageReader
 import android.net.LocalSocket
 import android.os.Handler
 import android.os.HandlerThread
+import android.util.AtomicFile
+import android.util.Size
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -44,9 +47,49 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
     private val served = api in CameraProfile.API_RANGE
     private val server = UnixServer(paths.socket("aemu_cam"), "camera") { c -> Session(c).run() }
     @Volatile var onPermissionNeeded: (() -> Unit)? = null
+    private data class StillTarget(val id: String, val size: Size, val sensor: Rect?)
+    @Volatile private var stillTargets: List<StillTarget?> = emptyList()
 
-    fun start() = server.start(log)
+    fun start(): Boolean {
+        if (api == 36) publishStillSizes()
+        return server.start(log)
+    }
     fun stop() = server.stop()
+
+    private fun CameraManager.findCamera(front: Boolean): String? {
+        val facing = if (front) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
+        return cameraIdList.firstOrNull { getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == facing }
+            ?: cameraIdList.firstOrNull()
+    }
+
+    private fun publishStillSizes() {
+        val cm = ctx.getSystemService(CameraManager::class.java)
+        val testScene = File(paths.bin, "camera.test").isFile
+        val targets = listOf(false, true).map { front ->
+            if (testScene) return@map null
+            runCatching {
+                val id = cm.findCamera(front) ?: return@runCatching null
+                val camera = cm.getCameraCharacteristics(id)
+                val jpeg = camera.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                    ?.getOutputSizes(ImageFormat.JPEG).orEmpty()
+                    .filter { it.width > 0 && it.height > 0 && it.width.toLong() * it.height <= 64 * 1024 * 1024 }
+                    .maxByOrNull { it.width.toLong() * it.height } ?: return@runCatching null
+                StillTarget(id, jpeg, camera.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE))
+            }.onFailure { log("camera: unable to inspect ${if (front) "front" else "back"} JPEG sizes: ${it.message}") }.getOrNull()
+        }
+        val sizes = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
+        targets.forEach { target -> sizes.putInt(target?.size?.width ?: W).putInt(target?.size?.height ?: H) }
+        val file = AtomicFile(File(paths.root, "dev/.aemu-camera-jpeg"))
+        val output = file.startWrite()
+        try {
+            output.write(sizes.array())
+            file.finishWrite(output)
+        } catch (failure: Exception) {
+            file.failWrite(output)
+            throw failure
+        }
+        stillTargets = targets
+    }
 
     private inner class Session(private val sock: LocalSocket) {
         private val out: OutputStream = sock.outputStream
@@ -68,6 +111,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         @Volatile private var cam: CameraProfile.Cam? = null
         @Volatile private var guestParams: Map<String, String> = emptyMap()
         @Volatile private var still: ImageReader? = null
+        private var stillTarget: StillTarget? = null
         @Volatile private var session: CameraCaptureSession? = null
         @Volatile private var preview: android.hardware.camera2.CaptureRequest.Builder? = null
         @Volatile private var pictureSize = android.util.Size(W, H)
@@ -139,10 +183,9 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                 if (ctx.checkSelfPermission(android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return
             }
             val cm = ctx.getSystemService(CameraManager::class.java)
-            val want = if (front) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
+            stillTarget = stillTargets.getOrNull(if (front) 1 else 0)
             val id = cam?.host?.takeIf { it in cm.cameraIdList }
-                ?: cm.cameraIdList.firstOrNull { cm.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == want }
-                ?: cm.cameraIdList.firstOrNull() ?: run { log("camera: the phone has no camera"); return }
+                ?: stillTarget?.id ?: cm.findCamera(front) ?: run { log("camera: the phone has no camera"); return }
             sensorOrient = cm.getCameraCharacteristics(id).get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
             val ir = ImageReader.newInstance(W, H, ImageFormat.YUV_420_888, 2)
             reader = ir
@@ -159,7 +202,12 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                             ?.let { req.set(android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
                         preview = req
                         // the still: the phone's own JPEG at the picture size the guest application chose
-                        val st = if (served) runCatching { ImageReader.newInstance(pictureSize.width, pictureSize.height, ImageFormat.JPEG, 2) }.getOrNull() else null
+                        val size = if (served) pictureSize else stillTarget?.size
+                        val st = size?.let {
+                            runCatching { ImageReader.newInstance(it.width, it.height, ImageFormat.JPEG, 2) }
+                                .onFailure { failure -> log("camera: cannot allocate JPEG reader for $it: ${failure.message}") }
+                                .getOrNull()
+                        }
                         still = st
                         st?.setOnImageAvailableListener({ r -> r.acquireLatestImage()?.use { stillDone(it) } }, handler)
                         if (served) applyTo(req)
@@ -316,14 +364,24 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             val d = device ?: return false; val s = session ?: return false; val st = still ?: return false
             return runCatching {
                 val r = d.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply { addTarget(st.surface) }
-                applyTo(r)
+                if (served) applyTo(r)
                 val p = guestParams
                 r.set(CR.JPEG_QUALITY, (p["jpeg-quality"]?.toIntOrNull() ?: 90).coerceIn(1, 100).toByte())
                 // the guest's "rotation" (Parameters.setRotation): the turn its camera application wants in the file
                 r.set(CR.JPEG_ORIENTATION, (p["rotation"]?.toIntOrNull() ?: 0).let { (it % 360 + 360) % 360 })
                 val tw = p["jpeg-thumbnail-width"]?.toIntOrNull() ?: 0; val th = p["jpeg-thumbnail-height"]?.toIntOrNull() ?: 0
-                r.set(CR.JPEG_THUMBNAIL_SIZE, android.util.Size(tw, th))
+                r.set(CR.JPEG_THUMBNAIL_SIZE, Size(tw, th))
                 r.set(CR.JPEG_THUMBNAIL_QUALITY, (p["jpeg-thumbnail-quality"]?.toIntOrNull() ?: 90).coerceIn(1, 100).toByte())
+                val sensor = stillTarget?.sensor
+                val crop = shotCrop
+                if (sensor != null && crop != null) {
+                    r.set(CR.SCALER_CROP_REGION, Rect(
+                        sensor.left + crop.left * sensor.width() / W,
+                        sensor.top + crop.top * sensor.height() / H,
+                        sensor.left + crop.right * sensor.width() / W,
+                        sensor.top + crop.bottom * sensor.height() / H,
+                    ))
+                }
                 s.capture(r.build(), null, handler)
                 true
             }.getOrDefault(false)
@@ -333,7 +391,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             val b = img.planes[0].buffer
             val a = ByteArray(b.remaining()); b.get(a)
             streaming = false   // a picture stops the preview until the guest starts it again
-            send(2, a, a.size)
+            if (api == 36) send(2, a, a.size, w = img.width, h = img.height) else send(2, a, a.size)
             log("camera: picture ${img.width}x${img.height}, ${a.size / 1024} KB")
         }
 

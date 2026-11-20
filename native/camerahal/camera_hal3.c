@@ -44,6 +44,7 @@ extern int clock_gettime(int clock, struct timespec64 *ts);
 #define H 480
 #define MAX_ZOOM 4
 #define JPEG_MAX (1 << 20)
+#define JPEG_PIXEL_LIMIT (64 * 1024 * 1024)
 
 struct hw_module;
 struct hw_device;
@@ -134,6 +135,7 @@ struct camera3_ops {
 #define QUEUE 16
 
 struct request { uint32_t frame; int nbuf; struct stream_buffer bufs[MAX_BUFS]; const void *handles[MAX_BUFS]; void *settings; };
+struct still_size { int32_t width, height; };
 
 struct camera3 {
     struct hw_device common;
@@ -148,6 +150,7 @@ struct camera3 {
     unsigned char *frame;           /* the last host frame: RGBA then NV21 */
     volatile unsigned frame_seq;
     unsigned char *jpeg; volatile unsigned jpeg_len, jpeg_seq;
+    struct still_size still_size;
     struct request queue[QUEUE];
     volatile unsigned head, tail;   /* worker takes at head, requests are put at tail */
     void *last;                     /* the settings of the last request that had any */
@@ -351,21 +354,66 @@ static void *md_build(const struct ent *e, unsigned n, unsigned spare) {
 }
 
 static uint32_t vendor_tag(const char *section, const char *name);
+static struct still_size still_size_for(int id) {
+    struct still_size sizes[2];
+    FILE *caps = fopen("/dev/.aemu-camera-jpeg", "rb");
+    if (caps) {
+        size_t n = fread(sizes, sizeof(sizes[0]), COUNT(sizes), caps);
+        fclose(caps);
+        if (n == COUNT(sizes)) {
+            struct still_size s = sizes[id];
+            if (s.width > 0 && s.height > 0 && (int64_t)s.width * s.height <= JPEG_PIXEL_LIMIT)
+                return s;
+        }
+    }
+    return (struct still_size){W, H};
+}
+
+static int jpeg_capacity(struct still_size s) {
+    int64_t bytes = (int64_t)s.width * s.height * 2 + 65536;
+    return bytes > JPEG_MAX ? (int)bytes : JPEG_MAX;
+}
+
+static void *build_static_info(int id, struct still_size still) {
+    struct ent entries[COUNT(STATIC)];
+    const int32_t jpeg_max = jpeg_capacity(still);
+    const int32_t formats[] = {
+        SIZES(FORMAT_IMPLEMENTATION_DEFINED), SIZES(FORMAT_YCBCR_420_888),
+        FORMAT_BLOB, still.width, still.height, 0,
+    };
+    const int64_t durations[] = {
+        DURATIONS(FORMAT_IMPLEMENTATION_DEFINED, 33333333), DURATIONS(FORMAT_YCBCR_420_888, 33333333),
+        FORMAT_BLOB, still.width, still.height, 33333333,
+    };
+    const int64_t stalls[] = {
+        DURATIONS(FORMAT_IMPLEMENTATION_DEFINED, 0), DURATIONS(FORMAT_YCBCR_420_888, 0),
+        FORMAT_BLOB, still.width, still.height, 100000000,
+    };
+    for (size_t i = 0; i < COUNT(STATIC); i++) {
+        entries[i] = STATIC[i];
+        switch (entries[i].tag) {
+        case JPEG_MAX_SIZE: entries[i].data = &jpeg_max; break;
+        case SCALER_AVAILABLE_STREAM_CONFIGURATIONS: entries[i].data = formats; break;
+        case SCALER_AVAILABLE_MIN_FRAME_DURATIONS: entries[i].data = durations; break;
+        case SCALER_AVAILABLE_STALL_DURATIONS: entries[i].data = stalls; break;
+        }
+    }
+    void *m = md_build(entries, COUNT(entries), 4);
+    if (!m) return 0;
+    uint8_t facing = id ? 0 : 1;            /* LENS_FACING: 0 front, 1 back */
+    int32_t orientation = id ? 270 : 90;    /* the phone's sensors are mounted sideways, frames come unrotated */
+    md_add(m, LENS_FACING, &facing, 1);
+    md_add(m, SENSOR_ORIENTATION, &orientation, 1);
+    /* Xiaomi's camera application finds its cameras by role: 0 the main back one, 1 the front one */
+    int32_t role = id;
+    uint32_t tag = vendor_tag("com.xiaomi.cameraid.role", "cameraId");
+    if (tag) md_add(m, tag, &role, 1);
+    return m;
+}
+
 static void *g_static[2];
 static const void *static_info(int id) {
-    if (!g_static[id]) {
-        void *m = md_build(STATIC, COUNT(STATIC), 4);
-        if (!m) return 0;
-        uint8_t facing = id ? 0 : 1;            /* LENS_FACING: 0 front, 1 back */
-        int32_t orientation = id ? 270 : 90;    /* the phone's sensors are mounted sideways, frames come unrotated */
-        md_add(m, LENS_FACING, &facing, 1);
-        md_add(m, SENSOR_ORIENTATION, &orientation, 1);
-        /* Xiaomi's camera application finds its cameras by role: 0 the main back one, 1 the front one */
-        int32_t role = id;
-        uint32_t tag = vendor_tag("com.xiaomi.cameraid.role", "cameraId");
-        if (tag) md_add(m, tag, &role, 1);
-        g_static[id] = m;
-    }
+    if (!g_static[id]) g_static[id] = build_static_info(id, still_size_for(id));
     return g_static[id];
 }
 
@@ -481,7 +529,8 @@ static void *reader(void *arg) {
             d->frame_seq++;
             pthread_mutex_unlock(d->lock);
             if (!back) back = malloc(flen);     /* the first frame: there was no older one to take over */
-        } else if (hdr[0] == 2 && len > 0 && len <= JPEG_MAX - 64) {
+        } else if (hdr[0] == 2 && hdr[1] == d->still_size.width && hdr[2] == d->still_size.height &&
+                   len > 0 && len <= (unsigned long)jpeg_capacity(d->still_size) - 8) {
             unsigned char *j = malloc(len);
             if (!j) { if (skip(d->fd, len) < 0) break; continue; }
             if (read_full(d->fd, j, len) < 0) { free(j); break; }
@@ -605,14 +654,15 @@ static void answer(struct camera3 *d, struct request *r) {
         if (!g || !b->buffer || g->lock(g, *b->buffer, USAGE_SW_WRITE_OFTEN, 0, 0, (int)s->width, (int)s->height, &va) != 0 || !va) continue;
         if (s->format == FORMAT_BLOB) {
             /* the JPEG, and at the very end of the buffer camera3_jpeg_blob { uint16 id = 0xff, uint32 size }.
-             * The buffer is JPEG_MAX bytes: the camera service sizes it from the static JPEG_MAX_SIZE scaled by the
-             * picture's share of the largest picture size, and there is one picture size. (The stream's width is
-             * the picture's, not the buffer's.) */
+             * There is one JPEG size, so CameraService uses the advertised JPEG_MAX_SIZE.
+             * The stream dimensions describe the image, not the allocation. */
             /* (the engine's gralloc handle: fd, magic, flags, size - the block must hold that many bytes) */
-            if (d->jpeg_seq != jseq && d->jpeg && d->jpeg_len + 8 <= JPEG_MAX && ((const int *)*b->buffer)[6] >= JPEG_MAX) {
+            int capacity = jpeg_capacity(d->still_size);
+            if (d->jpeg_seq != jseq && d->jpeg && d->jpeg_len + 8 <= (unsigned)capacity &&
+                ((const int *)*b->buffer)[6] >= capacity) {
                 copy(va, d->jpeg, d->jpeg_len);
                 struct { uint16_t id; uint32_t size; } tail = { 0x00ff, d->jpeg_len };
-                copy((char *)va + JPEG_MAX - sizeof(tail), &tail, sizeof(tail));
+                copy((char *)va + capacity - sizeof(tail), &tail, sizeof(tail));
                 b->status = 0;
             }
         } else if (d->frame) {
@@ -743,6 +793,7 @@ static int cam_open(const struct hw_module *m, const char *id, struct hw_device 
     d->common.close = dev_close;
     d->ops = &ops;
     d->id = n;
+    d->still_size = still_size_for(n);
     d->fd = host_connect();
     if (d->fd < 0) { free(d); return -19; /* -ENODEV: the host does not serve a camera */ }
     say(d, n ? "open 1\n" : "open 0\n");
