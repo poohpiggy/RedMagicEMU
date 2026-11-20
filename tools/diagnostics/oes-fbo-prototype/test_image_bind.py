@@ -20,6 +20,7 @@ typedef unsigned GLenum;
 typedef unsigned GLuint;
 #define GL_TEXTURE_2D 0x0DE1u
 #define TEX_EXT 0x8D65u
+#define AEMU_IMAGE_BIND_CAMERA_FBO 0x80000000u
 #define OP_IMAGE_BIND 1
 struct hctx { GLuint g2d[32], gext[32]; int unit; struct { GLuint tex; uint64_t id; int camera_ext; } tb[64]; };
 struct hbuf { uint64_t id, gen, frame; void *img; } buffer;

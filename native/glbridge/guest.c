@@ -2191,12 +2191,17 @@ static void e_glEGLImageTargetTexture2DOES(GLenum target, GLeglImageOES image) {
     int bpp = b->format == 1 || b->format == 2 ? 4 : b->format == 3 ? 3 : b->format == 4 ? 2 : 0;
     if (note && note->magic == META_NOTE && note->id) {
         uint64_t count = __atomic_load_n(&note->pad[0], __ATOMIC_RELAXED);
+        /* NX809J's stock camera renders into this RGBA EGLImage, then reads it back through gralloc. */
+        const char *process = prog_name();
+        int camera_ext = target == 0x8D65 && b->format == 1 && note->usage == 0x33 && process &&
+                         (!strcmp(process, "com.android.camera") || !strncmp(process, "rme_glfbo_", 10));
         begin(T, OP_IMAGE_BIND, 28, 28);
-        put32(T, target); put64(T, note->id); put64(T, count); put32(T, w); put32(T, h);
+        put32(T, target | (camera_ext ? AEMU_IMAGE_BIND_CAMERA_FBO : 0));
+        put64(T, note->id); put64(T, count); put32(T, w); put32(T, h);
         rsync(T);
         uint32_t wanted = get32v(T);
         /* (it may be drawn into from now on: gralloc asks the host before the memory is read) */
-        if (bpp && target == 0x0DE1 && !note->pad[1]) note->pad[1] = 1;
+        if (bpp && (target == 0x0DE1 || camera_ext) && !note->pad[1]) note->pad[1] = 1;
         if (!wanted) return;
         if (b->format == 0x32315659 /* YV12 */) {
             uint8_t *rgba = buf_yv12_rgba(b, w, h);

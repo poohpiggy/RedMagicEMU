@@ -33,23 +33,45 @@ def main():
 typedef unsigned GLenum;
 typedef unsigned GLuint;
 typedef int GLint;
+typedef int GLsizei;
 #define GL_FRAMEBUFFER 0x8D40
+#define GL_DRAW_FRAMEBUFFER 0x8CA9
 #define GL_READ_FRAMEBUFFER 0x8CA8
 #define GL_COLOR_ATTACHMENT0 0x8CE0
 #define GL_TEXTURE_2D 0x0DE1
 #define TEX_EXT 0x8D65
-struct hctx { GLuint draw_fb, read_fb; struct { GLuint tex; uint64_t id; int camera_ext; } tb[64]; };
+#define GL_TEXTURE_EXTERNAL_OES TEX_EXT
+struct hctx {
+    GLuint draw_fb, read_fb, g2d[32], gext[32];
+    uint8_t is_ext[32];
+    struct { GLuint tex; uint64_t id; int camera_ext; } tb[64];
+    struct { GLuint fbo; uint64_t id; GLuint camera_tex; } fbm[16];
+};
 struct conn { struct hctx *ctx; } conn;
 static struct conn *C = &conn;
 static GLenum called_target;
+static uint64_t marked_buffer;
 static void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
     (void)target; (void)attachment; (void)texture; (void)level; called_target = textarget;
 }
-static void fbm_set(struct hctx *x, GLuint fb, uint64_t id) { (void)x; (void)fb; (void)id; }
-static void buf_mark(uint64_t id) { (void)id; }
+static void buf_mark(uint64_t id) { marked_buffer = id; }
+static GLuint real_fb(GLuint fbo) { return fbo; }
+static void glBindFramebuffer(GLenum target, GLuint fbo) { (void)target; (void)fbo; }
+static void glDeleteTextures(GLsizei n, const GLuint *ids) { (void)n; (void)ids; }
 ''', function(source, "static uint64_t tb_find("), ext,
-        function(source, "static void h_glFramebufferTexture2D("), r'''
+        function(source, "static void tb_set("), function(source, "static void fbm_set("),
+        function(source, "static uint64_t fbm_buffer(") if "static uint64_t fbm_buffer(" in source else "",
+        function(source, "static void h_glBindFramebuffer("), function(source, "static void h_glFramebufferTexture2D("),
+        function(source, "static void h_glDeleteTextures("), r'''
 static int failures;
+static void check_mark(uint64_t buffer, const char *name) {
+    marked_buffer = 0;
+    h_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 1);
+    if (marked_buffer != buffer) {
+        fprintf(stderr, "FAIL: %s got buffer %llu\n", name, (unsigned long long)marked_buffer);
+        failures++;
+    }
+}
 static void check(GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLenum expected, const char *name) {
     called_target = 0;
     h_glFramebufferTexture2D(GL_FRAMEBUFFER, attachment, textarget, texture, level);
@@ -65,7 +87,18 @@ int main(void) {
     check(GL_COLOR_ATTACHMENT0 + 1, TEX_EXT, 10, 0, TEX_EXT, "other attachments are not converted");
     check(GL_COLOR_ATTACHMENT0, TEX_EXT, 10, 1, TEX_EXT, "nonzero mip level is not converted");
     check(GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 10, 0, GL_TEXTURE_2D, "2D attachment passes through");
-    if (!failures) puts("diagnostic OES framebuffer gating: OK");
+    check(GL_COLOR_ATTACHMENT0, TEX_EXT, 10, 0, GL_TEXTURE_2D, "camera attachment uses host 2D");
+    check_mark(42, "rendering marks the attached camera buffer");
+    ctx.tb[0].id = 77;
+    check_mark(77, "rebinding the attached texture follows the new camera buffer");
+    ctx.tb[0].camera_ext = 0;
+    check_mark(0, "a non-camera rebind cannot mark the previous camera buffer");
+    ctx.tb[0].camera_ext = 1;
+    const GLuint deleted = 10;
+    h_glDeleteTextures(1, &deleted);
+    ctx.tb[0].tex = 10; ctx.tb[0].id = 88; ctx.tb[0].camera_ext = 1;
+    check_mark(0, "reusing a deleted texture name cannot mark an old framebuffer");
+    if (!failures) puts("camera OES framebuffer and buffer lifetime: OK");
     return failures != 0;
 }
 ''']

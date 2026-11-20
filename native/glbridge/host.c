@@ -56,8 +56,8 @@ struct hctx {
     GLuint g2d[32], gext[32];
     /* textures that are a guest buffer (an EGL image bound to them), framebuffer objects with one attached, and
      * the objects a finished frame is copied into its buffer through */
-    struct { GLuint tex; uint64_t id; } tb[64];
-    struct { GLuint fbo; uint64_t id; } fbm[16];
+    struct { GLuint tex; uint64_t id; int camera_ext; } tb[64];
+    struct { GLuint fbo; uint64_t id; GLuint camera_tex; } fbm[16];
     struct { uint64_t id; unsigned long serial; GLuint tex, fbo; } blit[6];
     uint8_t is_ext[32];
     int unit;
@@ -159,21 +159,44 @@ static uint64_t tb_find(struct hctx *x, GLuint tex) {
     for (int i = 0; tex && i < 64; i++) if (x->tb[i].tex == tex) return x->tb[i].id;
     return 0;
 }
-static void tb_set(struct hctx *x, GLuint tex, uint64_t id) {
-    int spare = -1;
-    for (int i = 0; i < 64; i++) {
-        if (x->tb[i].tex == tex) { x->tb[i].id = id; if (!id) x->tb[i].tex = 0; return; }
-        if (!x->tb[i].tex && spare < 0) spare = i;
-    }
-    if (id && spare >= 0) { x->tb[spare].tex = tex; x->tb[spare].id = id; }
+static uint64_t tb_find_ext(struct hctx *x, GLuint tex) {
+    for (int i = 0; tex && i < 64; i++) if (x->tb[i].tex == tex && x->tb[i].camera_ext) return x->tb[i].id;
+    return 0;
 }
-static void fbm_set(struct hctx *x, GLuint fbo, uint64_t id) {
-    int spare = -1;
-    for (int i = 0; i < 16; i++) {
-        if (x->fbm[i].fbo == fbo) { x->fbm[i].id = id; if (!id) x->fbm[i].fbo = 0; return; }
-        if (!x->fbm[i].fbo && spare < 0) spare = i;
+static void tb_set(struct hctx *x, GLuint tex, uint64_t id, int camera_ext) {
+    if (!tex) return;
+    int slot = -1;
+    for (int i = 0; i < 64; i++) {
+        if (x->tb[i].tex == tex) { slot = i; break; }
+        if (!x->tb[i].tex && slot < 0) slot = i;
     }
-    if (id && spare >= 0) { x->fbm[spare].fbo = fbo; x->fbm[spare].id = id; }
+    if (slot < 0) return;
+    x->tb[slot].tex = id ? tex : 0;
+    x->tb[slot].id = id;
+    x->tb[slot].camera_ext = id && camera_ext;
+}
+static void tb_drop_ext(struct hctx *x) {
+    GLuint tex = x->gext[x->unit];
+    if (tb_find_ext(x, tex)) tb_set(x, tex, 0, 0);
+}
+static void fbm_set(struct hctx *x, GLuint fbo, uint64_t id, GLuint camera_tex) {
+    int slot = -1;
+    for (int i = 0; i < 16; i++) {
+        if (x->fbm[i].fbo == fbo) { slot = i; break; }
+        if (!x->fbm[i].fbo && slot < 0) slot = i;
+    }
+    if (slot < 0) return;
+    x->fbm[slot].fbo = id || camera_tex ? fbo : 0;
+    x->fbm[slot].id = id;
+    x->fbm[slot].camera_tex = camera_tex;
+}
+static uint64_t fbm_buffer(struct hctx *x, GLuint fbo) {
+    for (int i = 0; i < 16; i++) if (x->fbm[i].fbo == fbo) {
+        /* A camera preview can replace an attached texture's EGLImage without reattaching it. */
+        GLuint tex = x->fbm[i].camera_tex;
+        return tex ? tb_find_ext(x, tex) : x->fbm[i].id;
+    }
+    return 0;
 }
 
 /* ---- the guest's framebuffer 0 ---- */
@@ -219,15 +242,22 @@ static void h_glBindFramebuffer(GLenum target, GLuint fb) {
     }
     glBindFramebuffer(target, real_fb(fb));
     /* drawing into a guest buffer is about to start: the host's copy becomes the newer one */
-    if (x && fb && target != GL_READ_FRAMEBUFFER) for (int i = 0; i < 16; i++) if (x->fbm[i].fbo == fb) { buf_mark(x->fbm[i].id); break; }
+    if (x && fb && target != GL_READ_FRAMEBUFFER) {
+        uint64_t id = fbm_buffer(x, fb);
+        if (id) buf_mark(id);
+    }
 }
 static void h_glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
     struct hctx *x = C->ctx;
+    int color = x && attachment == GL_COLOR_ATTACHMENT0;
+    GLuint fb = color ? (target == GL_READ_FRAMEBUFFER ? x->read_fb : x->draw_fb) : 0;
+    /* The host already represents this external camera EGLImage as a 2D texture. */
+    GLuint camera_tex = fb && textarget == GL_TEXTURE_EXTERNAL_OES && level == 0 && tb_find_ext(x, texture) ? texture : 0;
+    if (camera_tex) textarget = GL_TEXTURE_2D;
     glFramebufferTexture2D(target, attachment, textarget, texture, level);
-    if (!x || attachment != GL_COLOR_ATTACHMENT0) return;
-    GLuint fb = target == GL_READ_FRAMEBUFFER ? x->read_fb : x->draw_fb;
+    if (!color) return;
     uint64_t id = tb_find(x, texture);
-    if (fb) fbm_set(x, fb, id);
+    if (fb) fbm_set(x, fb, camera_tex ? 0 : id, camera_tex);
     if (id) buf_mark(id);
 }
 static void h_glDeleteFramebuffers(GLsizei n, const GLuint *ids) {
@@ -235,7 +265,7 @@ static void h_glDeleteFramebuffers(GLsizei n, const GLuint *ids) {
     glDeleteFramebuffers(n, ids);
     for (int i = 0; x && ids && i < n; i++) {
         if (!ids[i]) continue;
-        fbm_set(x, ids[i], 0);
+        fbm_set(x, ids[i], 0, 0);
         if (x->draw_fb == ids[i]) { x->draw_fb = 0; glBindFramebuffer(GL_DRAW_FRAMEBUFFER, real_fb(0)); }
         if (x->read_fb == ids[i]) { x->read_fb = 0; glBindFramebuffer(GL_READ_FRAMEBUFFER, real_fb(0)); }
     }
@@ -322,7 +352,11 @@ static void h_glGenerateMipmap(GLenum t) { glGenerateMipmap(xt(t)); }
 static void h_glDeleteTextures(GLsizei n, const GLuint *ids) {
     struct hctx *x = C->ctx;
     glDeleteTextures(n, ids);
-    for (int i = 0; x && ids && i < n; i++) if (ids[i]) tb_set(x, ids[i], 0);
+    for (int i = 0; x && ids && i < n; i++) if (ids[i]) {
+        tb_set(x, ids[i], 0, 0);
+        for (int j = 0; j < 16; j++) if (x->fbm[j].camera_tex == ids[i])
+            memset(&x->fbm[j], 0, sizeof x->fbm[j]);
+    }
     for (int i = 0; x && ids && i < n; i++) for (int u = 0; ids[i] && u < 32; u++) {
         if (x->g2d[u] == ids[i]) x->g2d[u] = 0;
         if (x->gext[u] == ids[i]) { x->gext[u] = 0; x->is_ext[u] = 0; }
@@ -1274,6 +1308,7 @@ static void hd_other(unsigned op, const uint8_t *p, uint32_t len) {
         GLenum target = rd32(&p); GLsizei w = (GLsizei)rd32(&p), h = (GLsizei)rd32(&p); uint32_t n; const void *d = rdblob(&p, &n);
         GLint row = 0, pbo = 0;
         if (!C->ctx || (target != GL_TEXTURE_2D && target != TEX_EXT) || !d) break;
+        if (target == TEX_EXT) tb_drop_ext(C->ctx);
         xt(target);
         glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row); glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &pbo);
         if (pbo) glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
@@ -1298,11 +1333,18 @@ static void hd_other(unsigned op, const uint8_t *p, uint32_t len) {
     }
     case OP_IMAGE_BIND: {
         GLenum target = rd32(&p); uint64_t id = rd64(&p), gen = rd64(&p); int w = (int)rd32(&p), h = (int)rd32(&p);
+        int camera_ext = !!(target & AEMU_IMAGE_BIND_CAMERA_FBO);
+        target &= ~AEMU_IMAGE_BIND_CAMERA_FBO;
+        camera_ext = camera_ext && target == TEX_EXT;
+        if (C->ctx && target == TEX_EXT) tb_drop_ext(C->ctx);
         struct hbuf *b = C->ctx && (target == GL_TEXTURE_2D || target == TEX_EXT) ? buf_get(id, w, h, 1) : 0;
         if (!b) { reply32(0); break; }
         xt(target);
         glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, b->img);
-        if (target == GL_TEXTURE_2D) tb_set(C->ctx, C->ctx->g2d[C->ctx->unit], id);
+        if (target == GL_TEXTURE_2D || camera_ext) {
+            GLuint tex = camera_ext ? C->ctx->gext[C->ctx->unit] : C->ctx->g2d[C->ctx->unit];
+            tb_set(C->ctx, tex, id, camera_ext);
+        }
         if (!b->frame) b->frame = 1;
         reply32(b->gen != gen);
         break;
@@ -1327,7 +1369,11 @@ static void hd_other(unsigned op, const uint8_t *p, uint32_t len) {
         pthread_mutex_lock(&g_lock);
         for (int i = 0; i < 256; i++) if (g_himg[i].id == id) { img = g_himg[i].img; break; }
         pthread_mutex_unlock(&g_lock);
-        if (C->ctx && img != EGL_NO_IMAGE_KHR && (target == GL_TEXTURE_2D || target == TEX_EXT)) { xt(target); glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, img); }
+        if (C->ctx && img != EGL_NO_IMAGE_KHR && (target == GL_TEXTURE_2D || target == TEX_EXT)) {
+            if (target == TEX_EXT) tb_drop_ext(C->ctx);
+            xt(target);
+            glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, img);
+        }
         break;
     }
     case OP_IMAGE_DESTROY: {
