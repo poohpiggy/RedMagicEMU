@@ -4,6 +4,8 @@
 
 <h1 align="center">RedMagicEMU</h1>
 
+**简体中文** · [繁體中文](README.zh-TW.md) · [English](README.en.md)
+
 RedMagicEMU 是一个独立维护的 Android 固件模拟器。当前支持导入 REDMAGIC NX809J 的原厂 Android 16（API 36、ARM64）固件，在 Android 宿主上运行原厂系统。宿主设备品牌不限。
 
 [下载 0.6.6-beta APK](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.6.6-beta)
