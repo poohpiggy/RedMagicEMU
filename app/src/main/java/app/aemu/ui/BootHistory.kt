@@ -24,6 +24,7 @@ internal class BootHistory(private val directory: File) {
     @Synchronized fun stopped(id: String) {
         if (previous(id) != Status.FAILED) write(id, Status.STOPPED)
     }
+    @Synchronized fun reset(id: String) = write(id, Status.STOPPED)
 
     private fun write(id: String, status: Status) {
         require('\n' !in id && '\r' !in id)

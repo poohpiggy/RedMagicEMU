@@ -5,7 +5,9 @@ import java.io.IOException
 import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import java.nio.file.NoSuchFileException
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributes
 
 /** Bounded writer for an app-private, exclusively owned extraction tree. */
 internal class SafeTreeWriter(
@@ -16,6 +18,7 @@ internal class SafeTreeWriter(
     private val availableBytes: (File) -> Long = { it.usableSpace },
 ) {
     private val base = root.canonicalFile.toPath()
+    private val copyBuffer = ByteArray(1024 * 1024)
     private var entries = 0L
     private var bytes = 0L
 
@@ -37,9 +40,12 @@ internal class SafeTreeWriter(
         var dir = base
         for (part in parts) {
             dir = dir.resolve(part)
-            if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) Files.createDirectory(dir)
-            if (!Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(dir))
-                throw IOException("Unsafe extraction directory")
+            try {
+                val attrs = Files.readAttributes(dir, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+                if (!attrs.isDirectory) throw IOException("Unsafe extraction directory")
+            } catch (_: NoSuchFileException) {
+                Files.createDirectory(dir)
+            }
         }
         return dir
     }
@@ -50,6 +56,16 @@ internal class SafeTreeWriter(
         if (entries >= maxEntries) throw IOException("Too many extracted entries")
         parent(parts)
         entries++
+    }
+
+    fun moveDirectoryIfPresent(source: String, destination: String) {
+        val sourceParts = components(source)
+        val from = parent(sourceParts.dropLast(1)).resolve(sourceParts.last())
+        if (Files.notExists(from, LinkOption.NOFOLLOW_LINKS)) return
+        if (!Files.isDirectory(from, LinkOption.NOFOLLOW_LINKS)) throw IOException("Unsafe staged partition")
+        val destinationParts = components(destination)
+        val to = parent(destinationParts.dropLast(1)).resolve(destinationParts.last())
+        Files.move(from, to)
     }
 
     fun write(name: String, size: Long, input: InputStream) {
@@ -63,16 +79,15 @@ internal class SafeTreeWriter(
         try {
             Files.newOutputStream(dst, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS).use { out ->
                 created = true
-                val buf = ByteArray(1024 * 1024)
                 var written = 0L
                 input.use { source ->
                     while (true) {
                         if (cancelled()) throw ImportCancelledException()
-                        val n = source.read(buf)
+                        val n = source.read(copyBuffer)
                         if (n < 0) break
                         if (n == 0) continue
                         if (n.toLong() > size - written) throw IOException("File exceeds declared size")
-                        out.write(buf, 0, n)
+                        out.write(copyBuffer, 0, n)
                         written += n
                     }
                 }

@@ -47,7 +47,7 @@ internal class FirstRingtoneInitStore internal constructor(
 
     init { require(ImageId.valid(id)) { "Invalid instance ID" } }
 
-    /** Only call while creating a proven-new instance, before its publication. */
+    /** Only call for new or reset Guest data, before any Guest writer can start. */
     fun createFresh() {
         io.verifyIdentity()
         if (listOf(FRESH_FILE, CLAIM_FILE, DONE_FILE).any(io::exists)) throw IOException("State already exists")

@@ -4,7 +4,7 @@
 
 前提尚未证明：实际 zygote 是否能以可信方式报告子进程及其 Guest UID；Guest 中同宿主 UID 的进程能否影响 zygote、Binder 或权限数据；目标 Android 宿主能否按此方式访问相应 `/proc` 节点；进程重启、PID 复用与并发期间的完整生命周期。**这些未解决前不得接入产品，也不得据此宣称权限隔离。**
 
-本仓库此前对一台设备记录了普通应用 UID 的 pidfd 启动探针及 Guest 内 SO_PASSCRED 的自造父子进程实验（见 `docs/PROGRESS.md`），这不证明本诊断的整个组合可在 Android 宿主运行。以下命令仅运行本机 Linux 上的独立测试：
+以下命令在 Linux 上运行父子关系测试：
 
 ```sh
 gcc -std=gnu11 -Wall -Wextra -Werror tools/diagnostics/parentage/parentage.c tools/diagnostics/parentage/parentage_test.c -o /tmp/rme_parentage_test

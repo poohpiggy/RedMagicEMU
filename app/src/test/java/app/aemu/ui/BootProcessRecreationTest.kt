@@ -35,6 +35,15 @@ class BootProcessRecreationTest {
         history.stopped("target")
         assertEquals(BootHistory.Status.FAILED, history.previous("target"))
     }
+
+    @Test fun resettingDataAllowsFreshBootAfterPreviousFailure() {
+        val path = temp.newFolder()
+        val history = BootHistory(path)
+        history.starting("target")
+        history.failed("target")
+        history.reset("target")
+        assertNull(BootHistory(path).previous("target"))
+    }
     @Test fun failureAfterPageListenerIsRemovedIsStillRecorded() {
         val path = temp.newFolder()
         val history = BootHistory(path)

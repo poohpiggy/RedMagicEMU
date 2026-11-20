@@ -1,0 +1,12 @@
+--- a/guest/vulkan/gfxstream_vk_device.cpp
++++ b/guest/vulkan/gfxstream_vk_device.cpp
+@@ -43,6 +43,9 @@
+ // Provided by Mesa components only; never encoded/decoded through gfxstream
+ static const char* const kMesaOnlyInstanceExtension[] = {
+     VK_KHR_SURFACE_EXTENSION_NAME,
++#if defined(VK_USE_PLATFORM_ANDROID_KHR)
++    VK_KHR_ANDROID_SURFACE_EXTENSION_NAME,
++#endif
+ #if defined(LINUX_GUEST_BUILD) && defined(VK_USE_PLATFORM_WAYLAND_KHR)
+     VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME,
+ #endif

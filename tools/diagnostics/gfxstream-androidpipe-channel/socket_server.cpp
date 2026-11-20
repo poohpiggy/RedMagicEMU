@@ -33,6 +33,7 @@ struct SocketServer::Impl {
     std::shared_ptr<const Principal> principal;
     SocketServer::Drain drain;
     std::vector<std::unique_ptr<SocketSession>> clients;
+    std::vector<pollfd> pollFds;
     bool perProcess = false;
     std::map<pid_t, Peer> peers;
     Impl(Device& d, int fd, PeerAuthorization a, void* o,
@@ -119,10 +120,17 @@ bool SocketServer::runOnce(int timeout_ms) {
     auto& s = *impl_;
     if (timeout_ms < -1 || s.listener < 0 || s.device.wakeupFd() < 0) return false;
     bool immediate = false;
-    std::vector<pollfd> fds{{s.listener, POLLIN, 0}, {s.device.wakeupFd(), POLLIN, 0}};
+    auto& fds = s.pollFds;
+    fds.clear();
+    fds.push_back({s.listener, POLLIN, 0});
+    fds.push_back({s.device.wakeupFd(), POLLIN, 0});
     for (auto& client : s.clients) {
         fds.push_back({client->fd(), client->events(), 0});
         immediate = client->needsPump() || immediate;
+    }
+    size_t peerFd = fds.size();
+    for (const auto& entry : s.peers) {
+        fds.push_back({entry.second.pidfd, POLLIN, 0});
     }
     int n;
     do { n = poll(fds.data(), fds.size(), immediate ? 0 : timeout_ms); } while (n < 0 && errno == EINTR);
@@ -132,7 +140,8 @@ bool SocketServer::runOnce(int timeout_ms) {
     for (size_t i = s.clients.size(); i > 0; --i) {
         size_t index = i - 1;
         auto& client = s.clients[index];
-        if ((fds[index + 2].revents || fds[1].revents || client->needsPump()) && !client->pump()) {
+        const auto events = fds[index + 2].revents;
+        if ((events || fds[1].revents || client->needsPump()) && !client->pump(events)) {
             if (client->ownsProcessPipe()) {
                 if (!s.perProcess) {
                     s.shutdown();
@@ -147,7 +156,8 @@ bool SocketServer::runOnce(int timeout_ms) {
     for (auto it = s.peers.begin(); it != s.peers.end();) {
         const auto pid = it->first;
         auto& peer = it->second;
-        if (peer.retiring || !peer.live() || std::none_of(s.clients.begin(), s.clients.end(),
+        const bool exited = fds[peerFd++].revents != 0;
+        if (peer.retiring || exited || std::none_of(s.clients.begin(), s.clients.end(),
             [pid](const auto& client) { return client->peer().pid == pid; })) {
             s.retire(pid, peer);
             it = s.peers.erase(it);

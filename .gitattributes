@@ -3,3 +3,9 @@
 
 # Preserve the verified GPU bundle bytes on all platforms.
 native/gpu-runtime/android/** -text
+native/videobridge/android/** -text
+
+# These engine files are packed and compared byte for byte.
+app/src/main/assets/engines/history/n64-gsi-names.txt text eol=lf
+app/src/main/assets/engines/history/n64-kernel-names.txt text eol=lf
+app/src/main/assets/engines/redmagic/radio-manifest.xml text eol=lf

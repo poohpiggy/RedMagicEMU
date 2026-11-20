@@ -13,7 +13,7 @@ enum {
     OP_HELLO = 0x4000,      /* u32 protocol -> u32 protocol (0: refused) */
     OP_CTX_CREATE,          /* u32 share, u32 version -> u32 context (0: failed) */
     OP_CTX_DESTROY,         /* u32 context */
-    OP_MAKE_CURRENT,        /* u32 context, u32 surface key, u32 w, u32 h, u32 samples (of the surface's config) -> u32 ok */
+    OP_MAKE_CURRENT,        /* u32 context, u32 surface key, u32 w, u32 h, optional u32 samples, u32 color-only -> u32 ok */
     OP_RELEASE,             /* -> u32 ok */
     OP_SURF_SIZE,           /* u32 w, u32 h: the current surface */
     OP_SURF_DESTROY,        /* u32 surface key: of the current context */

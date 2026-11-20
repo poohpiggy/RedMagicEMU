@@ -17,6 +17,7 @@ class StrictChannelSourceTest {
                 val src = StrictChannelSource(ch)
                 val dst = ByteBuffer.allocate(2); src.read(1, dst)
                 assertArrayEquals(byteArrayOf(2, 3), dst.array())
+                assertEquals(0L, ch.position())
                 assertThrows(IOException::class.java) { src.read(2, ByteBuffer.allocate(2)) }
                 assertThrows(IOException::class.java) { src.read(-1, ByteBuffer.allocate(1)) }
             }

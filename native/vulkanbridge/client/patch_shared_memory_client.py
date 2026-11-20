@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build the shared-memory tracker and encoder for the paired EMU client."""
 
+import os
 from pathlib import Path
 import shlex
 import shutil
@@ -205,6 +206,11 @@ for name, handle, operation in (
     }}
     return {result};""")
 (patched / "VkEncoder.cpp").write_text(encoder)
+
+if os.environ.get("RME_VULKAN_SCOPED_DMA_SYNC") == "1":
+    from patch_scoped_dma_sync import apply
+
+    apply(patched)
 
 for name in ("ResourceTracker", "VkEncoder"):
     cmd = shlex.split((original / f"android1-{name}.command.txt").read_text())

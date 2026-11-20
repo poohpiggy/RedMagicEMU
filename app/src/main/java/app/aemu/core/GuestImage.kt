@@ -10,6 +10,8 @@ data class VmSettings(
     val density: Int = 240,
     /** аппаратная отрисовка через GPU телефона (иначе программный растеризатор прошивки) */
     val gpu: Boolean = true,
+    val vulkan: Boolean = true,
+    val openCl: Boolean = true,
     /** hwui в гостевых приложениях (4.x) */
     val hwui: Boolean = true,
     /** JIT Dalvik; без него стабильнее, но медленнее */
@@ -61,6 +63,7 @@ data class VmSettings(
     fun toJson(): JSONObject = JSONObject()
         .put("width", width).put("height", height).put("density", density)
         .put("gpu", gpu).put("hwui", hwui).put("jit", jit).put("fullDexopt", fullDexopt).put("fbHz", fbHz)
+        .put("vulkan", vulkan).put("openCl", openCl)
         .put("touchHz", touchHz).put("netProxy", netProxy).put("lowRam", lowRam)
         .put("showFrame", showFrame).put("showNavBar", showNavBar).put("navKeys", navKeys).put("navSize", navSize)
         .put("keepScreenOn", keepScreenOn).put("vsync", vsync).put("showLed", showLed)
@@ -86,6 +89,8 @@ data class VmSettings(
                 height = o.optInt("height", d.height),
                 density = o.optInt("density", d.density),
                 gpu = o.optBoolean("gpu", d.gpu),
+                vulkan = o.optBoolean("vulkan", d.vulkan),
+                openCl = o.optBoolean("openCl", d.openCl),
                 hwui = o.optBoolean("hwui", d.hwui),
                 jit = o.optBoolean("jit", d.jit),
                 fullDexopt = o.optBoolean("fullDexopt", d.fullDexopt),

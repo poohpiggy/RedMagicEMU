@@ -61,6 +61,58 @@ class TargetTreeTest {
         } finally { root.deleteRecursively() }
     }
 
+    @Test fun earlyPartitionsReplaceSystemMountsAfterHoisting() {
+        val root = Files.createTempDirectory("target-early-mounts").toFile()
+        try {
+            val target = TargetTree(root, { false })
+            var readEarly = false
+            val product = object : TreeSource {
+                override fun walk(visit: (String, Boolean, String?, Int, Long, (() -> java.io.InputStream)?) -> Unit) {
+                    visit("config", false, null, 0x81a4, 1) {
+                        readEarly = true
+                        ByteArrayInputStream(byteArrayOf(7))
+                    }
+                }
+            }
+            target.partition("odm", tree("config" to byteArrayOf(6)))
+            target.partition("product", product)
+            assertTrue(readEarly)
+            target.partition("system", tree(
+                "system/build.prop" to byteArrayOf(1),
+                "odm/hidden" to byteArrayOf(2),
+                "system/product/hidden" to byteArrayOf(3),
+            ))
+            target.finish(emptyList())
+            assertArrayEquals(byteArrayOf(1), root.resolve("system/build.prop").readBytes())
+            assertArrayEquals(byteArrayOf(6), root.resolve("odm/config").readBytes())
+            assertArrayEquals(byteArrayOf(7), root.resolve("system/product/config").readBytes())
+            assertFalse(root.resolve("odm/hidden").exists())
+            assertFalse(root.resolve("system/product/hidden").exists())
+            assertEquals(listOf("odm", "system"), root.list()!!.sorted())
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun earlyPartitionLinksAreResolvedAtTheirFinalMountPath() {
+        val root = Files.createTempDirectory("target-early-links").toFile()
+        try {
+            val probe = root.resolve("probe").toPath()
+            try { Files.createSymbolicLink(probe, java.nio.file.Paths.get("missing")); Files.delete(probe) }
+            catch (e: java.nio.file.FileSystemException) { org.junit.Assume.assumeNoException(e) }
+            val target = TargetTree(root, { false })
+            val product = object : TreeSource {
+                override fun walk(visit: (String, Boolean, String?, Int, Long, (() -> java.io.InputStream)?) -> Unit) {
+                    visit("prop_link", false, "/system/build.prop", 0xa1ff, 0, null)
+                }
+            }
+            target.partition("product", product)
+            target.partition("system", tree("system/build.prop" to byteArrayOf(4)))
+            target.finish(emptyList())
+            val link = root.resolve("system/product/prop_link")
+            assertTrue(Files.isSymbolicLink(link.toPath()))
+            assertArrayEquals(byteArrayOf(4), link.readBytes())
+        } finally { root.deleteRecursively() }
+    }
+
     @Test fun importedModeMakesRegularFilesReadableToGuest() {
         val root = Files.createTempDirectory("target-mode")
         try {

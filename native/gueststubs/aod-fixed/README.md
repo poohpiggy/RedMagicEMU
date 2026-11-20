@@ -3,8 +3,7 @@
 The emulator can stage a proxy built from these sources for a freshly imported,
 verified NX809J `IP_MC_W_CN` instance. It applies only to the one investigated
 theme input described below; other inputs follow the failure or original-library
-path. The original APK is retained. See [the AOD record](../../../docs/AOD_THEME_CACHE.md)
-for runtime evidence, limitations, and rollback.
+path. The original APK is retained for rollback.
 The proxy does not hold its state mutex while calling vendor code or JNI. A
 generation counter and an immutable mask snapshot prevent an in-flight fixed
 result from reviving state after release or a newer initialization. They do

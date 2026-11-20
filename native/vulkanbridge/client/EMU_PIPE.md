@@ -91,13 +91,25 @@ Set `RME_VULKAN_SHARED_MEMORY=cached` for the Geekbench compute test. The
 Guest maps CPU-cached shared pages. Flush and invalidate calls synchronize
 those pages with native Vulkan allocations, using the Adreno buffer's own
 memory requirements. Set `RME_VULKAN_SHARED_MEMORY=1` to exercise the separate
-Adreno AHardwareBuffer BLOB export.
+Adreno path that allocates Android BLOBs and imports them into Vulkan. In this
+mode, buffers created with the internal BLOB handle type report only the
+compatible mapped memory type. Normal images and other buffers exclude that
+type.
 Build `guest_public_vulkan_probe.c` with `-DRME_TEST_MAPPED_MEMORY` and
 `-DRME_TEST_INSTANCE_EXTENSIONS` to check Vulkan extension enumeration and
 read/write mapping. Run it with `--guest-probe` and pass the path of the public
 client as the final argument. Add `-DRME_TEST_CACHED_MEMORY` for the cached
 mode. The probe then copies through a device-local buffer and checks both
-mapped buffers after a GPU fence.
+mapped buffers after a GPU fence. Use `-DRME_TEST_COHERENT_DEVICE_LOCAL`
+instead of `-DRME_TEST_CACHED_MEMORY` to exercise the same transfer without
+explicit flush or invalidate calls and compare the two buffer requirement APIs.
+
+Set `RME_VULKAN_SCOPED_DMA_SYNC=1` when running `patch_shared_memory_client.py`
+to enable scoped DMA-BUF transitions. A batch of legacy transfer commands
+without semaphore dependencies ends CPU access only for its bound memory.
+Draws, dispatches, secondary command buffers, unresolved bindings and
+semaphore dependencies use full synchronization. Fence and queue completion
+preserve the existing CPU-access transitions.
 
 `stage_guest_vulkan_runtime.py ADB SERIAL GUEST_ROOT BUNDLE` temporarily stages
 the public client from `libRmePublicVulkan.so` and its client-only dependencies in
@@ -110,7 +122,8 @@ The debug renderer can listen before an app starts with
 verified native Guest app PID as a decimal line on stdin. The listener admits
 only that live PID and the EMU UID. Send `Q` on stdin to release the session.
 The physical Adreno BLOB layout and mapped buffer data path were checked on the
-test phone. Other export layouts and workloads need separate verification.
+test phone. Full synchronization on this path scales with the total mapped
+allocations. Other layouts and workloads need separate verification.
 
 ## Normal APK with the GPU bridge
 

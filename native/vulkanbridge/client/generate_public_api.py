@@ -17,6 +17,12 @@ EXTENSIONS = (
 )
 GLOBALS = {"vkCreateInstance", "vkEnumerateInstanceExtensionProperties",
            "vkEnumerateInstanceLayerProperties", "vkEnumerateInstanceVersion"}
+TRACE_RESULTS = {"vkCreateDevice", "vkEnumeratePhysicalDevices", "vkEnumerateDeviceExtensionProperties",
+                 "vkCreateImage", "vkCreateBuffer", "vkAllocateMemory", "vkCreateGraphicsPipelines",
+                 "vkCreateFence", "vkCreateSemaphore", "vkCreatePipelineCache", "vkCreateRenderPass",
+                 "vkCreateQueryPool", "vkCreateCommandPool", "vkCreateImageView"}
+TRACE_LOOKUPS = TRACE_RESULTS | {"vkGetDeviceQueue", "vkGetDeviceQueue2", "vkGetPhysicalDeviceFormatProperties",
+                                "vkGetPhysicalDeviceImageFormatProperties"}
 
 
 def vulkan(element):
@@ -128,21 +134,46 @@ def main(registry, trampolines, output, promotions=None):
            '#undef vk_physical_device_trampolines', '#undef vk_device_trampolines',
            '#include "vk_instance.h"', '#include "gfxstream_vk_entrypoints.h"', '#include "android_surface.h"',
            '#include "android_swapchain_object.h"',
+           '#ifdef RME_TEST_ANDROID_READBACK_WSI', '#include "android_readback_wsi.h"', '#endif',
            '#ifdef RME_EXPERIMENTAL_REMOTE_SURFACE', '#include "android_remote_swapchain.h"', '#endif',
            '#define RME_EXPORT __attribute__((visibility("default")))',
            '#ifdef RME_TRACE_VULKAN_PROCS',
            '#include <stdio.h>',
+           '#include <unistd.h>',
            'static PFN_vkVoidFunction rme_trace_proc(const char *kind, const char *name, PFN_vkVoidFunction result) {',
            '    fprintf(stderr, "RME_VK_PROC %s %s %s\\n", kind, name ? name : "(null)", result ? "found" : "missing");',
            '    return result;',
            '}',
-           'static VkResult rme_trace_create(VkResult result) {',
-           '    fprintf(stderr, "RME_VK_CREATE_INSTANCE result=%d\\n", result);',
+           'static VkResult rme_trace_create(const VkInstanceCreateInfo *info, VkResult result) {',
+           '    const VkApplicationInfo *app = info->pApplicationInfo;',
+           '    fprintf(stderr, "RME_VK_CREATE_INSTANCE result=%d pid=%d tid=%d app=%.48s\\n",',
+           '        result, getpid(), gettid(), app && app->pApplicationName ? app->pApplicationName : "");',
+           '    return result;',
+           '}',
+           'static VkResult rme_trace_result(const char *name, VkResult result) {',
+           '    fprintf(stderr, "RME_VK_RESULT %s result=%d pid=%d tid=%d\\n", name, result, getpid(), gettid());',
+           '    return result;',
+           '}',
+           'static void rme_trace_queue(const char *name, VkQueue queue) {',
+           '    fprintf(stderr, "RME_VK_QUEUE %s %s pid=%d tid=%d\\n", name, queue ? "found" : "null", getpid(), gettid());',
+           '}',
+           'static void rme_trace_format(VkFormat format, const VkFormatProperties *props) {',
+           '    fprintf(stderr, "RME_VK_FORMAT %d linear=%x optimal=%x buffer=%x pid=%d tid=%d\\n",',
+           '        format, props->linearTilingFeatures, props->optimalTilingFeatures, props->bufferFeatures, getpid(), gettid());',
+           '}',
+           'static VkResult rme_trace_image_format(VkFormat format, VkImageType type, VkImageTiling tiling,',
+           '    VkImageUsageFlags usage, VkImageCreateFlags flags, const VkImageFormatProperties *props, VkResult result) {',
+           '    fprintf(stderr, "RME_VK_IMAGE_FORMAT %d type=%d tiling=%d usage=%x flags=%x result=%d samples=%x pid=%d tid=%d\\n",',
+           '        format, type, tiling, usage, flags, result, result == VK_SUCCESS ? props->sampleCounts : 0, getpid(), gettid());',
            '    return result;',
            '}',
            '#else',
            '#define rme_trace_proc(kind, name, result) (result)',
-           '#define rme_trace_create(result) (result)',
+           '#define rme_trace_create(info, result) (result)',
+           '#define rme_trace_result(name, result) (result)',
+           '#define rme_trace_queue(name, queue) ((void)0)',
+           '#define rme_trace_format(format, props) ((void)0)',
+           '#define rme_trace_image_format(format, type, tiling, usage, flags, props, result) (result)',
            '#endif',
            'static int rme_is_swapchain_proc(const char *name) {',
            '    if (!name) return 0;',
@@ -154,6 +185,23 @@ def main(registry, trampolines, output, promotions=None):
            '        if (!strcmp(name, names[i])) return 1;',
            '    return 0;',
            '}', '']
+    trace_lookup = ['#ifdef RME_TRACE_VULKAN_PROCS'] + [
+        f'    if (!strcmp(pName, "{name}")) return (PFN_vkVoidFunction)&{name};'
+        for name in sorted(TRACE_LOOKUPS & names.keys())
+    ] + ['#endif']
+    readback_calls = {
+        "vkGetPhysicalDeviceSurfaceSupportKHR": ("rme_android_surface_owned_vk(surface)", "rme_readback_support(physicalDevice, queueFamilyIndex, surface, pSupported)"),
+        "vkGetPhysicalDeviceSurfaceCapabilitiesKHR": ("rme_android_surface_owned_vk(surface)", "rme_readback_capabilities(physicalDevice, surface, pSurfaceCapabilities)"),
+        "vkGetPhysicalDeviceSurfaceFormatsKHR": ("rme_android_surface_owned_vk(surface)", "rme_readback_formats(physicalDevice, surface, pSurfaceFormatCount, pSurfaceFormats)"),
+        "vkGetPhysicalDeviceSurfacePresentModesKHR": ("rme_android_surface_owned_vk(surface)", "rme_readback_modes(physicalDevice, surface, pPresentModeCount, pPresentModes)"),
+        "vkCreateSwapchainKHR": ("rme_android_surface_owned_vk(pCreateInfo->surface)", "rme_readback_create(device, pCreateInfo, pAllocator, pSwapchain)"),
+    }
+    readback_dispatch = {
+        "vkGetSwapchainImagesKHR": "rme_readback_images(swapchain, pSwapchainImageCount, pSwapchainImages, &readback)",
+        "vkAcquireNextImageKHR": "rme_readback_acquire(swapchain, timeout, semaphore, fence, pImageIndex, &readback)",
+        "vkAcquireNextImage2KHR": "pAcquireInfo->deviceMask == 1 && rme_readback_acquire(pAcquireInfo->swapchain, pAcquireInfo->timeout, pAcquireInfo->semaphore, pAcquireInfo->fence, pImageIndex, &readback)",
+        "vkQueuePresentKHR": "rme_readback_present(queue, pPresentInfo, &readback)",
+    }
     for name, guard in names.items():
         node = definitions[promoted.get(name, name)]
         canonical = promoted.get(name, name)
@@ -170,6 +218,12 @@ def main(registry, trampolines, output, promotions=None):
             out.append("#ifdef " + guard)
         out.append(f"RME_EXPORT VKAPI_ATTR {ret} VKAPI_CALL {name}({declaration})")
         out.append("{")
+        if name in readback_calls:
+            condition, call = readback_calls[name]
+            out.extend(("#ifdef RME_TEST_ANDROID_READBACK_WSI", f'    if ({condition}) return rme_trace_result("{name}", {call});', "#endif"))
+        if name in readback_dispatch:
+            out.extend(("#ifdef RME_TEST_ANDROID_READBACK_WSI", "    VkResult readback;",
+                        f"    if ({readback_dispatch[name]}) return readback;", "#endif"))
         if name == "vkDestroyInstance":
             out.append("    if (instance == VK_NULL_HANDLE) return;")
         elif name == "vkDestroyDevice":
@@ -184,6 +238,7 @@ def main(registry, trampolines, output, promotions=None):
             out.append("    if (rme_android_surface_destroy_vk(surface)) return;")
         elif name == "vkDestroySwapchainKHR":
             out.append("    if (swapchain == VK_NULL_HANDLE) return;")
+            out.extend(("#ifdef RME_TEST_ANDROID_READBACK_WSI", "    if (rme_readback_destroy(swapchain)) return;", "#endif"))
             out.append("    if (rme_swapchain_destroy_vk(swapchain)) return;")
             out.append("#ifdef RME_EXPERIMENTAL_REMOTE_SURFACE")
             out.append("    VkInstance rme_owner;")
@@ -223,6 +278,7 @@ def main(registry, trampolines, output, promotions=None):
                 '#endif',
                 '    PFN_vkVoidFunction result = rme_trace_proc("instance", pName, gfxstream_vk_GetInstanceProcAddr(instance, pName));',
                 '    if (!result || !pName) return result;',
+                *trace_lookup,
                 '    if (!strcmp(pName, "vkGetDeviceProcAddr")) return (PFN_vkVoidFunction)&vkGetDeviceProcAddr;',
                 '    if (!strcmp(pName, "vkDestroySurfaceKHR")) return (PFN_vkVoidFunction)&vkDestroySurfaceKHR;',
                 '    if (!strcmp(pName, "vkGetPhysicalDeviceSurfaceSupportKHR")) return (PFN_vkVoidFunction)&vkGetPhysicalDeviceSurfaceSupportKHR;',
@@ -239,9 +295,12 @@ def main(registry, trampolines, output, promotions=None):
             ]
         elif name == "vkGetDeviceProcAddr":
             out += [
+                '#ifndef RME_TEST_ANDROID_READBACK_WSI',
                 '    if (rme_is_swapchain_proc(pName) && !rme_swapchain_ready()) return NULL;',
+                '#endif',
                 '    PFN_vkVoidFunction result = rme_trace_proc("device", pName, vk_tramp_GetDeviceProcAddr(device, pName));',
                 '    if (!result || !pName) return result;',
+                *trace_lookup,
                 '    if (!strcmp(pName, "vkCreateSwapchainKHR")) return (PFN_vkVoidFunction)&vkCreateSwapchainKHR;',
                 '    if (!strcmp(pName, "vkDestroySwapchainKHR")) return (PFN_vkVoidFunction)&vkDestroySwapchainKHR;',
                 '    if (!strcmp(pName, "vkGetSwapchainImagesKHR")) return (PFN_vkVoidFunction)&vkGetSwapchainImagesKHR;',
@@ -256,7 +315,7 @@ def main(registry, trampolines, output, promotions=None):
             out.append("    if (rme_android_surface_wire_ready(instance))")
             out.append("        return rme_android_surface_create_encoded_vk(instance, pCreateInfo->window, pAllocator ? pAllocator : &rme_instance->alloc, pSurface);")
             out.append("#endif")
-            out.append("    return rme_android_surface_create_vk(pCreateInfo->window, pAllocator ? pAllocator : &rme_instance->alloc, pSurface);")
+            out.append('    return rme_trace_result("vkCreateAndroidSurfaceKHR", rme_android_surface_create_vk(pCreateInfo->window, pAllocator ? pAllocator : &rme_instance->alloc, pSurface));')
         elif name == "vkGetPhysicalDeviceSurfaceSupportKHR":
             out.append("#ifdef RME_EXPERIMENTAL_REMOTE_SURFACE")
             out.append("    VkInstance rme_owner; VkSurfaceKHR rme_remote;")
@@ -349,7 +408,7 @@ def main(registry, trampolines, output, promotions=None):
             out.append("    return vk_tramp_QueuePresentKHR(queue, pPresentInfo);")
         else:
             if name == "vkCreateInstance":
-                call = f"rme_trace_create(gfxstream_vk_CreateInstance({args}))"
+                call = f"rme_trace_create(pCreateInfo, gfxstream_vk_CreateInstance({args}))"
             elif name in GLOBALS:
                 call = f"gfxstream_vk_{name[2:]}({args})"
             elif first == "VkInstance":
@@ -360,6 +419,16 @@ def main(registry, trampolines, output, promotions=None):
                 if suffix not in available:
                     raise ValueError(f"missing Mesa trampoline: {name} ({canonical})")
                 call = f"vk_tramp_{suffix}({args})"
+            if name in TRACE_RESULTS:
+                call = f'rme_trace_result("{name}", {call})'
+            elif name in {"vkGetDeviceQueue", "vkGetDeviceQueue2"}:
+                out.append(f"    {call};")
+                call = f'rme_trace_queue("{name}", *pQueue)'
+            elif name == "vkGetPhysicalDeviceFormatProperties":
+                out.append(f"    {call};")
+                call = "rme_trace_format(format, pFormatProperties)"
+            elif name == "vkGetPhysicalDeviceImageFormatProperties":
+                call = f"rme_trace_image_format(format, type, tiling, usage, flags, pImageFormatProperties, {call})"
             out.append(f"    {'return ' if ret != 'void' else ''}{call};")
         out.append("}")
         if guard:

@@ -50,6 +50,8 @@ for test in socket_test socket_server_test; do
         -Wl,--export-dynamic -lgfxstream_backend -laemu-host-common -laemu-base -laemu-logging -pthread -o "$out/$test"
     "$out/$test"
 done
+"$cxx" -std=c++17 -Wall -Wextra -Werror "$here/vulkan_socket_test.cpp" -pthread -o "$out/vulkan_socket_test"
+"$out/vulkan_socket_test"
 python3 - "$here/../../../native/hwchal/hwc.c" "$out/hwc_query.inc" <<'PY'
 from pathlib import Path
 import sys

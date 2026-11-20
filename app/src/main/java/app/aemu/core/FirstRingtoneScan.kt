@@ -1,8 +1,8 @@
 package app.aemu.core
 
 /**
- * One first-instance attempt. The caller must create the fresh marker only for a
- * new instance and ensure its default external volume is authorized to scan.
+ * One first-instance attempt. The caller creates the fresh marker only for new
+ * or reset Guest data and verifies the default external volume is authorized to scan.
  * The marker does not protect a user's concurrent ringtone changes. A timeout
  * does not prove that the provider has stopped its work.
  */

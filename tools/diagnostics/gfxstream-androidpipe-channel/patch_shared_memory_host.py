@@ -2,6 +2,7 @@
 """Apply the AndroidPipe shared-memory experiment to the paired host source."""
 
 from pathlib import Path
+import re
 import sys
 
 source, output = map(Path, sys.argv[1:])
@@ -70,15 +71,47 @@ replace('    void on_vkGetPhysicalDeviceMemoryProperties(\n', '''    static uint
         }
     }
 
-    static bool exportSharedMemory(VulkanDispatch* vk, VkDevice device, VkDeviceMemory native,
-                                   VkDeviceSize size, uint64_t owner, uint64_t boxed) {
-        auto exportBuffer = reinterpret_cast<PFN_vkGetMemoryAndroidHardwareBufferANDROID>(
-            vk->vkGetDeviceProcAddr(device, "vkGetMemoryAndroidHardwareBufferANDROID"));
-        if (!exportBuffer) return false;
-        VkMemoryGetAndroidHardwareBufferInfoANDROID request{
-            VK_STRUCTURE_TYPE_MEMORY_GET_ANDROID_HARDWARE_BUFFER_INFO_ANDROID, nullptr, native};
-        AHardwareBuffer* buffer = nullptr;
-        if (exportBuffer(device, &request, &buffer) != VK_SUCCESS || !buffer) return false;
+    static void restrictBlobMemoryTypes(VkMemoryRequirements* requirements,
+                                        const EmulatedPhysicalDeviceMemoryProperties& translation,
+                                        bool usesBlob) {
+        if (!sharedMemoryOwner() || !rme::sharedMemoryUsesHardwareBuffer()) return;
+        const auto blobType = sharedMemoryType(translation.getHostMemoryProperties());
+        if (blobType != UINT32_MAX) {
+            const uint32_t mask = uint32_t{1} << blobType;
+            requirements->memoryTypeBits &= usesBlob ? mask : ~mask;
+        }
+    }
+
+    static VkResult allocateSharedBlob(VulkanDispatch* vk, VkDevice device,
+                                       VkMemoryAllocateInfo* alloc, AHardwareBuffer** out) {
+        if (!alloc->allocationSize || alloc->allocationSize > UINT32_MAX) {
+            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        }
+        auto getProperties = reinterpret_cast<PFN_vkGetAndroidHardwareBufferPropertiesANDROID>(
+            vk->vkGetDeviceProcAddr(device, "vkGetAndroidHardwareBufferPropertiesANDROID"));
+        if (!getProperties) return VK_ERROR_EXTENSION_NOT_PRESENT;
+        AHardwareBuffer_Desc desc{};
+        desc.width = static_cast<uint32_t>(alloc->allocationSize);
+        desc.height = 1;
+        desc.layers = 1;
+        desc.format = AHARDWAREBUFFER_FORMAT_BLOB;
+        desc.usage = AHARDWAREBUFFER_USAGE_GPU_DATA_BUFFER | AHARDWAREBUFFER_USAGE_CPU_READ_RARELY |
+                     AHARDWAREBUFFER_USAGE_CPU_WRITE_RARELY;
+        if (AHardwareBuffer_allocate(&desc, out) != 0) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        VkAndroidHardwareBufferPropertiesANDROID props{
+            VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID};
+        VkResult result = getProperties(device, *out, &props);
+        if (result != VK_SUCCESS) return result;
+        if (props.allocationSize < alloc->allocationSize ||
+            !(props.memoryTypeBits & (uint32_t{1} << alloc->memoryTypeIndex))) {
+            return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+        }
+        alloc->allocationSize = props.allocationSize;
+        return VK_SUCCESS;
+    }
+
+    static bool publishSharedBlob(AHardwareBuffer* buffer, VkDeviceSize size,
+                                  uint64_t owner, uint64_t boxed) {
         AHardwareBuffer_Desc desc{};
         AHardwareBuffer_describe(buffer, &desc);
         using GetHandle = const native_handle_t* (*)(const AHardwareBuffer*);
@@ -86,19 +119,16 @@ replace('    void on_vkGetPhysicalDeviceMemoryProperties(\n', '''    static uint
             dlsym(RTLD_DEFAULT, "AHardwareBuffer_getNativeHandle"));
         const auto* handle = getHandle ? getHandle(buffer) : nullptr;
         // The validated Adreno BLOB layout contains data and metadata fds.
-        bool published = false;
-        if (desc.format == AHARDWAREBUFFER_FORMAT_BLOB && desc.width == size &&
-            desc.height == 1 && desc.layers == 1 &&
-            (desc.usage & AHARDWAREBUFFER_USAGE_GPU_DATA_BUFFER) &&
-            handle && handle->numFds == 2 && handle->numInts == 26) {
-            const auto bytes = lseek(handle->data[0], 0, SEEK_END);
-            if (bytes > 0 && static_cast<VkDeviceSize>(bytes) >= size) {
-                lseek(handle->data[0], 0, SEEK_SET);
-                published = rme::publishSharedMemory(owner, boxed, handle->data[0]);
-            }
+        if (desc.format != AHARDWAREBUFFER_FORMAT_BLOB || desc.width < size ||
+            desc.height != 1 || desc.layers != 1 ||
+            !(desc.usage & AHARDWAREBUFFER_USAGE_GPU_DATA_BUFFER) ||
+            !handle || handle->numFds != 2 || handle->numInts != 26) {
+            return false;
         }
-        AHardwareBuffer_release(buffer);
-        return published;
+        const auto bytes = lseek(handle->data[0], 0, SEEK_END);
+        if (bytes < 0 || static_cast<VkDeviceSize>(bytes) < size) return false;
+        return lseek(handle->data[0], 0, SEEK_SET) == 0 &&
+               rme::publishSharedMemory(owner, boxed, handle->data[0]);
     }
 
     void on_vkGetPhysicalDeviceMemoryProperties(
@@ -144,7 +174,10 @@ replace('        VkResult result = vk->vkCreateBuffer(device, pCreateInfo, pAllo
                 pCreateInfo->usage, VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID};
             VkExternalBufferProperties props{VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES};
             m_vk->vkGetPhysicalDeviceExternalBufferProperties(*physical, &request, &props);
-            if (props.externalMemoryProperties.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT) {
+            const auto& memory = props.externalMemoryProperties;
+            if ((memory.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) &&
+                !(memory.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) &&
+                (memory.compatibleHandleTypes & request.handleType)) {
                 localCreateInfo = *pCreateInfo;
                 external = {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO, localCreateInfo.pNext,
                             VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID};
@@ -154,21 +187,60 @@ replace('        VkResult result = vk->vkCreateBuffer(device, pCreateInfo, pAllo
         }
         VkResult result = vk->vkCreateBuffer(device, pCreateInfo, pAllocator, pBuffer);''')
 
+replace('            bufInfo.size = pCreateInfo->size;', '''            bufInfo.size = pCreateInfo->size;
+            if (external.handleTypes) mSharedBlobBuffers.insert(*pBuffer);''')
+replace('        mBufferInfo.clear();', '''        mBufferInfo.clear();
+        mSharedBlobBuffers.clear();''')
+text, cleanup_count = re.subn(r'^( +)mBufferInfo\.erase\(buffer\);$',
+                             r'\1mSharedBlobBuffers.erase(buffer);\n\1mBufferInfo.erase(buffer);',
+                             text, flags=re.MULTILINE)
+if cleanup_count != 2:
+    raise ValueError('unexpected buffer cleanup paths')
+replace('    std::unordered_map<VkBuffer, BufferInfo> mBufferInfo;',
+        '''    std::unordered_map<VkBuffer, BufferInfo> mBufferInfo;
+    std::unordered_set<VkBuffer> mSharedBlobBuffers;''')
+
+for name, next_name, req, buffer in (
+    ('on_vkGetImageMemoryRequirements', 'on_vkGetImageMemoryRequirements2', 'pMemoryRequirements', None),
+    ('on_vkGetImageMemoryRequirements2', 'on_vkGetBufferMemoryRequirements', '&pMemoryRequirements->memoryRequirements', None),
+    ('on_vkGetBufferMemoryRequirements', 'on_vkGetBufferMemoryRequirements2', 'pMemoryRequirements', 'buffer'),
+    ('on_vkGetBufferMemoryRequirements2', 'on_vkCmdCopyBufferToImage', '&pMemoryRequirements->memoryRequirements', 'pInfo->buffer'),
+):
+    start = text.index(f'    void {name}(')
+    end = text.index(f'    void {next_name}(', start)
+    head, method, tail = text[:start], text[start:end], text[end:]
+    anchor = '        physicalDeviceMemHelper->transformToGuestMemoryRequirements('
+    if method.count(anchor) != 1:
+        raise ValueError('unexpected memory requirements near ' + name)
+    uses_blob = f'mSharedBlobBuffers.count({buffer}) != 0' if buffer else 'false'
+    text = head + method.replace(anchor, f'        restrictBlobMemoryTypes({req}, *physicalDeviceMemHelper,\n'
+                                         f'                                {uses_blob});\n' + anchor) + tail
+
 replace('        VkResult result = vk->vkAllocateMemory(device, &localAllocInfo, pAllocator, pMemory);',
         '''        const uint64_t sharedOwner = sharedMemoryOwner();
         const bool cachedShare = sharedOwner && hostVisible && !rme::sharedMemoryUsesHardwareBuffer() &&
                                  !importCbInfoPtr && !createBlobInfoPtr;
-        bool share = cachedShare;
-        if (sharedOwner && hostVisible && rme::sharedMemoryUsesHardwareBuffer()) {
+        const VkDeviceSize guestSize = localAllocInfo.allocationSize;
+        std::unique_ptr<AHardwareBuffer, decltype(&AHardwareBuffer_release)> blob(nullptr, AHardwareBuffer_release);
+        VkImportAndroidHardwareBufferInfoANDROID importBlob{
+            VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID};
+        if (sharedOwner && hostVisible && rme::sharedMemoryUsesHardwareBuffer() &&
+            !importCbInfoPtr && !importBufferInfoPtr && !createBlobInfoPtr) {
             std::lock_guard<std::recursive_mutex> lock(mLock);
             auto physical = android::base::find(mDeviceToPhysicalDevice, device);
             if (!physical) return VK_ERROR_INITIALIZATION_FAILED;
             VkPhysicalDeviceMemoryProperties props{};
             m_vk->vkGetPhysicalDeviceMemoryProperties(*physical, &props);
-            share = localAllocInfo.memoryTypeIndex == sharedMemoryType(props);
-            if (share) {
-                exportAllocate.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
-                vk_append_struct(&structChainIter, &exportAllocate);
+            if (localAllocInfo.memoryTypeIndex == sharedMemoryType(props)) {
+                if ((dedicatedAllocInfoPtr && dedicatedAllocInfoPtr->image) || mappedPtr ||
+                    m_emu->features.ExternalBlob.enabled) return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+                AHardwareBuffer* buffer = nullptr;
+                const VkResult allocated = allocateSharedBlob(vk, device, &localAllocInfo, &buffer);
+                blob.reset(buffer);
+                if (allocated != VK_SUCCESS) return allocated;
+                importBlob.buffer = buffer;
+                importBlob.pNext = localAllocInfo.pNext;
+                localAllocInfo.pNext = &importBlob;
             }
         }
         VkResult result = vk->vkAllocateMemory(device, &localAllocInfo, pAllocator, pMemory);''')
@@ -181,11 +253,11 @@ replace('''        *pMemory = new_boxed_non_dispatchable_VkDeviceMemory(*pMemory
     void freeMemoryLocked''',
         '''        const VkDeviceMemory nativeMemory = *pMemory;
         *pMemory = new_boxed_non_dispatchable_VkDeviceMemory(nativeMemory);
-        if (share) {
+        if (cachedShare || blob) {
             const uint64_t boxed = (uint64_t)*pMemory;
             const bool published = cachedShare
                 ? rme::publishCachedSharedMemory(sharedOwner, boxed, memoryInfo.ptr, memoryInfo.size)
-                : exportSharedMemory(vk, device, nativeMemory, memoryInfo.size, sharedOwner, boxed);
+                : publishSharedBlob(blob.get(), guestSize, sharedOwner, boxed);
             if (!published) {
                 freeMemoryLocked(vk, device, nativeMemory, pAllocator);
                 delete_VkDeviceMemory(*pMemory);

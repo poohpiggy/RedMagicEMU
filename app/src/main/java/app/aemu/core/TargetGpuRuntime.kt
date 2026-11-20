@@ -28,15 +28,22 @@ internal class TargetGpuRuntime(
     private val active = File(state, "active")
     private val destinations = libraries.associateWith { "system/lib64/$it" } + publicLists
 
-    fun prepare(index: String) {
+    fun prepare(index: String, vulkan: Boolean = true, openCl: Boolean = true) {
+        if (!vulkan && !openCl) {
+            restore()
+            return
+        }
         val entries = index.lineSequence().filter(String::isNotBlank).associate { line ->
             val (name, sha, length) = line.split('\t')
             name to (sha to length.toLong())
         }
         require(entries.keys == libraries.toSet()) { "incomplete Guest GPU bundle" }
-        if (active.exists() && active.readText() == index &&
-            entries.all { (name, entry) -> guestFile(name).length() == entry.second } &&
-            publicLists.keys.all { guestFile(it).isFile }) return
+        val selected = entries.filterKeys { if (it == OPENCL) openCl else vulkan }
+        val configuration = if (vulkan && openCl) index else "vulkan=$vulkan openCl=$openCl\n$index"
+        val wasActive = active.exists()
+        if (wasActive && active.readText() == configuration &&
+            selected.all { (name, entry) -> guestFile(name).length() == entry.second } &&
+            (!openCl || publicLists.keys.all { guestFile(it).isFile })) return
 
         state.mkdirs()
         val legacy = File(root, "system/lib64/libvulkan.rme-original.so")
@@ -50,7 +57,11 @@ internal class TargetGpuRuntime(
         }
         atomicWrite(active) { it.writeText("installing") }
         try {
-            for ((name, entry) in entries) {
+            if (wasActive) {
+                (entries.keys - selected.keys).forEach(::restoreFile)
+                if (!openCl) publicLists.keys.forEach(::restoreFile)
+            }
+            for ((name, entry) in selected) {
                 val (sha, size) = entry
                 atomicWrite(guestFile(name)) { file ->
                     val digest = MessageDigest.getInstance("SHA-256")
@@ -63,14 +74,14 @@ internal class TargetGpuRuntime(
                     check(file.length() == size && actual == sha) { "Guest GPU asset mismatch for $name" }
                 }
             }
-            for (name in publicLists.keys) {
+            if (openCl) for (name in publicLists.keys) {
                 val original = File(state, name)
                 val lines = if (original.exists()) original.readLines() else emptyList()
                 val kept = lines.filter { it.trim().substringBefore(' ') != OPENCL }
                 val updated = if (name == "system-public") kept + OPENCL else kept
                 atomicWrite(guestFile(name)) { it.writeText(updated.joinToString("\n", postfix = "\n")) }
             }
-            atomicWrite(active) { it.writeText(index) }
+            atomicWrite(active) { it.writeText(configuration) }
         } catch (failure: Exception) {
             runCatching { restore() }.onFailure(failure::addSuppressed)
             throw failure
@@ -79,13 +90,15 @@ internal class TargetGpuRuntime(
 
     fun restore() {
         if (!active.exists()) return
-        for (name in destinations.keys) {
-            val saved = File(state, name)
-            val file = guestFile(name)
-            if (saved.isFile) atomicWrite(file) { saved.copyTo(it, overwrite = true) }
-            else if (file.exists()) check(file.delete()) { "could not remove $file" }
-        }
+        destinations.keys.forEach(::restoreFile)
         check(active.delete()) { "could not reset Guest GPU runtime state" }
+    }
+
+    private fun restoreFile(name: String) {
+        val saved = File(state, name)
+        val file = guestFile(name)
+        if (saved.isFile) atomicWrite(file) { saved.copyTo(it, overwrite = true) }
+        else if (file.exists()) check(file.delete()) { "could not remove $file" }
     }
 
     private fun guestFile(name: String) = File(root, destinations.getValue(name))

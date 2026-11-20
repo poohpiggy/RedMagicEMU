@@ -1,9 +1,19 @@
 package app.aemu.core
 
+import android.app.ActivityManager
 import android.content.Context
+import android.os.Process
+import android.system.ErrnoException
 import android.system.Os
+import android.system.OsConstants
+import app.aemu.ui.BootHistory
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
+import java.nio.file.NoSuchFileException
+import java.nio.file.attribute.BasicFileAttributes
 
 /** Расположение файлов одного образа внутри песочницы приложения. */
 class VmPaths(val ctx: Context, val id: String, private val directory: File? = null) {
@@ -79,10 +89,47 @@ object ImageStore {
         }
     }
 
-    /** Reset is unavailable until it is coordinated with the VM process. */
-    @Suppress("UNUSED_PARAMETER")
-    fun resetData(ctx: Context, id: String): Nothing =
-        throw IllegalStateException("Instance reset is unavailable while VM coordination is incomplete")
+    fun resetData(ctx: Context, id: String) {
+        val img = get(ctx, id) ?: throw IOException("Instance is unavailable")
+        val instance = VmPaths(ctx, id).dir
+        InstanceRuntimeLease.acquire(instance, id).use { lease ->
+            InstanceAdmission.requireVerified(instance, img.fingerprint)
+            requireGuestStopped(ctx)
+            if (!lease.isValid()) throw IOException("Instance runtime lease changed")
+            GuestDataReset.clear(instance) {
+                FirstRingtoneInitStore.open(instance, id).use { it.createFresh() }
+                BootHistory(ctx.filesDir).reset(id)
+            }
+        }
+    }
+
+    // A released lease also occurs on process death. Check for orphaned Guest writers
+    // and for PIDs from older versions that did not acquire this lease.
+    private fun requireGuestStopped(ctx: Context) {
+        val uid = Process.myUid()
+        val mine = Process.myPid()
+        val pkg = ctx.packageName
+        val hostProcesses = setOf(pkg, "$pkg:vulkan", "$pkg:binder", "$pkg:gl")
+        val manager = ctx.getSystemService(ActivityManager::class.java)
+        val hostPids = manager.runningAppProcesses.orEmpty()
+            .filter { it.uid == uid && it.processName in hostProcesses }
+            .mapTo(mutableSetOf(mine)) { it.pid }
+        val proc = File("/proc").toPath()
+        Files.newDirectoryStream(proc).use { entries ->
+            val pids = entries.mapNotNull { it.fileName.toString().toIntOrNull() }.filter { it > 0 }
+            if (mine !in pids) throw IOException("Cannot verify Guest processes")
+            for (pid in pids) {
+                if (pid in hostPids) continue
+                try {
+                    Os.kill(pid, 0)
+                } catch (e: ErrnoException) {
+                    if (e.errno == OsConstants.EPERM || e.errno == OsConstants.ESRCH) continue
+                    throw IOException("Cannot verify Guest processes", e)
+                }
+                throw InstanceRuntimeLease.InUse()
+            }
+        }
+    }
 
     /** Changes the stored image from its current state (not from a copy read earlier: the machine updates boot counters). */
     @Synchronized
@@ -108,9 +155,13 @@ object ImageStore {
         val st = ArrayDeque<File>().apply { add(f) }
         while (st.isNotEmpty()) {
             val x = st.removeLast()
-            val isLink = runCatching { android.system.OsConstants.S_ISLNK(Os.lstat(x.path).st_mode) }.getOrDefault(false)
-            if (isLink) continue
-            if (x.isDirectory) x.listFiles()?.forEach { st.add(it) } else n += x.length()
+            val attrs = try {
+                Files.readAttributes(x.toPath(), BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+            } catch (_: NoSuchFileException) {
+                continue
+            }
+            if (attrs.isSymbolicLink) continue
+            if (attrs.isDirectory) x.listFiles()?.forEach { st.add(it) } else n += attrs.size()
         }
         return n
     }

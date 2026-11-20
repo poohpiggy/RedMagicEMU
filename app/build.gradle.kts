@@ -55,8 +55,8 @@ android {
         // 28: гостевые бинарники запускаются из каталога данных приложения (W^X для targetSdk>=29)
         //noinspection ExpiredTargetSdkVersion
         targetSdk = 28
-        versionCode = 12
-        versionName = "0.6.2-beta"
+        versionCode = 18
+        versionName = "0.6.6-beta"
         ndk { abiFilters += listOf("arm64-v8a") }
     }
 
@@ -97,6 +97,15 @@ android {
         }
         sourceSets["debug"].jniLibs.srcDir(jniDir)
     }
+    val videoBridge = rootProject.file(
+        providers.gradleProperty("rmeVideoBridgeDir").orElse("native/videobridge/android").get()
+    )
+    check(File(videoBridge, "assets/rme-video/guest.idx").isFile &&
+        File(videoBridge, "jniLibs/arm64-v8a/libaemuvideohost.so").isFile) {
+        "The video bundle must contain the host and Guest Codec2 libraries"
+    }
+    sourceSets["main"].assets.srcDir(File(videoBridge, "assets"))
+    sourceSets["main"].jniLibs.srcDir(File(videoBridge, "jniLibs"))
 
     packaging {
         // исполняемые файлы движка лежат как lib*.so и должны распаковываться на диск

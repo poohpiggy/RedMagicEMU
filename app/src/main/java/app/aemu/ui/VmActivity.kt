@@ -187,6 +187,8 @@ class VmActivity : ComponentActivity() {
     private var lastAppliedRuntimeBattery: GuestBatteryState? = null
     private var batteryModeBusy by mutableStateOf(false)
     private val batterySyncRuntime = java.util.concurrent.atomic.AtomicBoolean(true)
+    private var guestAwake by mutableStateOf<Boolean?>(null)
+    private var guestAwakeBusy by mutableStateOf(false)
     private var navBarOn by mutableStateOf(true)
     private var navBarBusy by mutableStateOf(false)
     private val logLines = mutableStateListOf<String>()
@@ -221,6 +223,7 @@ class VmActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (redirectIfStorageDenied()) return
         // the overlay pads itself (status bar, navigation bar, keyboard): the terminal stays above the keyboard
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
         if (android.os.Build.VERSION.SDK_INT >= 28) {
@@ -361,16 +364,21 @@ class VmActivity : ComponentActivity() {
         })
 
         registerShell()
+        if (shouldBootOnAttach(vm.state, previousBootMessage != null, VmHost.poweredOff)) startBoot()
+        else askForHostLocation()
+    }
+
+    private fun askForHostLocation() {
         if (shouldSyncHostLocation() && !hasLocationPermission()) {
             askLocation.launch(arrayOf(
                 android.Manifest.permission.ACCESS_COARSE_LOCATION,
                 android.Manifest.permission.ACCESS_FINE_LOCATION,
             ))
         }
-        if (shouldBootOnAttach(vm.state, previousBootMessage != null, VmHost.poweredOff)) startBoot()
     }
 
     private fun startBoot() {
+        if (redirectIfStorageDenied()) return
         try {
             bootHistory.starting(vm.img.id)
         } catch (e: Exception) {
@@ -378,7 +386,16 @@ class VmActivity : ComponentActivity() {
             return
         }
         runOnUiThread { previousBootMessage = null }
+        askForHostLocation()
         vm.bootAsync()
+    }
+
+    private fun redirectIfStorageDenied(): Boolean {
+        if (hasRequiredStorageAccess(this)) return false
+        startActivity(Intent(this, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+        finish()
+        return true
     }
 
     /** Debug: adb shell am broadcast -a <applicationId>.SHELL --es cmd "dumpsys power" → run/shell.out */
@@ -475,6 +492,7 @@ class VmActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (isFinishing || redirectIfStorageDenied()) return
         hideHostSystemBars()
         if (::vm.isInitialized) {
             ImageStore.get(this, vm.img.id)?.settings?.let { settings ->
@@ -791,10 +809,14 @@ class VmActivity : ComponentActivity() {
                 val out = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                     val l = ArrayList<String>()
                     val need = items.any { it == "cpu" || it == "ram" || it == "procs" }
-                    val o = if (need) runCatching { hud.ours() }.getOrNull() else null
+                    val o = if (need) runCatching { hud.ours("ram" in items) }.getOrNull() else null
                     if ("touch" in items) l += if (::guest.isInitialized && guest.touchMs >= 0) "Touch %d ms".format(guest.touchMs) else "Touch -"
                     if ("cpu" in items && o != null) l += "CPU %.0f%%".format(o.cpuPct)
-                    if ("ram" in items && o != null) l += "RAM %d MB".format(o.rssMb)
+                    if ("ram" in items) {
+                        l += o?.memory?.let {
+                            if (it.proportional) "RAM %d MiB".format(it.mib) else "RSS Σ %d MiB".format(it.mib)
+                        } ?: "RAM –"
+                    }
                     if ("phone_ram" in items) l += "Free %d MB".format(runCatching { hud.phoneFreeMb() }.getOrDefault(0L))
                     if ("procs" in items && o != null) l += "Procs %d".format(o.procs)
                     if ("freq" in items) l += "CPU %d MHz".format(hud.maxFreqMhz())
@@ -1089,14 +1111,13 @@ class VmActivity : ComponentActivity() {
     @Composable
     private fun DeviceDialog(onDone: () -> Unit) {
         var airplane by remember { mutableStateOf(false) }
-        var awake by remember { mutableStateOf(false) }
         val ns = if (vm.img.api >= 17) "global" else "system"
         // the switches show what the guest has now
         LaunchedEffect(Unit) {
-            guestAsync("settings get $ns airplane_mode_on; settings get $ns stay_on_while_plugged_in") { out ->
-                val v = out.lines().map { it.trim() }.filter { it.isNotEmpty() }
-                runOnUiThread { airplane = v.getOrNull(0) == "1"; awake = (v.getOrNull(1)?.toIntOrNull() ?: 0) != 0 }
+            guestAsync("settings get $ns airplane_mode_on") { out ->
+                runOnUiThread { airplane = out.trim() == "1" }
             }
+            updateGuestStayAwake()
         }
         AlertDialog(onDismissRequest = onDone,
             title = { Text(stringResource(R.string.m_device)) },
@@ -1112,14 +1133,26 @@ class VmActivity : ComponentActivity() {
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(stringResource(R.string.m_stay_awake), Modifier.weight(1f))
-                        Switch(awake, { v ->
-                            awake = v
-                            guestAsync("settings put $ns stay_on_while_plugged_in ${if (v) 7 else 0}; svc power stayon ${if (v) "true" else "false"}")
-                        })
+                        Switch(guestAwake == true, { updateGuestStayAwake(it) },
+                            enabled = guestAwake != null && !guestAwakeBusy)
                     }
                 }
             },
             confirmButton = { Button(onClick = onDone) { Text(stringResource(R.string.close)) } })
+    }
+
+    private fun updateGuestStayAwake(on: Boolean? = null) {
+        if (guestAwakeBusy) return
+        guestAwakeBusy = true
+        thread {
+            val result = runCatching { vm.guestStayAwake(on) }
+            result.onFailure { vm.log("stay awake: ${it.message}") }
+            runOnUiThread {
+                guestAwakeBusy = false
+                if (result.isSuccess) guestAwake = result.getOrThrow()
+                else if (!isFinishing && !isDestroyed) toast(getString(R.string.m_failed))
+            }
+        }
     }
 
     @Composable
@@ -1653,8 +1686,10 @@ class VmActivity : ComponentActivity() {
                         Button(enabled = !retryPending, onClick = {
                             retryPending = true
                             thread {
-                                try { vm.stop(); startBoot() }
-                                catch (e: Exception) {
+                                try {
+                                    vm.stop()
+                                    runOnUiThread { startBoot() }
+                                } catch (e: Exception) {
                                     runOnUiThread {
                                         previousBootMessage = e.message ?: getString(R.string.failed_start)
                                         retryPending = false
@@ -1674,8 +1709,10 @@ class VmActivity : ComponentActivity() {
                         OutlinedButton(enabled = !retryPending, onClick = {
                             retryPending = true
                             thread {
-                                try { vm.stop(); startBoot() }
-                                catch (e: Exception) {
+                                try {
+                                    vm.stop()
+                                    runOnUiThread { startBoot() }
+                                } catch (e: Exception) {
                                     runOnUiThread {
                                         previousBootMessage = e.message ?: getString(R.string.failed_start)
                                         retryPending = false

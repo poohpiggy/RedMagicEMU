@@ -60,8 +60,13 @@ import app.aemu.core.TargetWifiArtifacts
 import app.aemu.core.TargetVirtualWifiConfig
 import app.aemu.core.VmSettings
 import kotlinx.coroutines.launch
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
-private val RAM_STEPS = listOf(0, 256, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384)
+internal val INSTANCE_RAM_CHOICES_MB = listOf(4096, 6144, 8192, 12288, 16384)
+
+internal fun instanceRamChoiceMb(savedMb: Int): Int =
+    INSTANCE_RAM_CHOICES_MB.minBy { abs(it.toLong() - savedMb) }
 
 internal fun showWifiDetails(targetNetwork: Boolean, mode: TargetNetworkMode): Boolean =
     targetNetwork && mode == TargetNetworkMode.WIFI
@@ -77,9 +82,12 @@ internal fun wifiConfigForSave(targetWifi: Boolean, mode: TargetNetworkMode,
 internal fun SettingsSheet(
     img: GuestImage,
     onDismiss: () -> Unit,
+    onReset: () -> Unit,
     onSave: (VmSettings, GuestBatteryState?) -> Unit,
 ) {
-    var s by remember(img.id) { mutableStateOf(img.settings) }
+    var s by remember(img.id) {
+        mutableStateOf(img.settings.copy(ramMb = instanceRamChoiceMb(img.settings.ramMb)))
+    }
     val targetWifi = img.model == "NX809J" && img.api == 36 && img.abi == "arm64-v8a"
     val targetNetwork = TargetWifiArtifacts.applies(img.api, img.model, img.abi, img.effective().engine)
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -143,7 +151,11 @@ internal fun SettingsSheet(
     MaterialTheme(motionScheme = sheetMotion) {
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = state) {
         MaterialTheme(motionScheme = motion) {
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).navigationBarsPadding()) {
+        Column(
+            Modifier.verticalScroll(rememberScrollState(), overscrollEffect = null)
+                .padding(horizontal = 20.dp)
+                .navigationBarsPadding(),
+        ) {
             Text(stringResource(R.string.instance_settings), style = MaterialTheme.typography.headlineSmall)
             Text(img.name, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(16.dp))
@@ -174,19 +186,30 @@ internal fun SettingsSheet(
             Spacer(Modifier.height(16.dp))
 
             Text(stringResource(R.string.vs_perf), style = MaterialTheme.typography.titleMedium)
-            val ramIdx = RAM_STEPS.indexOf(s.ramMb).coerceAtLeast(0)
+            val ramIdx = INSTANCE_RAM_CHOICES_MB.indexOf(s.ramMb)
             ListItem(
                 headlineContent = { Text(stringResource(R.string.vs_ram)) },
                 supportingContent = {
                     Column {
-                        Text(if (s.ramMb == 0) stringResource(R.string.vs_ram_auto) else if (s.ramMb >= 1024 && s.ramMb % 1024 == 0) "${s.ramMb / 1024} GB" else "${s.ramMb} MB")
-                        Slider(value = ramIdx.toFloat(), onValueChange = { s = s.copy(ramMb = RAM_STEPS[it.toInt()]) },
-                            valueRange = 0f..RAM_STEPS.lastIndex.toFloat(), steps = RAM_STEPS.size - 2)
+                        Text("${s.ramMb / 1024} GB")
+                        Slider(
+                            value = ramIdx.toFloat(),
+                            onValueChange = { s = s.copy(ramMb = INSTANCE_RAM_CHOICES_MB[it.roundToInt()]) },
+                            valueRange = 0f..INSTANCE_RAM_CHOICES_MB.lastIndex.toFloat(),
+                            steps = INSTANCE_RAM_CHOICES_MB.size - 2,
+                        )
                     }
                 },
                 colors = ListItemDefaults.colors(containerColor = Color.Transparent),
             )
             Toggle(stringResource(R.string.vs_lowram), stringResource(R.string.vs_lowram_sub), s.lowRam) { s = s.copy(lowRam = it) }
+            Toggle(stringResource(R.string.vs_vulkan), stringResource(R.string.vs_vulkan_sub), s.vulkan) {
+                s = s.copy(vulkan = it)
+            }
+            Toggle(stringResource(R.string.vs_opencl), stringResource(R.string.vs_opencl_sub), s.openCl) {
+                s = s.copy(openCl = it)
+            }
+            Toggle(stringResource(R.string.vs_vsync), stringResource(R.string.vs_vsync_sub), s.vsync) { s = s.copy(vsync = it) }
             Spacer(Modifier.height(8.dp))
 
             Text(stringResource(R.string.vs_controls), style = MaterialTheme.typography.titleMedium)
@@ -206,12 +229,10 @@ internal fun SettingsSheet(
                 )
             }
             Toggle(stringResource(R.string.sensor_bridge), stringResource(R.string.sensor_bridge_sub), s.accelerometerBridge) { s = s.copy(accelerometerBridge = it) }
-            Toggle(stringResource(R.string.vs_nav), stringResource(R.string.vs_nav_sub), s.showNavBar) { s = s.copy(showNavBar = it) }
-            if (s.showNavBar) NavBarSetup(s) { s = it }
-            Toggle(stringResource(R.string.vs_vsync), stringResource(R.string.vs_vsync_sub), s.vsync) { s = s.copy(vsync = it) }
+            NavBarSetup(s) { s = it }
 
             if (targetWifi) {
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(4.dp))
                 if (targetNetwork) {
                     ListItem(
                         headlineContent = { Text(stringResource(R.string.m_network_mode)) },
@@ -264,6 +285,11 @@ internal fun SettingsSheet(
                 }
             }, enabled = wifiForSave != null && !saving,
                 modifier = Modifier.fillMaxWidth().height(52.dp)) { Text(stringResource(R.string.save)) }
+            TextButton(
+                onClick = onReset,
+                enabled = !saving,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.reset_data), color = MaterialTheme.colorScheme.error) }
             Spacer(Modifier.height(16.dp))
         }
     }
@@ -315,18 +341,35 @@ private fun DisplayPresetSelector(label: Int, base: DisplayPreset, settings: VmS
 /** Which buttons the bar has (tap to add or remove; added ones go to the end) and how big it is. */
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-internal fun NavBarSetup(s: VmSettings, set: (VmSettings) -> Unit) {
-    val keys = s.navKeys.split(',').filter { it in VmSettings.NAV_ALL }
-    val visibleKeys = listOf("back", "home", "recents")
-    androidx.compose.foundation.layout.FlowRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        for (k in keys.filter { it in visibleKeys } + visibleKeys.filter { it !in keys }) {
-            val on = k in keys
-            androidx.compose.material3.FilterChip(selected = on, label = { Text(navKeyLabel(k)) },
-                onClick = { set(s.copy(navKeys = (if (on) keys - k else keys + k).joinToString(","))) })
+private fun NavBarSetup(s: VmSettings, set: (VmSettings) -> Unit) {
+    Toggle(
+        title = stringResource(R.string.vs_nav),
+        on = s.showNavBar,
+        supportingContent = {
+            Column {
+                Text(stringResource(R.string.vs_nav_sub))
+                if (s.showNavBar) {
+                    val keys = s.navKeys.split(',').filter { it in VmSettings.NAV_ALL }
+                    val visibleKeys = listOf("back", "home", "recents")
+                    androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        for (k in keys.filter { it in visibleKeys } + visibleKeys.filter { it !in keys }) {
+                            val on = k in keys
+                            androidx.compose.material3.FilterChip(
+                                selected = on,
+                                label = { Text(navKeyLabel(k)) },
+                                onClick = { set(s.copy(navKeys = (if (on) keys - k else keys + k).joinToString(","))) },
+                            )
+                        }
+                    }
+                }
+            }
+        },
+    ) { set(s.copy(showNavBar = it)) }
+    if (s.showNavBar) {
+        Toggle(stringResource(R.string.vs_nav_compact), stringResource(R.string.vs_nav_compact_sub), s.navSize == 0) {
+            set(s.copy(navSize = if (it) 0 else 1))
         }
     }
-    Toggle(stringResource(R.string.vs_nav_compact), stringResource(R.string.vs_nav_compact_sub), s.navSize == 0) { set(s.copy(navSize = if (it) 0 else 1)) }
 }
 
 @Composable
@@ -338,9 +381,14 @@ internal fun navKeyLabel(k: String) = stringResource(when (k) {
 
 @Composable
 internal fun Toggle(title: String, sub: String, on: Boolean, set: (Boolean) -> Unit) {
+    Toggle(title, on, supportingContent = { Text(sub) }, set = set)
+}
+
+@Composable
+private fun Toggle(title: String, on: Boolean, supportingContent: @Composable () -> Unit, set: (Boolean) -> Unit) {
     ListItem(
         headlineContent = { Text(title) },
-        supportingContent = { Text(sub) },
+        supportingContent = supportingContent,
         trailingContent = { Switch(checked = on, onCheckedChange = set) },
         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
         modifier = Modifier.fillMaxWidth(),

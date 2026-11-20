@@ -21,7 +21,7 @@ public:
     SocketSession(const SocketSession&) = delete;
     SocketSession& operator=(const SocketSession&) = delete;
     // Nonblocking; false means close this connection. Device thread only.
-    bool pump();
+    bool pump(short events = 0);
     // Kernel credentials captured at successful authorization for this live
     // connection only. They are not a per-instance proof or a durable process ID.
     PeerCredentials peer() const;

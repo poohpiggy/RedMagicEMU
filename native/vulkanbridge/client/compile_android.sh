@@ -11,6 +11,10 @@ g="$src/guest"
 b="$build/guest"
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 mkdir -p "$out"
+readback_flag=
+if [ "${RME_TEST_ANDROID_READBACK_WSI:-0}" = 1 ]; then
+  readback_flag=-DRME_TEST_ANDROID_READBACK_WSI
+fi
 if [ "$#" -eq 6 ]; then
   python3 "$here/generate_public_api.py" "$g/mesa/src/vulkan/registry/vk.xml" \
     "$b/mesa/src/vulkan/runtime/vk_dispatch_trampolines.c" "$out/public.c" "$6"
@@ -20,6 +24,7 @@ else
 fi
 "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang" \
   -std=gnu11 -fPIC -fvisibility=hidden -DANDROID -DANDROID_API_LEVEL=35 \
+  $readback_flag \
   ${RME_VULKAN_TRACE_PROCS:+-DRME_TRACE_VULKAN_PROCS} \
   -DVK_USE_PLATFORM_ANDROID_KHR -DVK_GFXSTREAM_STRUCTURE_TYPE_EXT \
   -DHAVE_STRUCT_TIMESPEC -DHAVE_PTHREAD -DHAVE_THRD_CREATE -DHAVE_LINUX_FUTEX_H \
@@ -45,6 +50,7 @@ fi
   -c "$here/android_surface.c" -o "$out/android_surface.o"
 "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang" \
   -std=c11 -Wall -Wextra -Werror -fPIC -fvisibility=hidden -I"$g/mesa/include" \
+  $readback_flag \
   -I"$a/aosp-nativewindow" -I"$a/aosp-nativebase" -I"$a/aosp-libcutils-includes" \
   -I"$a/aosp-core/libsystem/include" -MD -MF "$out/android_surface_android.d" \
   -c "$here/android_surface_android.c" -o "$out/android_surface_android.o"
@@ -96,4 +102,16 @@ for name in android_swapchain_flow android_swapchain_flow_android android_swapch
     -std=c11 -Wall -Wextra -Werror -fPIC -fvisibility=hidden -I"$g/mesa/include" \
     -c "$here/$name.c" -o "$out/$name.o"
 done
+if [ -n "$readback_flag" ]; then
+  "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang" \
+    -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -Werror -fPIC -fvisibility=hidden -DANDROID \
+    ${RME_VULKAN_TRACE_PROCS:+-DRME_TRACE_VULKAN_PROCS} \
+    -DHAVE_STRUCT_TIMESPEC -DHAVE_PTHREAD -DHAVE_THRD_CREATE -DHAVE_LINUX_FUTEX_H \
+    -I"$g/mesa/include" -I"$g/mesa/src" -I"$g/mesa/src/util" \
+    -I"$g/mesa/src/vulkan/runtime" -I"$g/mesa/src/vulkan/util" \
+    -I"$b/mesa/src/vulkan/util" -I"$b/mesa/src/vulkan/runtime" \
+    -I"$a/aosp-nativewindow" -I"$a/aosp-nativebase" -I"$a/aosp-core/libsystem/include" \
+    -I"$a/aosp-libcutils-includes" -I"$a/aosp-liblog-includes" \
+    -c "$here/android_readback_wsi.c" -o "$out/android_readback_wsi.o"
+fi
 "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -h "$out/public.o" | grep -E 'Class:|Machine:|Type:'

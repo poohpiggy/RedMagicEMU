@@ -37,6 +37,19 @@ class TargetGpuRuntimeTest {
         assertTrue("libOpenCL.so" in systemPublic.readLines())
         assertFalse("libOpenCL.so" in vendorPublic.readLines())
 
+        runtime.prepare(index, vulkan = false, openCl = true)
+        assertEquals("stock loader", vulkan.readText())
+        assertFalse(File(root, "system/lib64/libRme_gles2_enc.so").exists())
+        assertEquals("packaged libOpenCL.so", opencl.readText())
+        assertTrue("libOpenCL.so" in systemPublic.readLines())
+        assertFalse("libOpenCL.so" in vendorPublic.readLines())
+
+        runtime.prepare(index, vulkan = true, openCl = false)
+        assertEquals("packaged libvulkan.so", vulkan.readText())
+        assertFalse(opencl.exists())
+        assertEquals("libvulkan.so\n", systemPublic.readText())
+        assertEquals("libOpenCL.so\nlibother.so\n", vendorPublic.readText())
+
         runtime.restore()
         assertEquals("stock loader", vulkan.readText())
         assertFalse(opencl.exists())

@@ -16,6 +16,7 @@ internal class TargetTree(private val root: File, private val cancelled: () -> B
     }
     private val writer = SafeTreeWriter(root, 2_000_000, 128L * 1024 * 1024 * 1024, cancelled)
     private val links = linkedMapOf<String, String>()
+    private val earlyMounts = linkedMapOf<String, String>()
     private var systemDone = false
     private val seenPartitions = mutableSetOf<String>()
 
@@ -27,17 +28,20 @@ internal class TargetTree(private val root: File, private val cancelled: () -> B
             else -> throw IOException("Unexpected firmware partition: $name")
         }
         if (!seenPartitions.add(name)) throw IOException("Duplicate target partition: $name")
-        if (name != "system" && !systemDone) throw IOException("System must be extracted first")
-        if (name != "system") {
-            // A separate partition replaces the system image's mountpoint, rather than merging its hidden contents.
-            val mountPath = File(root, mount)
-            if (Files.isSymbolicLink(mountPath.toPath())) throw IOException("Unexpected link at mountpoint")
-            if (mountPath.exists() && !mountPath.deleteRecursively()) throw IOException("Cannot clear partition mountpoint: $mount")
-            links.keys.removeAll { it == mount || it.startsWith("$mount/") }
+        val output = when {
+            name == "system" -> mount
+            systemDone -> {
+                clearMount(mount)
+                mount
+            }
+            else -> {
+                val staging = Files.createTempDirectory(root.toPath(), ".partition-").fileName
+                "$staging/tree".also { earlyMounts[mount] = it }
+            }
         }
         tree.walk { path, isDir, link, mode, size, data ->
             if (cancelled()) throw ImportCancelledException()
-            val rel = "$mount/$path"
+            val rel = "$output/$path"
             when {
                 isDir -> writer.directory(rel)
                 link != null -> {
@@ -48,7 +52,34 @@ internal class TargetTree(private val root: File, private val cancelled: () -> B
                 else -> throw IOException("Unsupported filesystem entry: $rel")
             }
         }
-        if (name == "system") { hoist(); systemDone = true }
+        if (name == "system") {
+            hoist()
+            installEarlyMounts()
+            systemDone = true
+        }
+    }
+
+    private fun clearMount(mount: String) {
+        // A separate partition replaces the contents at its mount point in the system image.
+        val mountPath = File(root, mount)
+        if (Files.isSymbolicLink(mountPath.toPath())) throw IOException("Unexpected link at mountpoint")
+        if (mountPath.exists() && !mountPath.deleteRecursively()) throw IOException("Cannot clear partition mountpoint: $mount")
+        links.keys.removeAll { it == mount || it.startsWith("$mount/") }
+    }
+
+    private fun installEarlyMounts() {
+        for ((mount, staging) in earlyMounts) {
+            if (cancelled()) throw ImportCancelledException()
+            clearMount(mount)
+            writer.moveDirectoryIfPresent(staging, mount)
+            val prefix = "$staging/"
+            for ((name, target) in links.filterKeys { it.startsWith(prefix) }) {
+                links.remove(name)
+                links["$mount/${name.removePrefix(prefix)}"] = target
+            }
+            Files.delete(root.resolve(staging.substringBefore('/')).toPath())
+        }
+        earlyMounts.clear()
     }
 
     private fun hoist() {

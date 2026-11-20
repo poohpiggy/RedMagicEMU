@@ -47,6 +47,21 @@ class InstanceAdmissionTest {
         InstanceAdmission.requireVerified(dir, boot)
         assertNotNull(runCatching { InstanceAdmission.requireVerified(dir, "") }.exceptionOrNull())
     }
+    @Test fun previouslyUpgradedInstanceBootsWithItsInstalledSystem() = instance { dir ->
+        dir.resolve("ota/applied").mkdirs()
+        val installed = InstanceAdmission.INSTALLED_SYSTEM_FINGERPRINT
+        val prop = dir.resolve("root/system/build.prop")
+        prop.writeText("ro.system.build.fingerprint=$installed\n")
+        InstanceAdmission.requireVerified(dir, system)
+        assertThrows(IllegalStateException::class.java) { InstanceAdmission.requireFingerprint(installed) }
+
+        prop.writeText("ro.system.build.fingerprint=${installed}x\n")
+        assertThrows(IllegalStateException::class.java) { InstanceAdmission.requireVerified(dir, system) }
+    }
+    @Test fun interruptedLegacySystemChangeCannotBoot() = instance { dir ->
+        dir.resolve("ota/trial").mkdirs()
+        assertThrows(IllegalStateException::class.java) { InstanceAdmission.requireVerified(dir, system) }
+    }
     @Test fun noValidatedFlagBypassAndRuntimeChangesIgnored() = instance { dir ->
         dir.resolve("image.json").writeText("{\"validated\":true}")
         assertNotNull(runCatching { InstanceAdmission.requireVerified(dir, null) }.exceptionOrNull())

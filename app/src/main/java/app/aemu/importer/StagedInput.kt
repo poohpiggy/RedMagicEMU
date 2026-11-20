@@ -7,7 +7,14 @@ import java.nio.file.Files
 
 /** A private per-import snapshot, removed on success, cancellation and failure. */
 internal object StagedInput {
-    fun <T> use(parent: File, input: InputStream, cancelled: () -> Boolean, maxBytes: Long = Long.MAX_VALUE, block: (File) -> T): T {
+    fun <T> use(
+        parent: File,
+        input: InputStream,
+        cancelled: () -> Boolean,
+        maxBytes: Long = Long.MAX_VALUE,
+        onBytesCopied: (Long) -> Unit = {},
+        block: (File) -> T,
+    ): T {
         if (!parent.isDirectory && !parent.mkdirs()) throw IOException("cannot create staging directory")
         val dir = Files.createTempDirectory(parent.toPath(), "firmware-").toFile()
         var failure: Throwable? = null
@@ -24,6 +31,7 @@ internal object StagedInput {
                         if (count.toLong() > maxBytes - written) throw IOException("Firmware size exceeds target")
                         out.write(buffer, 0, count)
                         written += count
+                        onBytesCopied(written)
                     }
                 }
             }

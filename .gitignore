@@ -23,6 +23,10 @@ release-apks/
 /local-data/
 *.log
 
+# 项目文档保留在本地
+/doc/
+/docs/
+
 # 本地临时输出与构建测试产物
 /$null
 /step_test

@@ -1,6 +1,7 @@
 package app.aemu.core
 
 import android.content.Context
+import android.os.Build
 import android.os.Process as AProcess
 import android.os.SystemClock
 import android.view.Surface
@@ -117,7 +118,10 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             // 11+: a module's services are declared inside the module (the software codec service)
             (File(root, "apex").listFiles()?.sortedBy { it.name }?.flatMap { m -> File(m, "etc").listFiles()?.filter { it.isFile && it.name.endsWith(".rc") }?.sortedBy { it.name } ?: emptyList() } ?: emptyList())
         InitPlan.plan(InitPlan.parse(rcFiles, props), img.api, root).takeIf { p -> p.any { it.name == "zygote" } }
-    }.getOrNull() ?: img.services.ifEmpty { InitPlan.fallback(img, paths.root) }
+    }.getOrNull().let { parsed ->
+        val plan = parsed ?: img.services.ifEmpty { InitPlan.fallback(img, paths.root) }
+        InitPlan.forGuestRuntime(plan, img.api, img.model, img.abi, engine)
+    }
     private var zygoteRestarts = 0
         private set
     @Volatile var failure: String? = null
@@ -232,8 +236,12 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     @Volatile var bootStartedElapsed: Long = 0L
         private set
     private val lifecycle = VmLifecycle()
+    private var runtimeLease: InstanceRuntimeLease? = null
     private val hostVulkan = HostVulkanVmHost(HostVulkanService(), ::log) { android.os.Process.myPid() }
     private val hostOpenCl = HostOpenClVmHost(::log)
+    private val videoRuntime = TargetVideoRuntime(paths.root) { ctx.assets.open(it) }
+    private val videoSocket = paths.socket(TargetVideoRuntime.SOCKET)
+    @Volatile private var videoHost: Process? = null
     internal fun withAdmittedFramebuffer(action: () -> Unit) = admissionState.ifAdmitted {
         if (state == State.PREPARING || state == State.BOOTING || state == State.RUNNING) action()
     }
@@ -257,6 +265,8 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                     requireSystemBoot(recoveryMode)
                     admissionState.verify {
                         InstanceAdmission.requireVerified(paths.dir, img.fingerprint)
+                        runtimeLease = InstanceRuntimeLease.acquire(paths.dir, img.id)
+                        GuestDataReset.requireComplete(paths.dir)
                         GuestWritePaths.requireSafe(paths.root, img.dirs)
                     }
                     if (!stopping) {
@@ -264,6 +274,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                         if (!stopping) { if (recoveryMode) doRecovery() else doBoot() }
                     }
                 } catch (t: Throwable) {
+                    runCatching { videoHost?.destroyForcibly() }.onFailure { t.addSuppressed(it) }
                     hostVulkan.cancel()
                     hostOpenCl.cancel()
                     runCatching { hostVulkan.stop() }.onFailure { t.addSuppressed(it) }
@@ -403,39 +414,71 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         val runtime = TargetGpuRuntime(paths.root, File(paths.bin, "gpu-runtime-original"), ctx.assets::open)
         val nativeDir = File(ctx.applicationInfo.nativeLibraryDir)
         val renderer = File(nativeDir, HostVulkanVmHost.RENDERER_EXECUTABLE)
-        val assets = if (renderer.canExecute()) ctx.assets.list("rme-gpu").orEmpty() else emptyArray()
+        val assets = ctx.assets.list("rme-gpu").orEmpty()
         val packaged = "guest.idx" in assets
-        if (settings.gpu && packaged) {
+        val wantsVulkan = settings.gpu && settings.vulkan
+        val vulkan = if (wantsVulkan && packaged && renderer.canExecute()) {
             val sockets = File(paths.root, "dev/socket")
             sockets.mkdirs()
             val stale = File(sockets, "aemuvk")
             if (stale.exists()) check(stale.delete()) { "cannot clear previous Guest Vulkan socket" }
-            if (hostVulkan.startGuestRenderer(nativeDir, paths.root, runner, settings.width, settings.height,
-                    settings.density)) {
-                val prepared = try {
-                    val index = ctx.assets.open(TargetGpuRuntime.INDEX).bufferedReader().use { it.readText() }
-                    runtime.prepare(index)
-                    true
-                } catch (failure: Exception) {
-                    hostVulkan.stop()
-                    runtime.restore()
-                    log("Guest GPU libraries unavailable: ${failure.message}")
-                    false
-                }
-                if (prepared) {
-                    log("Guest Vulkan and OpenCL libraries prepared")
-                    if ("native-opencl" in assets) hostOpenCl.start(paths.root, runner)
-                    return
-                }
+            hostVulkan.startGuestRenderer(nativeDir, paths.root, runner, settings.width, settings.height, settings.density)
+        } else false
+        val nativeOpenCl = "native-opencl" in assets
+        val openCl = settings.gpu && settings.openCl && packaged && (nativeOpenCl || vulkan)
+        if (vulkan || openCl) {
+            val prepared = try {
+                val index = ctx.assets.open(TargetGpuRuntime.INDEX).bufferedReader().use { it.readText() }
+                runtime.prepare(index, vulkan = vulkan, openCl = openCl)
+                true
+            } catch (failure: Exception) {
+                if (vulkan) hostVulkan.stop()
+                log("Guest GPU libraries unavailable: ${failure.message}")
+                false
+            }
+            if (prepared) {
+                val bridges = listOfNotNull("Vulkan".takeIf { vulkan }, "OpenCL".takeIf { openCl })
+                log("Guest ${bridges.joinToString(" and ")} libraries prepared")
+                if (openCl && nativeOpenCl) hostOpenCl.start(paths.root, runner)
+                return
             }
         }
         runtime.restore()
-        if (settings.gpu && !packaged) lifecycle.launch("vulkan-host") {
+        if (wantsVulkan && (!packaged || !renderer.canExecute())) lifecycle.launch("vulkan-host") {
             if (BuildConfig.DEBUG && renderer.isFile) {
                 hostVulkan.startRenderer(nativeDir, settings.width, settings.height, settings.density)
             } else {
                 hostVulkan.start(File(nativeDir, "libaemuvkhost.so"))
             }
+        }
+    }
+
+    private fun prepareGuestVideo() {
+        if (engine != Engine.N64 || img.model != "NX809J" || img.api != 36 || img.abi != "arm64-v8a") return
+        videoRuntime.restore()
+        if (Build.VERSION.SDK_INT < 36 || "guest.idx" !in ctx.assets.list("rme-video").orEmpty()) return
+        val executable = File(ctx.applicationInfo.nativeLibraryDir, TargetVideoRuntime.EXECUTABLE)
+        if (!executable.canExecute()) {
+            log("Guest video: bundled host decoder unavailable")
+            return
+        }
+        videoSocket.parentFile?.mkdirs()
+        if (videoSocket.exists()) check(videoSocket.delete()) { "cannot clear stale Guest video socket" }
+        try {
+            val command = ProcessBuilder(executable.absolutePath, videoSocket.absolutePath, AProcess.myPid().toString())
+                .redirectErrorStream(true).redirectOutput(File(paths.bin, "video-host.log"))
+            val process = startExternalProcess(command)
+            videoHost = process
+            val available = waitFor("video host socket", 2_000) { videoSocket.exists() || !process.isAlive }
+            check(available && process.isAlive && videoSocket.exists()) { "host decoder did not start" }
+            videoRuntime.install()
+            log("Guest AVC and HEVC hardware decode bridge ready")
+        } catch (stopped: VmLifecycle.StoppedException) {
+            throw stopped
+        } catch (failure: Exception) {
+            videoHost?.destroyForcibly()
+            videoRuntime.restore()
+            log("Guest video: ${failure.message}")
         }
     }
 
@@ -467,6 +510,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         val fixer = TreeFixer(ctx, paths, img, ::log)
         fixer.fixup()
         prepareGuestGpu(qemu)
+        prepareGuestVideo()
         val vibrationAdapterReady = prepareVibrationRuntime(recoveryMode, {
             TargetVibrationArtifacts.prepare(paths.root, img.api, img.model, img.abi, engine, true) { asset ->
                 EngineAssets.open(ctx, asset).use { it.readBytes() }
@@ -738,6 +782,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         }
         if (engine == Engine.N64 && kernel.oneFingerprint) runCatching {
             PropArea.parseProps(File(paths.root, "system/build.prop").readText())["ro.system.build.fingerprint"]?.let { fp ->
+                overrides["ro.system.build.fingerprint"] = fp
                 overrides["ro.vendor.build.fingerprint"] = fp; overrides["ro.bootimage.build.fingerprint"] = fp
             }
         }
@@ -1762,7 +1807,11 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             }
         }
         if (stopping) return
-        r.run(listOf("/system/bin/sh", "-c", "export PATH=/system/bin:/system/xbin:\$PATH; svc power stayon true"), 60_000)
+        if (usesGuestStayAwake) {
+            runCatching { guestStayAwake() }.onFailure { log("stay awake: ${it.message}") }
+        } else {
+            r.run(listOf("/system/bin/sh", "-c", "export PATH=/system/bin:/system/xbin:\$PATH; svc power stayon true"), 60_000)
+        }
         if (stopping) return
         if (engine == Engine.N64 && kernel.webViewSingleProcess)
             runCatching { guestShell("cmd webviewupdate disable-multiprocess", 30_000) }
@@ -2182,21 +2231,32 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             val openClCleanupFailure = runCatching { hostOpenCl.stop() }.exceptionOrNull()
             openClCleanupFailure?.let { log("OpenCL host cleanup unconfirmed: ${it.message}") }
             adb.stop()
+            var videoCleanupFailure: Throwable? = null
             if (admissionState.admitted) {
                 log("stopping system")
                 runCatching { guestRunner.run(listOf("/system/bin/sync"), 5_000, start = ::startCleanupSync) }
                 killAll()
+                if (videoHost != null) {
+                    videoCleanupFailure = runCatching {
+                        videoRuntime.restore()
+                        if (videoSocket.exists()) check(videoSocket.delete()) { "cannot remove Guest video socket" }
+                        videoHost = null
+                    }.exceptionOrNull()
+                    videoCleanupFailure?.let { log("Guest video cleanup unconfirmed: ${it.message}") }
+                }
                 props.stop(); props.stopAbstract();input.stop(); frames.stop(); wifi?.stop(); vold.stop(); if (audioDelegate.isInitialized()) audio.stop(); net.stop(); dns.stop(); events.stop(); logd.stop(); lights.stop(); sensors.stop(); location.stop(); mic.stop(); camera.stop(); overlays.stop(); GlHost.stop()
                 extraStubs.forEach { it.stop() }; extraStubs.clear()
                 lmk?.stop(); lmk = null
                 Keeper.release(ctx)
             }
             val cleanupFailures = listOfNotNull(dnsCleanupFailure, radioCleanupFailure,
-                vibrationCleanupFailure, vulkanCleanupFailure, openClCleanupFailure)
+                vibrationCleanupFailure, vulkanCleanupFailure, openClCleanupFailure, videoCleanupFailure)
             cleanupFailures.firstOrNull()?.let { failure ->
                 cleanupFailures.drop(1).filter { it !== failure }.forEach(failure::addSuppressed)
                 throw failure
             }
+            runtimeLease?.close()
+            runtimeLease = null
             setState(State.STOPPED)
         }
     }
@@ -2273,6 +2333,27 @@ class GuestVm(val ctx: Context, image: GuestImage) {
 
     fun guestShell(cmd: String, timeoutMs: Long = 60_000): String = lifecycle.run {
         guestRunner.run(listOf("/system/bin/sh", "-c", shellPrefix + cmd), timeoutMs).second
+    }
+
+    private val usesGuestStayAwake get() =
+        img.api == 36 && img.model == "NX809J" && img.abi == "arm64-v8a" && engine == Engine.N64
+
+    private val stayAwakeControl = GuestStayAwake { cmd ->
+        val (code, output) = guestRunner.run(listOf("/system/bin/sh", "-c", shellPrefix + cmd), 15_000)
+        check(code == 0) { "Guest settings command failed ($code): ${output.trim().take(200)}" }
+        output
+    }
+
+    internal fun guestStayAwake(on: Boolean? = null): Boolean = lifecycle.run {
+        if (usesGuestStayAwake) {
+            if (on == null) stayAwakeControl.initialize() else stayAwakeControl.set(on)
+        } else {
+            val ns = if (img.api >= 17) "global" else "system"
+            if (on != null) {
+                guestShell("settings put $ns stay_on_while_plugged_in ${if (on) 7 else 0}; svc power stayon $on")
+            }
+            (guestShell("settings get $ns stay_on_while_plugged_in").trim().toIntOrNull() ?: 0) != 0
+        }
     }
 
     internal val apkInstallGate = ApkInstallGate()

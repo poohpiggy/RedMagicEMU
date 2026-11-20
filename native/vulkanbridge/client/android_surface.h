@@ -28,6 +28,7 @@ VkResult rme_android_surface_create(struct ANativeWindow *window,
     struct RmeAndroidSurface **out);
 void rme_android_surface_destroy(struct RmeAndroidSurface *surface);
 struct ANativeWindow *rme_android_surface_window(const struct RmeAndroidSurface *surface);
+struct ANativeWindow *rme_android_surface_window_vk(VkSurfaceKHR handle);
 uint64_t rme_android_surface_usage(const struct RmeAndroidSurface *surface);
 const struct RmeAndroidWindowOps *rme_android_window_ops(void);
 VkResult rme_android_surface_create_vk(struct ANativeWindow *window,

@@ -53,7 +53,7 @@ two new buffers; the user confirmed front and rear preview in the stock camera.
 Still capture showed a storage-preparation message and has not been validated.
 The experimental path is not a production fix: readback failure, resource
 lifetime and restart handling remain incomplete. See
-`tools/diagnostics/oes-fbo-prototype/README.md` and `docs/PROGRESS.md` for
+`tools/diagnostics/oes-fbo-prototype/README.md` for
 test scope and rollback.
 
 On the connected target, running that independent probe through the existing

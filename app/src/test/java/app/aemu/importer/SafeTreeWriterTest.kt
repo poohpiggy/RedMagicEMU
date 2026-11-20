@@ -24,6 +24,23 @@ class SafeTreeWriterTest {
             }
         } finally { dir.deleteRecursively() }
     }
+    @Test fun rejectsAParentSymlinkEvenWhenItPointsToADirectory() {
+        val dir = Files.createTempDirectory("safe-tree-link")
+        val outside = Files.createTempDirectory("safe-tree-outside")
+        try {
+            try { Files.createSymbolicLink(dir.resolve("link"), outside) }
+            catch (e: java.nio.file.FileSystemException) { org.junit.Assume.assumeNoException(e) }
+            val writer = SafeTreeWriter(dir.toFile(), 10, 32, { false })
+            assertThrows(IOException::class.java) {
+                writer.write("link/file", 1, ByteArrayInputStream(byteArrayOf(1)))
+            }
+            assertFalse(Files.exists(outside.resolve("file")))
+        } finally {
+            Files.deleteIfExists(dir.resolve("link"))
+            Files.deleteIfExists(dir)
+            outside.toFile().deleteRecursively()
+        }
+    }
     @Test fun rejectsOversizeAndShortContent() {
         val dir = Files.createTempDirectory("safe-tree").toFile()
         try {

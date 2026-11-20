@@ -56,8 +56,23 @@ if args.bind_process_pipe:
             + text[end:])
     replace_once('      mContextId(virtioGpuContextId)\n{',
                  '''      mContextId(virtioGpuContextId),
-      mRmePrincipal(loadStream || !channel ? nullptr : rme::PrincipalScope::take())
+      mRmePrincipal(loadStream || !channel ? nullptr : rme::PrincipalScope::take()),
+      mRmeSocket(mRmePrincipal ? rme::VulkanSocketScope::take() : nullptr)
 {''')
+    replace_once('#include "rme_vk_rc_decoder.h"',
+                 '#include "rme_vk_rc_decoder.h"\n#include "vulkan_socket_stream.h"')
+    replace_once('''    IOStream* ioStream =
+        mChannel ? (IOStream*)&stream : (IOStream*)mRingStream.get();''',
+                 '''    IOStream* ioStream =
+        mChannel ? (IOStream*)&stream : (IOStream*)mRingStream.get();
+    std::optional<rme::VulkanSocketStream> socketStream;
+    if (mRmeSocket) {
+        socketStream.emplace(*mRmeSocket, stream, RenderChannel::Buffer::kSmallSize);
+        ioStream = &*socketStream;
+    }''')
+    replace_once('        while (ioStream->read(&flags, sizeof(flags)) != sizeof(flags)) {',
+                 '''        while (socketStream ? !socketStream->readFully(&flags, sizeof(flags))
+                            : ioStream->read(&flags, sizeof(flags)) != sizeof(flags)) {''')
     replace_once('            if (!tInfo.m_puid) {\n',
                  '            if (!tInfo.m_puid && !mChannel) {\n')
     replace_once('            if (tInfo.m_vkInfo) {\n                tInfo.m_vkInfo->ctx_id',
@@ -71,8 +86,9 @@ if args.bind_process_pipe:
         raise ValueError("unexpected RenderThread header")
     header_path = output / "RenderThread.bound.h"
     header_path.write_text(
-        '#include "principal_scope.h"\n' + header.replace(
-            marker, marker + "\n    std::shared_ptr<const rme::Principal> mRmePrincipal;"))
+        '#include "principal_scope.h"\nnamespace rme { class VulkanSocket; }\n' + header.replace(
+            marker, marker + "\n    std::shared_ptr<const rme::Principal> mRmePrincipal;"
+            "\n    std::shared_ptr<rme::VulkanSocket> mRmeSocket;"))
     (output / "headers.json").write_text(json.dumps({
         "version": 0,
         "roots": [{
@@ -125,7 +141,8 @@ def compile_copy(target, template_name, object_name, record_name):
         raise ValueError("expected Vulkan-only compile flags")
     command[1:1] = ["-I" + str(original.parent), "-I" + str(principal)]
     if args.bind_process_pipe:
-        command[1:1] = ["-ivfsoverlay", str((output / "headers.json").resolve())]
+        command[1:1] = ["-ivfsoverlay", str((output / "headers.json").resolve()),
+                        "-I" + str(Path(__file__).resolve().parent)]
     command[command.index(entry["file"])] = str(target.resolve())
     command[command.index("-o") + 1] = str((output / object_name).resolve())
     if "-MF" in command:
