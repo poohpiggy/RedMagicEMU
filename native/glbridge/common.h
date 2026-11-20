@@ -6,6 +6,7 @@
 
 #define AEMU_GL_PROTOCOL 1
 #define AEMU_GL_SOCKET "/dev/socket/aemu_gl"
+#define AEMU_IMAGE_BIND_CAMERA_FBO 0x80000000u
 #define NIL 0xffffffffu
 
 /* Calls that are not GL entry points. "->" is what the host answers. */
@@ -25,7 +26,8 @@ enum {
     OP_GET_STRING,          /* u32 name, u32 index (NIL: glGetString) -> u32 length, bytes padded to 4 */
     OP_IMAGE_TEX,           /* u32 target, u32 w, u32 h, block (RGBA, top row first) */
     OP_PING,                /* -> u32 */
-    OP_IMAGE_BIND,          /* u32 target, u64 buffer id, u64 write count, u32 w, u32 h -> u32 1: send its pixels */
+    OP_IMAGE_BIND,          /* u32 target with optional AEMU_IMAGE_BIND_CAMERA_FBO, u64 buffer id, u64 write count,
+                              u32 w, u32 h -> u32 1: send its pixels */
     OP_IMAGE_CREATE,        /* u32 texture, u32 level: an image of the current context's 2D texture -> u32 image (0: failed) */
     OP_IMAGE_TARGET,        /* u32 target, u32 image */
     OP_IMAGE_DESTROY,       /* u32 image */

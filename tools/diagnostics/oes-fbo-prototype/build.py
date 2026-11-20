@@ -84,8 +84,10 @@ def main():
     shutil.copytree(ROOT / "native" / "glbridge", bridge)
     (temp / "native" / "grallocwrap").mkdir()
     shutil.copy2(ROOT / "native" / "grallocwrap" / "note.h", temp / "native" / "grallocwrap" / "note.h")
-    (bridge / "host.c").write_text(host_experiment((bridge / "host.c").read_text(encoding="utf-8")), encoding="utf-8")
-    (bridge / "guest.c").write_text(guest_experiment((bridge / "guest.c").read_text(encoding="utf-8")), encoding="utf-8")
+    if "AEMU_IMAGE_BIND_CAMERA_FBO" not in (bridge / "common.h").read_text(encoding="utf-8"):
+        for filename, experiment in (("host.c", host_experiment), ("guest.c", guest_experiment)):
+            source = bridge / filename
+            source.write_text(experiment(source.read_text(encoding="utf-8")), encoding="utf-8")
     for name, source, libs, level in [
         ("libaemugl-DIAGNOSTIC.so", "host.c", ["-lEGL", "-lGLESv3", "-llog", "-lnativewindow", "-landroid"], "29"),
         ("libGLES_aemu-DIAGNOSTIC.so", "guest.c", ["-llog", "-ldl"], "21"),
