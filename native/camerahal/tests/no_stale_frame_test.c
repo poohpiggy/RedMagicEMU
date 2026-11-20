@@ -192,6 +192,89 @@ static int zoom_case(int format, int zoomed) {
     return 0;
 }
 
+static int video_frame_freshness(void) {
+    struct camera3 camera = {
+        .video_enabled = 1, .pull_video = 1, .fd = -1,
+        .video_frames = {{0, 9000000}},
+    };
+    if (has_new_frame(&camera, 0, 0, 1, 0)) return 1;
+    camera.video_tail = 1;
+    if (!has_new_frame(&camera, 0, 0, 1, 0)) return 1;
+    retire_video_frame(&camera);
+    if (has_new_frame(&camera, 0, 0, 1, 0)) return 1;
+    camera.pull_video = 0;
+    return has_new_frame(&camera, 0, 0, 1, 0);
+}
+
+static int video_descriptor_header(void) {
+    int sockets[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets)) return 1;
+    int32_t header[4] = {6, VIDEO_W, VIDEO_H, 0};
+    int32_t received[4] = {0};
+    unsigned char control[CMSG_SPACE(sizeof(int))] = {0};
+    struct iovec data = {header, sizeof(header)};
+    struct msghdr message = {.msg_iov = &data, .msg_iovlen = 1, .msg_control = control, .msg_controllen = sizeof(control)};
+    struct cmsghdr *item = CMSG_FIRSTHDR(&message);
+    item->cmsg_level = SOL_SOCKET;
+    item->cmsg_type = SCM_RIGHTS;
+    item->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(item), &sockets[0], sizeof(int));
+    int shared = -1;
+    int bad = sendmsg(sockets[0], &message, 0) != (long)sizeof(header) ||
+              frame_header(sockets[1], received, &shared) || shared < 0 ||
+              memcmp(header, received, sizeof(header)) || fcntl(shared, F_GETFD) != FD_CLOEXEC;
+    if (shared >= 0) close(shared);
+    close(sockets[0]);
+    close(sockets[1]);
+    return bad;
+}
+
+static int video_encoder_uses_planar_yuv(void) {
+    struct camera3 camera = {.video_enabled = 1, .fd = -1};
+    struct stream preview = {.width = 1920, .height = 1080, .format = FORMAT_IMPLEMENTATION_DEFINED, .usage = 0x100};
+    struct stream recorder = {.width = 1920, .height = 1080, .format = FORMAT_IMPLEMENTATION_DEFINED, .usage = 0x10003};
+    struct stream *streams[] = {&preview, &recorder};
+    struct stream_config config = {.num = 2, .streams = streams, .mode = 0x800c};
+    if (d_configure(&camera, &config) || preview.format != FORMAT_RGBA_8888 ||
+        recorder.format != 0x32315659 || !camera.video_stream) {
+        fprintf(stderr, "rear 1080p encoder must receive YV12, with RGBA preview\n");
+        return 1;
+    }
+    if (recorder.data_space != 0) {
+        fprintf(stderr, "reused encoder stream must retain its requested dataspace\n");
+        return 1;
+    }
+    camera.video_enabled = 0;
+    recorder.format = FORMAT_IMPLEMENTATION_DEFINED;
+    if (d_configure(&camera, &config) || recorder.format != FORMAT_RGBA_8888 || camera.video_stream) {
+        fprintf(stderr, "baseline encoder stream format must stay unchanged\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int video_planar_crop(void) {
+    const unsigned char yv12[24] = {
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        40, 41, 42, 43, 60, 61, 62, 63,
+    };
+    const unsigned char nv21[24] = {
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        40, 60, 41, 61, 42, 62, 43, 63,
+    };
+    unsigned char out[64];
+    for (int interleaved = 0; interleaved <= 1; interleaved++) {
+        memset(out, 255, sizeof(out));
+        put_yv12(out, 2, 2, interleaved ? nv21 : yv12, 4, 4, (struct crop){2, 2, 2, 2}, interleaved);
+        if (out[0] != 10 || out[1] != 11 || out[16] != 14 || out[17] != 15 ||
+            out[32] != 43 || out[48] != 63 || out[2] != 255 || out[33] != 255 || out[49] != 255) {
+            fprintf(stderr, "incorrect crop or chroma order in YV12 encoder buffer\n");
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int main(void) {
     md_alloc = fake_md_alloc; md_add = fake_md_add; md_free = fake_md_free;
     md_entries = fake_md_count; md_data = fake_md_count; md_append = fake_md_append;
@@ -202,7 +285,8 @@ int main(void) {
         zoom_case(FORMAT_YCBCR_420_888, 0) || zoom_case(FORMAT_YCBCR_420_888, 1)) return 1;
     if (run_case(0, 0, 0, 0) || run_case(1, 0, 0, 0) || run_case(1, 0, 1, 0) ||
         run_case(1, 1, 0, 0) || run_case(1, 1, 1, 1) || run_case(1, 1, 1, 0) ||
-        queue_lifetime_case()) return 1;
+        queue_lifetime_case() || video_frame_freshness() || video_descriptor_header() ||
+        video_encoder_uses_planar_yuv() || video_planar_crop()) return 1;
     puts("no stale or synthetic preview frames: OK");
     return 0;
 }

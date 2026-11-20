@@ -12,6 +12,9 @@ internal class TargetVideoRuntime(private val root: File, private val asset: (St
         const val INDEX = "rme-video/guest.idx"
         const val EXECUTABLE = "libaemuvideohost.so"
         const val SOCKET = "rme-video-test"
+        const val CAMERA_ENCODER = "libaemucameraencoder.so"
+        const val CAMERA_ENCODER_SOCKET = "rme-camera-encode"
+        private const val CAMERA_ENCODER_ORIGINAL = "5ede95cbfb15843086800909010d5a00632e6e8d980f530d11e35a167aff32e1"
         private val originals = mapOf(
             "avc" to "d414513d34791c89b61a40dbef6c0a7e7f26a554cb1d5b9079a2860550cb21f9",
             "hevc" to "e16488f4ae238f65f782bf9ea8432710b5cc87fcf837c16ee653080c4c4ed37a",
@@ -19,6 +22,35 @@ internal class TargetVideoRuntime(private val root: File, private val asset: (St
     }
 
     private val libraryDir = File(root, "apex/com.android.media.swcodec/lib64")
+    private val cameraEncoder = File(libraryDir, "libcodec2_soft_avcenc.so")
+    private val cameraEncoderBackup = File(libraryDir, "libcodec2_soft_avcenc.rme-original.so")
+
+    fun installCameraEncoder() {
+        restoreCameraEncoder()
+        require(cameraEncoder.isFile && !Files.isSymbolicLink(cameraEncoder.toPath()) &&
+            sha256(cameraEncoder) == CAMERA_ENCODER_ORIGINAL) { "unsupported Guest AVC encoder" }
+        val expected = asset("rme-video/camera-encoder.sha256").bufferedReader().use { it.readText().trim() }
+        val candidate = File.createTempFile(".rme-camera-encoder-", ".so", libraryDir)
+        try {
+            asset("rme-video/avcenc.so").use { source -> candidate.outputStream().use { source.copyTo(it) } }
+            check(sha256(candidate) == expected) { "Guest AVC encoder asset mismatch" }
+            Files.move(cameraEncoder.toPath(), cameraEncoderBackup.toPath(), ATOMIC_MOVE)
+            Files.move(candidate.toPath(), cameraEncoder.toPath(), ATOMIC_MOVE)
+        } catch (failure: Exception) {
+            runCatching { restoreCameraEncoder() }.onFailure(failure::addSuppressed)
+            throw failure
+        } finally {
+            candidate.delete()
+        }
+    }
+
+    fun restoreCameraEncoder() {
+        if (!cameraEncoderBackup.exists()) return
+        check(cameraEncoderBackup.isFile && !Files.isSymbolicLink(cameraEncoderBackup.toPath()) &&
+            sha256(cameraEncoderBackup) == CAMERA_ENCODER_ORIGINAL) { "Guest AVC encoder backup mismatch" }
+        Files.move(cameraEncoderBackup.toPath(), cameraEncoder.toPath(), ATOMIC_MOVE,
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    }
 
     fun install() {
         restore()

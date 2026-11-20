@@ -6,6 +6,8 @@
  * text commands ("open <id>", "start", "stop", "shot [left top width height]", "close"), frames back as
  *     int32 type, int32 width, int32 height, int32 length, then <length> bytes
  *     type 1: RGBA_8888 (640x480) followed by NV21; type 2: JPEG of a picture.
+ *     type 5: uint64 sensor timestamp and uint32 RGBA/YV12 slot for "video 1".
+ *     type 6: empty payload with the shared memory descriptor.
  *
  * Streams: IMPLEMENTATION_DEFINED becomes RGBA_8888 (what the software GL of the guest samples), YCbCr_420_888 is
  * NV21 in one block (the layout the engine's gralloc reports from lock_ycbcr), BLOB is the host's JPEG. A stream of
@@ -18,11 +20,11 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/socket.h>
 #include "camera_tags_aosp.h"
 
-extern int socket(int domain, int type, int proto);
-extern int connect(int fd, const void *addr, unsigned len);
-extern int shutdown(int fd, int how);
 extern long read(int fd, void *buf, unsigned long n);
 extern long write(int fd, const void *buf, unsigned long n);
 extern int close(int fd);
@@ -42,6 +44,12 @@ extern int clock_gettime(int clock, struct timespec64 *ts);
 #define EXPORT __attribute__((visibility("default")))
 #define W 640
 #define H 480
+#define VIDEO_W 1920
+#define VIDEO_H 1080
+#define VIDEO_RGBA_BYTES (VIDEO_W * VIDEO_H * 4)
+#define VIDEO_BYTES (VIDEO_RGBA_BYTES + VIDEO_W * VIDEO_H * 3 / 2)
+#define VIDEO_QUEUE 4
+#define NUBIA_VIDEO_60_MODE 0x8004
 #define MAX_ZOOM 4
 #define JPEG_MAX (1 << 20)
 #define JPEG_PIXEL_LIMIT (64 * 1024 * 1024)
@@ -130,12 +138,15 @@ struct camera3_ops {
 #define FORMAT_BLOB 0x21
 #define FORMAT_IMPLEMENTATION_DEFINED 0x22
 #define FORMAT_YCBCR_420_888 0x23
+#define FORMAT_YV12 0x32315659
 #define USAGE_SW_WRITE_OFTEN 0x30
+#define USAGE_VIDEO_ENCODER 0x10000
 #define MAX_BUFS 6
 #define QUEUE 16
 
 struct request { uint32_t frame; int nbuf; struct stream_buffer bufs[MAX_BUFS]; const void *handles[MAX_BUFS]; void *settings; };
 struct still_size { int32_t width, height; };
+struct video_frame { unsigned slot; uint64_t timestamp; };
 
 struct camera3 {
     struct hw_device common;
@@ -151,6 +162,11 @@ struct camera3 {
     volatile unsigned frame_seq;
     unsigned char *jpeg; volatile unsigned jpeg_len, jpeg_seq;
     struct still_size still_size;
+    int video_enabled, video_stream, pull_video;
+    unsigned char *video_pixels;
+    struct video_frame video_frames[VIDEO_QUEUE];
+    unsigned video_head, video_tail;
+    uint64_t video_timestamp;
     struct request queue[QUEUE];
     volatile unsigned head, tail;   /* worker takes at head, requests are put at tail */
     void *last;                     /* the settings of the last request that had any */
@@ -374,28 +390,53 @@ static int jpeg_capacity(struct still_size s) {
     return bytes > JPEG_MAX ? (int)bytes : JPEG_MAX;
 }
 
-static void *build_static_info(int id, struct still_size still) {
+static int rear_video_enabled(int id) {
+    if (id != 0) return 0;
+    FILE *file = fopen("/dev/.aemu-camera-video", "rb");
+    if (!file) return 0;
+    int enabled = fgetc(file) == '1';
+    fclose(file);
+    return enabled;
+}
+
+static void *build_static_info(int id, struct still_size still, int video) {
     struct ent entries[COUNT(STATIC)];
     const int32_t jpeg_max = jpeg_capacity(still);
+    const int32_t fps_ranges[] = {15, 30, 30, 30, 50, 60, 60, 60};
     const int32_t formats[] = {
         SIZES(FORMAT_IMPLEMENTATION_DEFINED), SIZES(FORMAT_YCBCR_420_888),
         FORMAT_BLOB, still.width, still.height, 0,
+        FORMAT_IMPLEMENTATION_DEFINED, VIDEO_W, VIDEO_H, 0,
     };
     const int64_t durations[] = {
         DURATIONS(FORMAT_IMPLEMENTATION_DEFINED, 33333333), DURATIONS(FORMAT_YCBCR_420_888, 33333333),
         FORMAT_BLOB, still.width, still.height, 33333333,
+        FORMAT_IMPLEMENTATION_DEFINED, VIDEO_W, VIDEO_H, 16666666,
     };
     const int64_t stalls[] = {
         DURATIONS(FORMAT_IMPLEMENTATION_DEFINED, 0), DURATIONS(FORMAT_YCBCR_420_888, 0),
         FORMAT_BLOB, still.width, still.height, 100000000,
+        FORMAT_IMPLEMENTATION_DEFINED, VIDEO_W, VIDEO_H, 0,
     };
     for (size_t i = 0; i < COUNT(STATIC); i++) {
         entries[i] = STATIC[i];
         switch (entries[i].tag) {
         case JPEG_MAX_SIZE: entries[i].data = &jpeg_max; break;
-        case SCALER_AVAILABLE_STREAM_CONFIGURATIONS: entries[i].data = formats; break;
-        case SCALER_AVAILABLE_MIN_FRAME_DURATIONS: entries[i].data = durations; break;
-        case SCALER_AVAILABLE_STALL_DURATIONS: entries[i].data = stalls; break;
+        case CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES:
+            if (video) { entries[i].data = fps_ranges; entries[i].count = COUNT(fps_ranges); }
+            break;
+        case SCALER_AVAILABLE_STREAM_CONFIGURATIONS:
+            entries[i].data = formats;
+            if (video) entries[i].count = COUNT(formats);
+            break;
+        case SCALER_AVAILABLE_MIN_FRAME_DURATIONS:
+            entries[i].data = durations;
+            if (video) entries[i].count = COUNT(durations);
+            break;
+        case SCALER_AVAILABLE_STALL_DURATIONS:
+            entries[i].data = stalls;
+            if (video) entries[i].count = COUNT(stalls);
+            break;
         }
     }
     void *m = md_build(entries, COUNT(entries), 4);
@@ -413,7 +454,7 @@ static void *build_static_info(int id, struct still_size still) {
 
 static void *g_static[2];
 static const void *static_info(int id) {
-    if (!g_static[id]) g_static[id] = build_static_info(id, still_size_for(id));
+    if (!g_static[id]) g_static[id] = build_static_info(id, still_size_for(id), rear_video_enabled(id));
     return g_static[id];
 }
 
@@ -441,7 +482,7 @@ static int host_connect(void) {
     a.family = 1; /* AF_UNIX */
     int fd = socket(1, 1 /* SOCK_STREAM */, 0);
     if (fd < 0) return -1;
-    if (connect(fd, &a, sizeof(a)) < 0) { close(fd); return -1; }
+    if (connect(fd, (const struct sockaddr *)&a, sizeof(a)) < 0) { close(fd); return -1; }
     return fd;
 }
 static void say(struct camera3 *d, const char *cmd) { if (d->fd >= 0) write(d->fd, cmd, slen(cmd)); }
@@ -479,15 +520,19 @@ static struct crop request_crop(const void *settings) {
     return (struct crop){(W - width) / 2, (H - height) / 2, width, height};
 }
 
-static void put_rgba(unsigned char *dst, int dw, int dh, const unsigned char *src, struct crop crop) {
-    if (dw == W && dh == H && crop.width == W && crop.height == H) {
-        copy(dst, src, (unsigned long)W * H * 4);
+static void put_rgba(unsigned char *dst, int dw, int dh, const unsigned char *src,
+                     int sw, int sh, struct crop crop) {
+    if (dw == sw && dh == sh && crop.width == sw && crop.height == sh) {
+        memcpy(dst, src, (size_t)sw * sh * 4);
         return;
     }
+    if (dw < 1 || dh < 1 || dw > VIDEO_W) return;
+    int columns[VIDEO_W];
+    for (int x = 0; x < dw; x++) columns[x] = x * crop.width / dw;
     for (int y = 0; y < dh; y++) {
-        const uint32_t *row = (const uint32_t *)src + (crop.top + y * crop.height / dh) * W + crop.left;
+        const uint32_t *row = (const uint32_t *)src + (crop.top + y * crop.height / dh) * sw + crop.left;
         uint32_t *o = (uint32_t *)(dst + (unsigned long)y * dw * 4);
-        for (int x = 0; x < dw; x++) o[x] = row[x * crop.width / dw];
+        for (int x = 0; x < dw; x++) o[x] = row[columns[x]];
     }
 }
 static void put_nv21(unsigned char *dst, int dw, int dh, const unsigned char *src, struct crop crop) {
@@ -513,15 +558,73 @@ static void put_nv21(unsigned char *dst, int dw, int dh, const unsigned char *sr
     }
 }
 
+static void put_plane(unsigned char *dst, int stride, int dw, int dh, const unsigned char *src,
+                      int source_stride, int step, struct crop crop) {
+    src += crop.top * source_stride + crop.left * step;
+    if (crop.width == dw && crop.height == dh && step == 1 && stride == dw && source_stride == dw) {
+        memcpy(dst, src, (size_t)dw * dh);
+        return;
+    }
+    for (int y = 0; y < dh; y++) {
+        const unsigned char *row = src + (y * crop.height / dh) * source_stride;
+        unsigned char *output = dst + y * stride;
+        if (step == 1 && crop.width == dw) memcpy(output, row, (size_t)dw);
+        else for (int x = 0; x < dw; x++) output[x] = row[(x * crop.width / dw) * step];
+    }
+}
+
+static void put_yv12(unsigned char *dst, int dw, int dh, const unsigned char *src,
+                     int sw, int sh, struct crop crop, int nv21) {
+    const int y_stride = (dw + 15) & ~15;
+    const int c_stride = (y_stride / 2 + 15) & ~15;
+    const unsigned char *v = src + sw * sh;
+    const unsigned char *u = v + (nv21 ? 1 : sw * sh / 4);
+    unsigned char *out_v = dst + y_stride * dh;
+    unsigned char *out_u = out_v + c_stride * (dh / 2);
+    put_plane(dst, y_stride, dw, dh, src, sw, 1, crop);
+    const struct crop chroma = {crop.left / 2, crop.top / 2, crop.width / 2, crop.height / 2};
+    const int step = nv21 ? 2 : 1;
+    put_plane(out_v, c_stride, dw / 2, dh / 2, v, sw / 2 * step, step, chroma);
+    put_plane(out_u, c_stride, dw / 2, dh / 2, u, sw / 2 * step, step, chroma);
+}
+
 /* ---- host frames ---- */
+static int frame_header(int fd, int32_t hdr[4], int *shared) {
+    unsigned char control[CMSG_SPACE(sizeof(int))];
+    struct iovec data = {hdr, sizeof(int32_t) * 4};
+    struct msghdr message = {.msg_iov = &data, .msg_iovlen = 1, .msg_control = control, .msg_controllen = sizeof(control)};
+    long received = recvmsg(fd, &message, MSG_WAITALL | MSG_CMSG_CLOEXEC);
+    if (received <= 0) return -1;
+    struct cmsghdr *item = CMSG_FIRSTHDR(&message);
+    if (item && item->cmsg_level == SOL_SOCKET && item->cmsg_type == SCM_RIGHTS &&
+        item->cmsg_len == CMSG_LEN(sizeof(int))) memcpy(shared, CMSG_DATA(item), sizeof(int));
+    if (received == (long)data.iov_len) return 0;
+    return read_full(fd, (char *)hdr + received, data.iov_len - (size_t)received);
+}
+
+static void release_slot(struct camera3 *d, unsigned slot) {
+    char command[20];
+    snprintf(command, sizeof(command), "release %u\n", slot);
+    say(d, command);
+}
+
 static void *reader(void *arg) {
     struct camera3 *d = arg;
     unsigned long flen = W * H * 4 + W * H * 3 / 2;
     unsigned char *back = malloc(flen);
     while (d->running && back) {
         int32_t hdr[4];
-        if (read_full(d->fd, hdr, sizeof(hdr)) < 0) break;
+        int shared = -1;
+        int rc = d->video_enabled ? frame_header(d->fd, hdr, &shared) : read_full(d->fd, hdr, sizeof(hdr));
+        if (rc < 0) { if (shared >= 0) close(shared); break; }
         unsigned long len = (unsigned long)hdr[3];
+        if (shared >= 0) {
+            if (hdr[0] == 6 && hdr[1] == VIDEO_W && hdr[2] == VIDEO_H && len == 0 && !d->video_pixels) {
+                void *region = mmap(0, (size_t)VIDEO_QUEUE * VIDEO_BYTES, PROT_READ, MAP_SHARED, shared, 0);
+                if (region != MAP_FAILED) d->video_pixels = region;
+            }
+            close(shared);
+        }
         if (hdr[0] == 1 && hdr[1] == W && hdr[2] == H && len == flen) {
             if (read_full(d->fd, back, len) < 0) break;
             pthread_mutex_lock(d->lock);
@@ -529,6 +632,17 @@ static void *reader(void *arg) {
             d->frame_seq++;
             pthread_mutex_unlock(d->lock);
             if (!back) back = malloc(flen);     /* the first frame: there was no older one to take over */
+        } else if (hdr[0] == 5 && d->video_pixels && hdr[1] == VIDEO_W && hdr[2] == VIDEO_H && len == 12) {
+            uint64_t timestamp;
+            uint32_t slot;
+            if (read_full(d->fd, &timestamp, sizeof(timestamp)) < 0 || read_full(d->fd, &slot, sizeof(slot)) < 0) break;
+            if (slot >= VIDEO_QUEUE) continue;
+            pthread_mutex_lock(d->lock);
+            if (timestamp > d->video_timestamp && d->video_tail - d->video_head < VIDEO_QUEUE) {
+                d->video_frames[d->video_tail++ % VIDEO_QUEUE] = (struct video_frame){slot, timestamp};
+                d->video_timestamp = timestamp;
+            } else release_slot(d, slot);
+            pthread_mutex_unlock(d->lock);
         } else if (hdr[0] == 2 && hdr[1] == d->still_size.width && hdr[2] == d->still_size.height &&
                    len > 0 && len <= (unsigned long)jpeg_capacity(d->still_size) - 8) {
             unsigned char *j = malloc(len);
@@ -554,7 +668,7 @@ static void *result_metadata(struct camera3 *d, uint64_t ts) {
     static const int64_t skew = 0;
     /* Nominal values of this virtual camera, not measurements from the host.
      * Exposure is one 30 fps frame; ISO and boost match the advertised ranges. */
-    static const int64_t virtual_exposure_ns = 33333333;
+    const int64_t virtual_exposure_ns = d->pull_video ? 16666666 : 33333333;
     static const int32_t virtual_iso = 100, virtual_boost = 100;
     int64_t t = (int64_t)ts;
     md_add(m, SENSOR_TIMESTAMP, &t, 1);
@@ -575,7 +689,9 @@ static void *result_metadata(struct camera3 *d, uint64_t ts) {
 /* Both image pointers and their sequence numbers are published under lock. */
 static int has_new_frame(struct camera3 *d, unsigned fseq, unsigned jseq, int preview, int blob) {
     pthread_mutex_lock(d->lock);
-    int ready = (!preview || (d->frame && d->frame_seq != fseq)) &&
+    int fresh_preview = d->pull_video ? d->video_head != d->video_tail
+                                     : d->frame && d->frame_seq != fseq;
+    int ready = (!preview || fresh_preview) &&
                 (!blob || (d->jpeg && d->jpeg_seq != jseq));
     pthread_mutex_unlock(d->lock);
     return ready;
@@ -598,6 +714,20 @@ static void fail_no_frame(struct camera3 *d, struct request *r) {
     d->cb->result(d->cb, &res);
 }
 
+static void retire_video_frame(struct camera3 *d) {
+    unsigned slot = d->video_frames[d->video_head++ % VIDEO_QUEUE].slot;
+    release_slot(d, slot);
+}
+
+static void select_video(struct camera3 *d, int selected) {
+    if (selected == d->pull_video) return;
+    pthread_mutex_lock(d->lock);
+    while (d->video_head != d->video_tail) retire_video_frame(d);
+    pthread_mutex_unlock(d->lock);
+    d->pull_video = selected;
+    say(d, selected ? "video 1\n" : "video 0\n");
+}
+
 static void answer(struct camera3 *d, struct request *r) {
     const struct gralloc_module *g = gralloc();
     int blob = 0, preview = 0;
@@ -607,6 +737,11 @@ static void answer(struct camera3 *d, struct request *r) {
     }
     if (r->settings) { if (d->last) md_free(d->last); d->last = r->settings; r->settings = 0; }
     struct crop crop = request_crop(d->last);
+    struct ro_entry fps;
+    const int fast = d->video_stream && d->last &&
+                     md_find(d->last, CONTROL_AE_TARGET_FPS_RANGE, &fps) == 0 && fps.count == 2 &&
+                     ((const int32_t *)fps.data)[1] == 60;
+    select_video(d, fast);
 
     /* the picture: the host compresses the next frame; otherwise the next preview frame (a third of a second at
      * most: nothing comes while the phone's camera permission is being asked) */
@@ -625,25 +760,22 @@ static void answer(struct camera3 *d, struct request *r) {
          * cannot satisfy a preview output of this mixed request. */
         pthread_mutex_lock(d->lock);
         fseq = d->frame_seq;
+        while (d->video_head != d->video_tail) retire_video_frame(d);
         pthread_mutex_unlock(d->lock);
         say(d, "start\n");      /* a picture stops the host's preview */
     }
     if (preview && (!blob || has_new_frame(d, fseq, jseq, 0, 1)))
-        for (int i = 0; i < 150 && d->running && !has_new_frame(d, fseq, jseq, 1, blob); i++) usleep(2000);
+        for (int i = 0; i < (fast ? 1200 : 150) && d->running && !has_new_frame(d, fseq, jseq, 1, blob); i++) usleep(fast ? 1000 : 2000);
     if (!d->running || !has_new_frame(d, fseq, jseq, preview, blob)) {
         fail_no_frame(d, r);
         return;
     }
 
-    uint64_t ts = now_ns();
-    struct notify_msg n;
-    for (unsigned i = 0; i < sizeof(n); i++) ((char *)&n)[i] = 0;
-    n.type = 2;     /* CAMERA3_MSG_SHUTTER */
-    n.m.shutter.frame = r->frame;
-    n.m.shutter.timestamp = ts;
-    d->cb->notify(d->cb, &n);
-
     pthread_mutex_lock(d->lock);
+    const struct video_frame *video_frame = fast && preview ? &d->video_frames[d->video_head % VIDEO_QUEUE] : 0;
+    uint64_t ts = video_frame ? video_frame->timestamp : now_ns();
+    struct crop video_crop = { crop.left * VIDEO_W / W, crop.top * VIDEO_H / H,
+                               crop.width * VIDEO_W / W, crop.height * VIDEO_H / H };
     for (int i = 0; i < r->nbuf; i++) {
         struct stream_buffer *b = &r->bufs[i];
         struct stream *s = b->stream;
@@ -665,15 +797,36 @@ static void answer(struct camera3 *d, struct request *r) {
                 copy((char *)va + capacity - sizeof(tail), &tail, sizeof(tail));
                 b->status = 0;
             }
+        } else if (s->format == FORMAT_YV12 && (video_frame || d->frame)) {
+            const unsigned char *pixels = video_frame
+                ? d->video_pixels + video_frame->slot * VIDEO_BYTES + VIDEO_RGBA_BYTES
+                : d->frame + W * H * 4;
+            put_yv12(va, (int)s->width, (int)s->height, pixels,
+                     video_frame ? VIDEO_W : W, video_frame ? VIDEO_H : H,
+                     video_frame ? video_crop : crop, !video_frame);
+            b->status = 0;
+        } else if (video_frame) {
+            if (s->format == FORMAT_RGBA_8888) {
+                put_rgba(va, (int)s->width, (int)s->height,
+                         d->video_pixels + video_frame->slot * VIDEO_BYTES, VIDEO_W, VIDEO_H, video_crop);
+                b->status = 0;
+            }
         } else if (d->frame) {
             if (s->format == FORMAT_YCBCR_420_888)
                 put_nv21(va, (int)s->width, (int)s->height, d->frame + W * H * 4, crop);
-            else put_rgba(va, (int)s->width, (int)s->height, d->frame, crop);
+            else put_rgba(va, (int)s->width, (int)s->height, d->frame, W, H, crop);
             b->status = 0;
         }
         g->unlock(g, *b->buffer);
     }
+    if (video_frame) retire_video_frame(d);
     pthread_mutex_unlock(d->lock);
+
+    struct notify_msg n = {0};
+    n.type = 2;     /* CAMERA3_MSG_SHUTTER */
+    n.m.shutter.frame = r->frame;
+    n.m.shutter.timestamp = ts;
+    d->cb->notify(d->cb, &n);
 
     void *meta = result_metadata(d, ts);
     if (meta) {
@@ -705,15 +858,25 @@ static int d_initialize(struct camera3 *d, const struct callback_ops *cb) { d->c
 static int d_configure(struct camera3 *d, struct stream_config *c) {
     if (!c || !c->num) return -22;
     for (int i = 0; i < 500 && d->head != d->tail; i++) usleep(2000);
+    int video_stream = c->mode == NUBIA_VIDEO_60_MODE;
     for (uint32_t i = 0; i < c->num; i++) {
         struct stream *s = c->streams[i];
         if (!s || s->type != 0 /* CAMERA3_STREAM_OUTPUT */) return -22;
-        if (s->format == FORMAT_IMPLEMENTATION_DEFINED) s->format = FORMAT_RGBA_8888;
-        if (s->format != FORMAT_RGBA_8888 && s->format != FORMAT_YCBCR_420_888 && s->format != FORMAT_BLOB) return -22;
-        if (s->format == FORMAT_YCBCR_420_888 && ((s->width | s->height) & 1)) return -22;
+        const int full_hd = s->width == VIDEO_W && s->height == VIDEO_H;
+        if (s->format == FORMAT_IMPLEMENTATION_DEFINED) {
+            const int encoder = d->video_enabled && full_hd && (s->usage & USAGE_VIDEO_ENCODER);
+            s->format = encoder ? FORMAT_YV12 : FORMAT_RGBA_8888;
+        }
+        if (s->format != FORMAT_RGBA_8888 && s->format != FORMAT_YCBCR_420_888 &&
+            s->format != FORMAT_YV12 && s->format != FORMAT_BLOB) return -22;
+        if ((s->format == FORMAT_YCBCR_420_888 || s->format == FORMAT_YV12) &&
+            ((s->width | s->height) & 1)) return -22;
+        if ((s->format == FORMAT_RGBA_8888 || s->format == FORMAT_YV12) && full_hd) video_stream = 1;
         s->usage |= USAGE_SW_WRITE_OFTEN;
         s->max_buffers = 4;
     }
+    d->video_stream = d->video_enabled && video_stream;
+    if (!d->video_stream) select_video(d, 0);
     say(d, "start\n");
     return 0;
 }
@@ -777,6 +940,7 @@ static int dev_close(struct hw_device *h) {
     for (int i = 0; i < 7; i++) if (d->templates[i]) md_free(d->templates[i]);
     if (d->last) md_free(d->last);
     free(d->frame); free(d->jpeg);
+    if (d->video_pixels) munmap(d->video_pixels, (size_t)VIDEO_QUEUE * VIDEO_BYTES);
     free(d);
     return 0;
 }
@@ -794,6 +958,7 @@ static int cam_open(const struct hw_module *m, const char *id, struct hw_device 
     d->ops = &ops;
     d->id = n;
     d->still_size = still_size_for(n);
+    d->video_enabled = rear_video_enabled(n);
     d->fd = host_connect();
     if (d->fd < 0) { free(d); return -19; /* -ENODEV: the host does not serve a camera */ }
     say(d, n ? "open 1\n" : "open 0\n");

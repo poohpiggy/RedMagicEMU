@@ -8,6 +8,7 @@ import android.graphics.Rect
 import android.graphics.YuvImage
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest as CR
@@ -29,6 +30,9 @@ import java.nio.ByteOrder
  * and sends "open <0 back | 1 front>", "start", "stop", "shot [left top width height]", "close"; frames go back as
  *     int32 type, width, height, length + data — type 1: RGBA_8888 then NV21 (preview), type 2: JPEG (picture),
  *     type 3: NV21 only (preview, after "nv21").
+ * API 36: "video 1" selects the admitted 1080p60 recording session. Type 5 carries
+ * an int64 sensor time in nanoseconds and an int32 RGBA/YV12 slot in memory shared by the
+ * descriptor on type 6. "release <slot>" returns a slot. "video 0" restores photo preview.
  * "zoom <ratio×100>": digital zoom of every frame (preview, recording and picture).
  * "size <w> <h>": NV21 previews of that size (the 640×480 frame cropped to its shape in the centre and scaled);
  * type-3 frames then carry it in their header. Pictures stay 640×480.
@@ -49,9 +53,30 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
     @Volatile var onPermissionNeeded: (() -> Unit)? = null
     private data class StillTarget(val id: String, val size: Size, val sensor: Rect?)
     @Volatile private var stillTargets: List<StillTarget?> = emptyList()
+    internal var rearVideoMode: TargetCameraVideoMode? = null
+        private set
+
+    internal fun prepareRearVideo(): Boolean {
+        if (api != 36 || File(paths.bin, "camera.test").isFile) return false
+        rearVideoMode = runCatching {
+            val manager = ctx.getSystemService(CameraManager::class.java)
+            val id = manager.findCamera(false) ?: return@runCatching null
+            val camera = manager.getCameraCharacteristics(id)
+            if (camera.get(CameraCharacteristics.LENS_FACING) != CameraCharacteristics.LENS_FACING_BACK) null
+            else TargetCameraVideoMode.forCamera(camera)
+        }.onFailure { log("camera: host video capabilities unavailable: ${it.message}") }.getOrNull()
+        return rearVideoMode != null
+    }
+
+    internal fun disableRearVideo() {
+        rearVideoMode = null
+    }
 
     fun start(): Boolean {
-        if (api == 36) publishStillSizes()
+        if (api == 36) {
+            publishStillSizes()
+            File(paths.root, "dev/.aemu-camera-video").writeText(if (rearVideoMode != null) "1" else "0")
+        }
         return server.start(log)
     }
     fun stop() = server.stop()
@@ -70,8 +95,11 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             runCatching {
                 val id = cm.findCamera(front) ?: return@runCatching null
                 val camera = cm.getCameraCharacteristics(id)
-                val jpeg = camera.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-                    ?.getOutputSizes(ImageFormat.JPEG).orEmpty()
+                val streams = camera.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return@runCatching null
+                val jpeg = sequenceOf(
+                    streams.getOutputSizes(ImageFormat.JPEG),
+                    streams.getHighResolutionOutputSizes(ImageFormat.JPEG),
+                ).filterNotNull().flatMap { it.asSequence() }
                     .filter { it.width > 0 && it.height > 0 && it.width.toLong() * it.height <= 64 * 1024 * 1024 }
                     .maxByOrNull { it.width.toLong() * it.height } ?: return@runCatching null
                 StillTarget(id, jpeg, camera.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE))
@@ -115,6 +143,14 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         @Volatile private var session: CameraCaptureSession? = null
         @Volatile private var preview: android.hardware.camera2.CaptureRequest.Builder? = null
         @Volatile private var pictureSize = android.util.Size(W, H)
+        @Volatile private var closed = false
+        private var characteristics: CameraCharacteristics? = null
+        private var videoAllowed = false
+        private var wantVideo = false
+        private var video: TargetCameraVideoFrames? = null
+        private var videoMemory: TargetCameraVideoMemory? = null
+        private var sessionGeneration = 0
+        private val videoSample = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN)
         private val nv21 = ByteArray(W * H * 3 / 2)
         private val zbuf = ByteArray(W * H * 3 / 2)
         private var sized = ByteArray(0)
@@ -140,13 +176,24 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                                 q["picture-size"]?.let { parseSize(it) }?.let { pictureSize = it }
                             }
                             // off the command loop: "params" must be answered while the phone camera opens (or asks for permission)
-                            if (java.io.File(paths.bin, "camera.test").exists()) openTest() else if (served) handler.post { open(front) } else open(front)
+                            if (File(paths.bin, "camera.test").exists()) openTest() else handler.post { open(front) }
                         }
                         "start" -> streaming = true
                         "stop" -> streaming = false
                         "shot" -> {
-                            shotCrop = if (api == 36) parseShotCrop(p) else null
-                            shot = true
+                            handler.post {
+                                shotCrop = if (api == 36) parseShotCrop(p) else null
+                                shot = true
+                                if (video != null) device?.let { configure(it, useVideo = false) }
+                            }
+                        }
+                        "video" -> if (api == 36) handler.post {
+                            wantVideo = p.getOrNull(1) == "1"
+                            if ((video != null) != (videoAllowed && wantVideo) && !shot)
+                                device?.let { configure(it, useVideo = wantVideo) }
+                        }
+                        "release" -> if (api == 36) p.getOrNull(1)?.toIntOrNull()?.let { slot ->
+                            handler.post { videoMemory?.release(slot) }
                         }
                         "nv21" -> onlyNv21 = true
                         "upright" -> upright = true
@@ -163,10 +210,15 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                     }
                 }
             } finally {
+                closed = true
                 streaming = false
-                runCatching { device?.close() }; runCatching { reader?.close() }; runCatching { still?.close() }
-                thread.quitSafely()
                 runCatching { sock.close() }
+                handler.post {
+                    closeOutputs()
+                    videoMemory?.close()
+                    device?.close()
+                    thread.quitSafely()
+                }
             }
         }
 
@@ -176,8 +228,9 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                 log("camera: the guest wants the camera, asking for permission")
                 onPermissionNeeded?.invoke()
                 // the guest's open already succeeded: wait for the answer, the preview starts when it is granted
-                repeat(120) {
-                    if (ctx.checkSelfPermission(android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) return@repeat
+                for (attempt in 0 until 120) {
+                    if (closed) return
+                    if (ctx.checkSelfPermission(android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) break
                     Thread.sleep(500)
                 }
                 if (ctx.checkSelfPermission(android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return
@@ -186,43 +239,132 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             stillTarget = stillTargets.getOrNull(if (front) 1 else 0)
             val id = cam?.host?.takeIf { it in cm.cameraIdList }
                 ?: stillTarget?.id ?: cm.findCamera(front) ?: run { log("camera: the phone has no camera"); return }
-            sensorOrient = cm.getCameraCharacteristics(id).get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
-            val ir = ImageReader.newInstance(W, H, ImageFormat.YUV_420_888, 2)
-            reader = ir
-            ir.setOnImageAvailableListener({ r -> r.acquireLatestImage()?.use { frame(it) } }, handler)
+            val info = cm.getCameraCharacteristics(id)
+            characteristics = info
+            sensorOrient = info.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+            videoAllowed = !front && rearVideoMode != null
             cm.openCamera(id, object : CameraDevice.StateCallback() {
                 override fun onOpened(d: CameraDevice) {
+                    if (closed) { d.close(); return }
                     device = d
-                    // the guest may have closed the camera already (mediaserver only probes it at start)
-                    runCatching {
-                        val req = d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply { addTarget(ir.surface) }
-                        // a steady 30 frames a second: the default range lets the exposure halve the rate in a dim room
-                        cm.getCameraCharacteristics(id).get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
-                            ?.filter { it.upper == 30 }?.maxByOrNull { it.lower }
-                            ?.let { req.set(android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
-                        preview = req
-                        // the still: the phone's own JPEG at the picture size the guest application chose
-                        val size = if (served) pictureSize else stillTarget?.size
-                        val st = size?.let {
-                            runCatching { ImageReader.newInstance(it.width, it.height, ImageFormat.JPEG, 2) }
-                                .onFailure { failure -> log("camera: cannot allocate JPEG reader for $it: ${failure.message}") }
-                                .getOrNull()
-                        }
-                        still = st
-                        st?.setOnImageAvailableListener({ r -> r.acquireLatestImage()?.use { stillDone(it) } }, handler)
-                        if (served) applyTo(req)
-                        @Suppress("DEPRECATION")
-                        d.createCaptureSession(listOfNotNull(ir.surface, st?.surface), object : CameraCaptureSession.StateCallback() {
-                            override fun onConfigured(s: CameraCaptureSession) { session = s; runCatching { s.setRepeatingRequest(req.build(), null, handler) } }
-                            override fun onConfigureFailed(s: CameraCaptureSession) { log("camera: session not configured") }
-                        }, handler)
-                    }.onFailure { runCatching { d.close() }; return }
+                    configure(d, useVideo = wantVideo)
                     log("camera: ${if (front) "front" else "back"} camera opened for the guest")
                 }
                 override fun onDisconnected(d: CameraDevice) { d.close() }
                 override fun onError(d: CameraDevice, e: Int) { log("camera: error $e"); d.close() }
             }, handler)
         }
+
+        private fun closeOutputs() {
+            session?.close()
+            session = null
+            preview = null
+            reader?.close()
+            reader = null
+            still?.close()
+            still = null
+            video?.close()
+            video = null
+        }
+
+        @Suppress("DEPRECATION")
+        private fun configure(d: CameraDevice, useVideo: Boolean) {
+            val generation = ++sessionGeneration
+            closeOutputs()
+            val mode = rearVideoMode?.takeIf { useVideo && videoAllowed }
+            runCatching {
+                if (mode != null) {
+                    var frameCount = 0
+                    var firstTimestamp = 0L
+                    val memory = videoMemory ?: TargetCameraVideoMemory().also { newMemory ->
+                        try {
+                            newMemory.sendDescriptor { fd ->
+                                synchronized(out) {
+                                    sock.setFileDescriptorsForSend(arrayOf(fd))
+                                    try {
+                                        send(6, ByteArray(0), 0, w = TargetCameraVideoMode.WIDTH, h = TargetCameraVideoMode.HEIGHT)
+                                    } finally {
+                                        sock.setFileDescriptorsForSend(null)
+                                    }
+                                }
+                            }
+                        } catch (error: Exception) {
+                            newMemory.close()
+                            throw error
+                        }
+                        videoMemory = newMemory
+                    }
+                    val source = TargetCameraVideoFrames(
+                        memory = memory,
+                        shouldRead = { streaming && !closed },
+                        onFrame = { timestamp, slot ->
+                            if (streaming && !closed) {
+                                videoSample.putLong(0, timestamp).putInt(8, slot)
+                                send(5, videoSample.array(), 12, w = TargetCameraVideoMode.WIDTH, h = TargetCameraVideoMode.HEIGHT)
+                                if (frameCount++ == 0) firstTimestamp = timestamp
+                                if (frameCount == 121) {
+                                    val rate = 120_000_000_000L / (timestamp - firstTimestamp)
+                                    log("camera: 1080p source delivered $frameCount frames at $rate fps")
+                                }
+                            } else memory.release(slot)
+                        },
+                        onFailure = { failure ->
+                            if (!closed) log("camera: host video frame failed: ${failure.message}")
+                            streaming = false
+                            closeOutputs()
+                        },
+                    )
+                    video = source
+                    val surface = source.open(handler)
+                    val request = d.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                        addTarget(surface)
+                        set(CR.CONTROL_AE_TARGET_FPS_RANGE, mode.fps)
+                    }
+                    val callback = captureSession(generation, request, highSpeed = mode.constrained)
+                    if (mode.constrained) d.createConstrainedHighSpeedCaptureSession(listOf(surface), callback, handler)
+                    else d.createCaptureSession(listOf(surface), callback, handler)
+                } else {
+                    val ir = ImageReader.newInstance(W, H, ImageFormat.YUV_420_888, 2)
+                    reader = ir
+                    ir.setOnImageAvailableListener({ r -> if (r === reader) r.acquireLatestImage()?.use { frame(it) } }, handler)
+                    val request = d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply { addTarget(ir.surface) }
+                    characteristics?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                        ?.filter { it.upper == 30 }?.maxByOrNull { it.lower }
+                        ?.let { request.set(CR.CONTROL_AE_TARGET_FPS_RANGE, it) }
+                    preview = request
+                    val size = if (served) pictureSize else stillTarget?.size
+                    val st = size?.let {
+                        runCatching { ImageReader.newInstance(it.width, it.height, ImageFormat.JPEG, 2) }
+                            .onFailure { error -> log("camera: cannot allocate JPEG reader for $it: ${error.message}") }
+                            .getOrNull()
+                    }
+                    still = st
+                    st?.setOnImageAvailableListener({ r -> if (r === still) r.acquireLatestImage()?.use { stillDone(it) } }, handler)
+                    if (served) applyTo(request)
+                    d.createCaptureSession(listOfNotNull(ir.surface, st?.surface), captureSession(generation, request), handler)
+                }
+            }.onFailure { log("camera: unable to configure host camera: ${it.message}"); closeOutputs() }
+        }
+
+        private fun captureSession(generation: Int, request: CR.Builder, highSpeed: Boolean = false) =
+            object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(s: CameraCaptureSession) {
+                    if (closed || generation != sessionGeneration) { s.close(); return }
+                    session = s
+                    runCatching {
+                        val capture = request.build()
+                        if (highSpeed) {
+                            val high = s as CameraConstrainedHighSpeedCaptureSession
+                            high.setRepeatingBurst(high.createHighSpeedRequestList(capture), null, handler)
+                        } else s.setRepeatingRequest(capture, null, handler)
+                    }.onFailure { log("camera: unable to start host capture: ${it.message}") }
+                }
+
+                override fun onConfigureFailed(s: CameraCaptureSession) {
+                    s.close()
+                    if (generation == sessionGeneration) log("camera: host camera rejected capture session")
+                }
+            }
 
         private fun frame(img: Image) {
             if (!streaming && !shot) return
@@ -393,6 +535,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             streaming = false   // a picture stops the preview until the guest starts it again
             if (api == 36) send(2, a, a.size, w = img.width, h = img.height) else send(2, a, a.size)
             log("camera: picture ${img.width}x${img.height}, ${a.size / 1024} KB")
+            if (wantVideo) device?.let { configure(it, useVideo = true) }
         }
 
         /** the frame flipped left-right (a "mirror" camera of the profile) */
@@ -408,7 +551,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         private fun send(type: Int, a: ByteArray, n: Int, b: ByteArray? = null, w: Int = W, h: Int = H) {
             val hd = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
             hd.putInt(type).putInt(w).putInt(h).putInt(n + (b?.size ?: 0))
-            synchronized(out) { out.write(hd.array()); out.write(a, 0, n); if (b != null) out.write(b); out.flush() }
+            synchronized(out) { out.write(hd.array()); if (n > 0) out.write(a, 0, n); if (b != null) out.write(b); out.flush() }
         }
 
         /** the frame cropped in the centre to the shape of w×h and scaled to it (nearest pixel) */
