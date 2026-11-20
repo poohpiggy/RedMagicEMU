@@ -57,6 +57,5 @@ python -B -m unittest discover -s native/gueststubs/aod/tools/tests -p 'test_pre
 ```
 
 For the verified target, import preparation decodes this resource and stages a
-checked raw mask in the new instance's runtime copy. The proxy still checks the
-actual JNI input; it is not a general segmentation model. Guest evidence,
-scope, and rollback are recorded in [the AOD record](../../../../docs/AOD_THEME_CACHE.md).
+checked raw mask in the new instance's runtime copy. The proxy checks the actual JNI input against the target theme before using
+the staged mask. The original APK remains available for rollback.

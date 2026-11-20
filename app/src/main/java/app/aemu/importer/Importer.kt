@@ -1,8 +1,15 @@
 package app.aemu.importer
 
 import android.content.Context
+import android.content.res.AssetFileDescriptor
 import android.net.Uri
+import android.os.Build
+import android.os.ParcelFileDescriptor
+import android.system.ErrnoException
 import android.system.Os
+import android.system.OsConstants
+import android.system.StructStat
+import androidx.annotation.RequiresApi
 import app.aemu.core.GuestImage
 import app.aemu.core.ImageStore
 import app.aemu.core.TreeFixer
@@ -122,15 +129,8 @@ class Importer(
         val lease = PendingImports.begin(images)
         var published = false
         try {
-            onProgress("Staging firmware", 0f)
-            val input = ctx.contentResolver.openInputStream(uri) ?: throw IOException("file failed to open")
-            val result = input.use { source ->
-                StagedInput.use(lease.dir, source, { cancelled }, maxBytes = TargetArchive.MAX_PACKAGE_SIZE) { staged ->
-                    onProgress("Checking firmware package", -1f)
-                    TargetArchive.validate(staged)
-                    importVerifiedSnapshot(staged, name, lease)
-                }
-            }
+            val input = ctx.contentResolver.openAssetFileDescriptor(uri, "r") ?: throw IOException("file failed to open")
+            val result = input.use { importPackage(it, name, lease) }
             if (cancelled) throw ImportCancelledException()
             publishWithFreshRingtoneMarker(lease, result.id, publicationGate::publish)
             published = true
@@ -140,7 +140,6 @@ class Importer(
                 log(warning)
                 finalResult = result.copy(warnings = result.warnings + warning)
             }
-            onProgress("Done", 1f)
             return finalResult
         } catch (t: Throwable) {
             if (!published) try { lease.close() }
@@ -150,19 +149,72 @@ class Importer(
         }
     }
 
-    /** Parse and verify the same private snapshot that is used for extraction. */
-    private fun importVerifiedSnapshot(staged: File, name: String, lease: PendingImports.Lease): GuestImage {
+    private fun importPackage(input: AssetFileDescriptor, name: String, lease: PendingImports.Lease): GuestImage {
+        if (Build.VERSION.SDK_INT >= 27) {
+            wholeFileStat(input)?.let { return importDirect(input, it, name, lease) }
+        }
+        val total = input.length
+        val progress = byteProgress("Staging firmware")
+        progress(0L, total)
+        return input.createInputStream().use { source ->
+            StagedInput.use(lease.dir, source, { cancelled }, maxBytes = TargetArchive.MAX_PACKAGE_SIZE,
+                onBytesCopied = { progress(it, total) }) { staged ->
+                importArchive(ZipFile.builder().setFile(staged), name, lease)
+            }
+        }
+    }
+
+    private fun wholeFileStat(input: AssetFileDescriptor): StructStat? {
+        if (input.startOffset != 0L || input.parcelFileDescriptor.canDetectErrors()) return null
+        val stat = try { Os.fstat(input.fileDescriptor) } catch (_: ErrnoException) { return null }
+        if (!OsConstants.S_ISREG(stat.st_mode) || stat.st_size <= 0L) return null
+        if (input.declaredLength >= 0L && input.declaredLength != stat.st_size) return null
+        if (stat.st_size > TargetArchive.MAX_PACKAGE_SIZE) throw IOException("Firmware size exceeds target")
+        return stat
+    }
+
+    @RequiresApi(27)
+    private fun importDirect(
+        input: AssetFileDescriptor, original: StructStat, name: String, lease: PendingImports.Lease,
+    ): GuestImage = ParcelFileDescriptor.AutoCloseInputStream(input.parcelFileDescriptor.dup()).use { source ->
+        importArchive(ZipFile.builder().setSeekableByteChannel(source.channel), name, lease) {
+            // The ZIP reader closes its channel after extraction. Check the original descriptor before
+            // using the verified private output files to build the Guest.
+            val current = Os.fstat(input.fileDescriptor)
+            if (current.st_size != original.st_size || current.st_mtim != original.st_mtim || current.st_ctim != original.st_ctim)
+                throw IOException("Firmware ZIP changed during import")
+        }
+    }
+
+    private fun byteProgress(step: String): (Long, Long) -> Unit {
+        var reported = -2L
+        return { bytes, total ->
+            val percent = if (total > 0L) (bytes * 100 / total).coerceAtMost(100) else -1L
+            if (percent != reported) {
+                reported = percent
+                onProgress(step, if (percent < 0) -1f else percent / 100f)
+            }
+        }
+    }
+
+    private fun importArchive(
+        archive: ZipFile.Builder, name: String, lease: PendingImports.Lease, verifySource: () -> Unit = {},
+    ): GuestImage {
         val pending = lease.dir
-        return TargetArchive.withExtracted(staged, pending, names = setOf("super.img", "ramdisk.img"), cancelled = { cancelled },
-            optionalNames = setOf("ztecfg.img")) { extracted ->
+        onProgress("Checking firmware package", -1f)
+        val id = ImageStore.newId(ctx)
+        paths = VmPaths(ctx, id, File(pending, id))
+        if (!paths.dir.mkdir()) throw IOException("Cannot create a private instance")
+        root = paths.root
+        if (!root.mkdir()) throw IOException("Cannot create the firmware tree")
+        val tree = PendingPackageTree(root, { cancelled })
+        return TargetArchive.withExtracted(archive, pending, names = setOf("super.img", "ramdisk.img"), cancelled = { cancelled },
+            optionalNames = setOf("ztecfg.img"), onBytesExtracted = byteProgress("Unpacking firmware images"),
+            prepareTree = tree) { extracted ->
+            verifySource()
             if (cancelled) throw ImportCancelledException()
-            val id = ImageStore.newId(ctx)
-            paths = VmPaths(ctx, id, File(pending, id))
-            if (!paths.dir.mkdir()) throw IOException("Cannot create a private instance")
-            root = paths.root
-            if (!root.mkdir()) throw IOException("Cannot create the firmware tree")
             onProgress("Extracting firmware", -1f)
-            ramdisk = TargetPackageTree.extract(extracted.getValue("super.img"), extracted.getValue("ramdisk.img"), root) { cancelled }
+            ramdisk = tree.awaitVerified()
             extracted["ztecfg.img"]?.let { TargetZtecfg.install(root, it) { cancelled } }
             if (cancelled) throw ImportCancelledException()
             val bootFingerprint = TargetMetadata.readFingerprint(ramdisk.orEmpty())

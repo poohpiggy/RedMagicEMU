@@ -1976,11 +1976,15 @@ EXPORT EGLBoolean eglMakeCurrent(EGLDisplay d, EGLSurface draw, EGLSurface read,
         }
         struct ectx *old = T->ctx;
         struct esurf *od = T->draw, *orr = T->read;
-        EGLint samples = 0;
+        EGLint samples = 0, depth = 0, stencil = 0;
         if (sd && !eglGetConfigAttrib(d, sd->cfg, 0x3031 /* EGL_SAMPLES */, &samples)) samples = 0;
-        begin(T, OP_MAKE_CURRENT, 20, 20);
+        uint32_t color_only = sd &&
+            eglGetConfigAttrib(d, sd->cfg, 0x3025 /* EGL_DEPTH_SIZE */, &depth) && depth == 0 &&
+            eglGetConfigAttrib(d, sd->cfg, 0x3026 /* EGL_STENCIL_SIZE */, &stencil) && stencil == 0;
+        begin(T, OP_MAKE_CURRENT, 24, 24);
         put32(T, c->host); put32(T, sd ? sd->key : 0); put32(T, sd ? (uint32_t)sd->w : 0); put32(T, sd ? (uint32_t)sd->h : 0);
         put32(T, (uint32_t)(samples > 0 ? samples : 0));
+        put32(T, color_only);
         rsync(T);
         if (!get32v(T)) { t_err = EGL_BAD_CONTEXT; LOG("the host did not make context %u current", c->host); return 0; }
         c->current++; if (sd) sd->current++; if (sr && sr != sd) sr->current++;

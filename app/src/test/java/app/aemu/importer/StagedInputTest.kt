@@ -10,11 +10,13 @@ class StagedInputTest {
     @Test fun copiesInputAndRemovesStageAfterUse() {
         val dir = Files.createTempDirectory("stage-test").toFile()
         try {
-            val input = byteArrayOf(1, 2, 3)
-            StagedInput.use(dir, ByteArrayInputStream(input), { false }) { file ->
+            val input = ByteArray(1024 * 1024 + 3) { (it % 5).toByte() }
+            val copied = ArrayList<Long>()
+            StagedInput.use(dir, ByteArrayInputStream(input), { false }, onBytesCopied = { copied.add(it) }) { file ->
                 assertArrayEquals(input, file.readBytes())
                 assertTrue(file.canonicalPath.startsWith(dir.canonicalPath + java.io.File.separator))
             }
+            assertEquals(listOf(1024 * 1024L, input.size.toLong()), copied)
             assertTrue(dir.listFiles()!!.isEmpty())
         } finally { dir.deleteRecursively() }
     }

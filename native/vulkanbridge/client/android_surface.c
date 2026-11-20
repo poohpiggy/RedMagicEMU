@@ -138,6 +138,16 @@ int rme_android_surface_owned_vk(VkSurfaceKHR handle) {
     return found;
 }
 
+struct ANativeWindow *rme_android_surface_window_vk(VkSurfaceKHR handle) {
+    struct RmeAndroidSurface *target = (struct RmeAndroidSurface *)(uintptr_t)handle;
+    pthread_mutex_lock(&surface_lock);
+    struct RmeAndroidSurface *surface = surfaces;
+    while (surface && surface != target) surface = surface->next;
+    struct ANativeWindow *window = surface ? surface->window : NULL;
+    pthread_mutex_unlock(&surface_lock);
+    return window;
+}
+
 int rme_android_surface_remote_info_vk(VkSurfaceKHR handle, VkInstance *instance, VkSurfaceKHR *remote) {
     struct RmeAndroidSurface *target = (struct RmeAndroidSurface *)(uintptr_t)handle;
     pthread_mutex_lock(&surface_lock);

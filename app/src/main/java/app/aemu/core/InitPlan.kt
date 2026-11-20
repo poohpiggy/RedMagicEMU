@@ -185,6 +185,59 @@ object InitPlan {
     internal fun isIsolatedQtiBluetoothHal(api: Int, argv: List<String>): Boolean =
         api == 36 && argv.firstOrNull() == "/vendor/bin/hw/android.hardware.bluetooth@aidl-service-qti"
 
+    private val unusedNx809jServices = setOf(
+        "/vendor/bin/hw/vendor.qti.hardware.perf2-hal-service",
+        "/vendor/bin/hw/android.hardware.sensors-service.multihal",
+        "/vendor/bin/hw/android.hardware.thermal-service.qti",
+        "/vendor/bin/hw/android.hardware.powerstats-service.qti",
+        "/vendor/bin/hw/android.hardware.ir-service",
+        "/vendor/bin/hw/vendor.qti.hardware.memtrack-service",
+        "/vendor/bin/hw/android.hardware.boot-service.qti",
+        // The Guest uses the engine's camera, allocator, lights and audio HALs, and the APEX software codec.
+        "/vendor/bin/hw/vendor.qti.camera.provider-service_64",
+        "/vendor/bin/hw/vendor.qti.hardware.display.allocator-service",
+        "/vendor/bin/hw/vendor.qti.hardware.lights.service",
+        "/vendor/bin/hw/audiohalservice.qti",
+        "/vendor/bin/hw/vendor.qti.media.c2@1.0-service",
+        // These stock services cannot register against the Guest's VINTF manifest.
+        "/vendor/bin/hw/android.hardware.usb-service.qti",
+        "/vendor/bin/hw/android.hardware.wifi-service",
+        "/vendor/bin/hw/android.hardware.nfc-service-aidl",
+        "/vendor/bin/hw/qconfigservice",
+        "/vendor/bin/hw/vendor.zte.ldd.cmd-service",
+        "/vendor/bin/hw/vendor.qti.hardware.capabilityconfigstore-service",
+        "/vendor/bin/hw/vendor.qti.hardware.servicetrackeraidl-service",
+        // Stock services that exit on the Guest without providing their hardware interfaces.
+        "/vendor/bin/feature_enabler_client",
+        "/vendor/bin/hw/vendor.zte.voice-service",
+        "/vendor/bin/hw/vendor.zte.llm-service",
+        "/vendor/bin/hw/vendor.zte.bge-service",
+        "/vendor/bin/hw/vendor.zte.bert-service",
+        "/vendor/bin/hw/vendor.qti.hardware.trustedui-aidl-service-qti",
+        "/vendor/bin/hw/vendor.qti.hardware.secureprocessor",
+        "/vendor/bin/snapdragon_services",
+        "/vendor/bin/vendor.qti.qspa-service",
+        "/vendor/bin/qms",
+        "/vendor/bin/dspservice",
+        "/vendor/bin/hw/android.hardware.drm-service.clearkey",
+        "/vendor/bin/hw/vendor.qti.hardware.c2pa-aidl-service-qti",
+        "/vendor/bin/vendor.qti.qspmhal-service",
+        "/vendor/bin/poweropt-service",
+        "/vendor/bin/lowi-server",
+        "/vendor/bin/vendordiag",
+        "/vendor/bin/xtra-daemon",
+        // The Guest keystore uses the engine's Keymaster 3.0 HAL through Android's compatibility layer.
+        "/vendor/bin/hw/android.hardware.security.onekeymint-service-qti",
+        "/vendor/bin/hw/android.hardware.security.secretkeeper-service-qti",
+    )
+
+    internal fun forGuestRuntime(
+        services: List<GuestService>, api: Int, model: String, abi: String, engine: Engine,
+    ): List<GuestService> {
+        if (api != 36 || model != "NX809J" || abi != "arm64-v8a" || engine != Engine.N64) return services
+        return services.filterNot { it.argv.firstOrNull() in unusedNx809jServices }
+    }
+
     /** Строит план загрузки из разобранных rc-файлов; для отсутствующих служб берёт умолчания. */
     fun plan(rc: Rc, api: Int, root: File): List<GuestService> {
         val out = ArrayList<GuestService>()

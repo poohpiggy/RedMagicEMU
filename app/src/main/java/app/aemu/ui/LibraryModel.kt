@@ -7,9 +7,11 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.aemu.core.GuestImage
 import app.aemu.core.ImageStore
+import app.aemu.core.InstanceRuntimeLease
 import app.aemu.core.VmSettings
 import app.aemu.importer.Importer
 import app.aemu.importer.PendingImports
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -24,14 +26,18 @@ data class ImportState(
     val log: List<String> = emptyList(),
     val error: String? = null,
     val cancelled: Boolean = false,
-    val done: GuestImage? = null,
+    val completed: Boolean = false,
 )
+
+internal enum class ResetState { RUNNING, DONE, BUSY, FAILED }
 
 class LibraryModel(app: Application) : AndroidViewModel(app) {
     private val _images = MutableStateFlow<List<GuestImage>?>(null)
     val images: StateFlow<List<GuestImage>?> = _images
     private val _import = MutableStateFlow(ImportState())
     val import: StateFlow<ImportState> = _import
+    private val _reset = MutableStateFlow<ResetState?>(null)
+    internal val reset: StateFlow<ResetState?> = _reset
     private val recoveryNotice = ImportRecoveryNotice(
         recover = {
             val images = ImageStore.imagesDir(getApplication())
@@ -70,7 +76,7 @@ class LibraryModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) {
             val log = ArrayList<String>()
             val imp = Importer(ctx,
-                onProgress = { step, p -> _import.value = _import.value.copy(step = step, progress = if (p >= 0) p else _import.value.progress.takeIf { it >= 0 } ?: -1f) },
+                onProgress = { step, p -> _import.value = _import.value.copy(step = step, progress = p) },
                 log = { s -> android.util.Log.i("aemu-import", s); log.add(s); _import.value = _import.value.copy(log = log.takeLast(50)) })
             try {
                 val name = runCatching {
@@ -86,7 +92,7 @@ class LibraryModel(app: Application) : AndroidViewModel(app) {
                 val img = raw.copy(settings = raw.settings.copy(gpu = d.gpu, jit = d.jit, netProxy = d.netProxy,
                     showNavBar = d.showNavBar, keepScreenOn = d.keepScreenOn, showLed = d.showLed))
                 if (img != raw) ImageStore.save(ctx, img)
-                _import.value = _import.value.copy(active = false, done = img, step = "Done", progress = 1f)
+                _import.value = ImportState(completed = true)
             } catch (t: Throwable) {
                 _import.value = if (isUserCancellation(t)) _import.value.copy(active = false, cancelled = true)
                 else _import.value.copy(active = false, error = t.message ?: t.toString())
@@ -102,11 +108,22 @@ class LibraryModel(app: Application) : AndroidViewModel(app) {
 
     fun cancelImport() { synchronized(cancellationLock) { importCancellation?.cancel() } }
 
-    /** A machine is running (they live in the :vm process); its files must not be changed under it. */
-    fun vmRunning(): Boolean {
-        val ctx = getApplication<Application>()
-        val am = ctx.getSystemService(android.app.ActivityManager::class.java)
-        return am.runningAppProcesses.orEmpty().any { it.processName == ctx.packageName + ":vm" }
+    internal fun resetData(id: String) {
+        if (_reset.value == ResetState.RUNNING) return
+        _reset.value = ResetState.RUNNING
+        viewModelScope.launch {
+            _reset.value = try {
+                withContext(Dispatchers.IO) { ImageStore.resetData(getApplication(), id) }
+                ResetState.DONE
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: InstanceRuntimeLease.InUse) {
+                ResetState.BUSY
+            } catch (e: Exception) {
+                android.util.Log.e("aemu-reset", "Could not reset Guest data", e)
+                ResetState.FAILED
+            }
+        }
     }
 
     fun dismissImport() { _import.value = ImportState() }

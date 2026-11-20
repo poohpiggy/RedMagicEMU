@@ -52,13 +52,19 @@ class ErofsImage(private val src: RandomSource, private val cancelled: () -> Boo
         if (incompat and 0x8 != 0 && sb.getShort(86).toInt() != 0) throw IOException("EROFS: an image over several devices")
     }
 
-    private fun bytes(pos: Long, n: Int): ByteArray {
+    private fun checkRange(pos: Long, n: Int) {
         if (pos < 0 || n < 0 || pos > src.size || n.toLong() > src.size - pos)
             throw IOException("EROFS: read outside image")
-        val b = ByteBuffer.allocate(n)
-        src.read(pos, b)
-        if (b.hasRemaining()) throw IOException("EROFS: truncated image")
-        return b.array()
+    }
+
+    private fun readExactly(pos: Long, buffer: ByteBuffer) {
+        src.read(pos, buffer)
+        if (buffer.hasRemaining()) throw IOException("EROFS: truncated image")
+    }
+
+    private fun bytes(pos: Long, n: Int): ByteArray {
+        checkRange(pos, n)
+        return ByteArray(n).also { readExactly(pos, ByteBuffer.wrap(it)) }
     }
     private fun le(pos: Long, n: Int): ByteBuffer = ByteBuffer.wrap(bytes(pos, n)).order(ByteOrder.LITTLE_ENDIAN)
 
@@ -299,101 +305,177 @@ class ErofsImage(private val src: RandomSource, private val cancelled: () -> Boo
         if (advise and 0x20 != 0) { last.fragment = true; last.pa = h.getInt(0).toLong() and 0xffffffffL }
         else if (advise and 0x8 != 0) { last.pa = idataOff; last.plen = h.getShort(2).toInt() and 0xffff }
         if (extents[0].lofs != 0L || extents.any { it.llen <= 0 || it.llen > MAX_EXTENT }) throw IOException("EROFS: broken extent map (size ${ino.size}, layout ${ino.layout}, advise $advise, algo $algo, cluster 2^$lcBits, h ${h.getInt(0)}/${h.getShort(2)}, extents ${extents.take(6).joinToString { "${it.lofs}+${it.llen}t${it.type}" }} .. ${extents.takeLast(3).joinToString { "${it.lofs}+${it.llen}t${it.type}" }})")
-        val interlaced = advise and 0x10 != 0
-        return object : InputStream() {
-            private var next = 0
-            private var buf = ByteArray(0)
-            private var at = 0
-            private val one = ByteArray(1)
-            override fun read(): Int = if (read(one, 0, 1) < 0) -1 else one[0].toInt() and 0xff
-            override fun read(b: ByteArray, off: Int, len: Int): Int {
-                checkCancelled()
-                while (at >= buf.size) {
-                    if (next >= extents.size) return -1
-                    buf = extent(extents[next++], algo, interlaced); at = 0
+        return ExtentStream(extents, algo, interlaced = advise and 0x10 != 0)
+    }
+
+    private inner class ExtentStream(
+        private val extents: List<Extent>, private val algo: Int, private val interlaced: Boolean,
+    ) : InputStream() {
+        private var next = 0
+        private var pending = ByteArray(0)
+        private var at = 0
+        private var pendingSize = 0
+        private var encoded = ByteArray(0)
+        private val one = ByteArray(1)
+        override fun read(): Int = if (read(one, 0, 1) < 0) -1 else one[0].toInt() and 0xff
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            checkCancelled()
+            if (off < 0 || len < 0 || len > b.size - off) throw IndexOutOfBoundsException()
+            var copied = 0
+            while (copied < len) {
+                if (at < pendingSize) {
+                    val count = minOf(len - copied, pendingSize - at)
+                    System.arraycopy(pending, at, b, off + copied, count)
+                    at += count
+                    copied += count
+                    if (at == pendingSize && pending.size > MAX_REUSED_BUFFER) pending = ByteArray(0)
+                    continue
                 }
-                val n = minOf(len, buf.size - at)
-                System.arraycopy(buf, at, b, off, n)
-                at += n
-                return n
+                if (next >= extents.size) return if (copied == 0) -1 else copied
+                checkCancelled()
+                val extent = extents[next++]
+                val count = extent.llen.toInt()
+                if (count <= len - copied) {
+                    if (isDirectPlain(extent)) {
+                        copied += readPlainRun(extent, b, off + copied, len - copied)
+                    } else {
+                        decode(extent, b, off + copied, count)
+                        copied += count
+                    }
+                } else {
+                    if (pending.size < count) pending = ByteArray(count)
+                    decode(extent, pending, 0, count)
+                    pendingSize = count
+                    at = 0
+                }
             }
+            return copied
+        }
+
+        private fun isDirectPlain(e: Extent): Boolean = e.type == PLAIN && !interlaced && !e.fragment
+
+        private fun checkPlainRange(e: Extent) {
+            checkRange(e.pa, e.plen)
+            if (e.llen > e.plen) throw IOException("EROFS: an uncompressed extent longer than its blocks")
+        }
+
+        private fun readPlainRun(first: Extent, out: ByteArray, offset: Int, limit: Int): Int {
+            checkPlainRange(first)
+            var size = first.llen.toInt()
+            while (next < extents.size && size < limit) {
+                val e = extents[next]
+                if (!isDirectPlain(e) || e.pa != first.pa + size || e.llen > limit - size) break
+                if (next and 255 == 0) checkCancelled()
+                checkPlainRange(e)
+                size += e.llen.toInt()
+                next++
+            }
+            readExactly(first.pa, ByteBuffer.wrap(out, offset, size))
+            return size
+        }
+
+        private fun decode(e: Extent, out: ByteArray, offset: Int, count: Int) {
+            if (e.fragment) {
+                val data = packedData()
+                if (e.pa < 0 || e.pa > data.size || count.toLong() > data.size - e.pa)
+                    throw IOException("EROFS: invalid fragment range")
+                System.arraycopy(data, e.pa.toInt(), out, offset, count)
+                return
+            }
+            if (isDirectPlain(e)) {
+                checkPlainRange(e)
+                readExactly(e.pa, ByteBuffer.wrap(out, offset, count))
+                return
+            }
+            checkRange(e.pa, e.plen)
+            val raw = if (e.plen > MAX_REUSED_BUFFER) ByteArray(e.plen) else {
+                if (encoded.size < e.plen) encoded = ByteArray(e.plen)
+                encoded
+            }
+            readExactly(e.pa, ByteBuffer.wrap(raw, 0, e.plen))
+            if (e.type == PLAIN) {
+                if (count > e.plen) throw IOException("EROFS: an uncompressed extent longer than its blocks")
+                val shift = (e.lofs and (blk - 1).toLong()).toInt() % e.plen
+                val first = minOf(count, e.plen - shift)
+                System.arraycopy(raw, shift, out, offset, first)
+                System.arraycopy(raw, 0, out, offset + first, count - first)
+                return
+            }
+            val a = if (e.type == HEAD2) algo shr 4 else algo and 15
+            if (a != 0 && a != 2) throw IOException("EROFS: compression ${if (a == 1) "LZMA" else if (a == 3) "Zstandard" else a.toString()} is not read yet (LZ4, LZ4HC and DEFLATE are)")
+            var from = 0
+            if (zeroPadding) while (from < e.plen && raw[from].toInt() == 0) from++
+            if (a == 0) lz4(raw, from, e.plen, out, offset, count)
+            else inflate(raw, from, e.plen, out, offset, count)
         }
     }
 
-    private fun extent(e: Extent, algo: Int, interlaced: Boolean): ByteArray {
-        val out = ByteArray(e.llen.toInt())
-        if (e.fragment) {
-            val data = packedData()
-            if (e.pa < 0 || e.pa > data.size || out.size.toLong() > data.size - e.pa) throw IOException("EROFS: invalid fragment range")
-            System.arraycopy(data, e.pa.toInt(), out, 0, out.size); return out
-        }
-        val raw = bytes(e.pa, e.plen)
-        if (e.type == PLAIN) {
-            if (out.size > raw.size) throw IOException("EROFS: an uncompressed extent longer than its blocks")
-            if (interlaced) {
-                val shift = (e.lofs and (blk - 1).toLong()).toInt()
-                for (i in out.indices) out[i] = raw[(shift + i) % raw.size]
-            } else System.arraycopy(raw, 0, out, 0, out.size)
-            return out
-        }
-        val a = if (e.type == HEAD2) algo shr 4 else algo and 15
-        var from = 0
-        if (a == 2) {   // DEFLATE: raw stream, right aligned like LZ4 when zero padding is on
-            if (zeroPadding) while (from < raw.size && raw[from].toInt() == 0) from++
-            val inf = java.util.zip.Inflater(true)
-            try {
-                inf.setInput(raw, from, raw.size - from)
-                var o = 0
-                while (o < out.size && !inf.finished()) {
-                    val n = inf.inflate(out, o, out.size - o)
-                    if (n == 0) break
-                    o += n
-                }
-                if (o < out.size) throw IOException("EROFS: DEFLATE data ends early")
-            } finally { inf.end() }
-            return out
-        }
-        if (a != 0) throw IOException("EROFS: compression ${if (a == 1) "LZMA" else if (a == 3) "Zstandard" else a.toString()} is not read yet (LZ4, LZ4HC and DEFLATE are)")
-        if (zeroPadding) while (from < raw.size && raw[from].toInt() == 0) from++
-        lz4(raw, from, out)
-        return out
+    private fun inflate(raw: ByteArray, from: Int, inputEnd: Int, out: ByteArray, offset: Int, count: Int) {
+        val inf = java.util.zip.Inflater(true)
+        try {
+            inf.setInput(raw, from, inputEnd - from)
+            var written = 0
+            while (written < count && !inf.finished()) {
+                val n = inf.inflate(out, offset + written, count - written)
+                if (n == 0) break
+                written += n
+            }
+            if (written < count) throw IOException("EROFS: DEFLATE data ends early")
+        } finally { inf.end() }
     }
 
     /** LZ4 block; stops when the output is full (an extent may take only the start of what its blocks hold) */
-    private fun lz4(inp: ByteArray, from: Int, out: ByteArray) {
+    private fun lz4(inp: ByteArray, from: Int, inputEnd: Int, out: ByteArray, offset: Int, count: Int) {
         var i = from
-        var o = 0
-        while (i < inp.size && o < out.size) {
-            checkCancelled()
+        var o = offset
+        val end = offset + count
+        var nextCancellationCheck = offset
+        while (i < inputEnd && o < end) {
+            if (o >= nextCancellationCheck) {
+                checkCancelled()
+                nextCancellationCheck = o + minOf(64 * 1024, end - o)
+            }
             val token = inp[i++].toInt() and 0xff
             var lit = token shr 4
             if (lit == 15) while (true) {
-                if (i >= inp.size) throw IOException("EROFS: truncated LZ4 literal length")
+                if (i >= inputEnd) throw IOException("EROFS: truncated LZ4 literal length")
                 val v = inp[i++].toInt() and 0xff
                 if (lit > Int.MAX_VALUE - v) throw IOException("EROFS: invalid LZ4 literal length")
                 lit += v; if (v != 255) break
             }
-            if (lit > inp.size - i) throw IOException("EROFS: truncated LZ4 literal")
-            val nl = minOf(lit, out.size - o)
+            if (lit > inputEnd - i) throw IOException("EROFS: truncated LZ4 literal")
+            val nl = minOf(lit, end - o)
             System.arraycopy(inp, i, out, o, nl)
             i += lit; o += nl
-            if (o >= out.size || i + 2 > inp.size) break
+            if (o >= end || i + 2 > inputEnd) break
             val dist = (inp[i].toInt() and 0xff) or ((inp[i + 1].toInt() and 0xff) shl 8)
             i += 2
             var len = token and 15
             if (len == 15) while (true) {
-                if (i >= inp.size) throw IOException("EROFS: truncated LZ4 match length")
+                if (i >= inputEnd) throw IOException("EROFS: truncated LZ4 match length")
                 val v = inp[i++].toInt() and 0xff
                 if (len > Int.MAX_VALUE - v - 4) throw IOException("EROFS: invalid LZ4 match length")
                 len += v; if (v != 255) break
             }
-            len += 4
-            if (dist == 0 || dist > o) throw IOException("EROFS: broken LZ4 data")
-            var s = o - dist
-            val end = o + minOf(len, out.size - o)
-            while (o < end) out[o++] = out[s++]
+            if (dist == 0 || dist > o - offset) throw IOException("EROFS: broken LZ4 data")
+            val match = minOf(len.toLong() + 4, (end - o).toLong()).toInt()
+            if (match < 16) {
+                for (step in 0 until match) out[o + step] = out[o + step - dist]
+            } else if (dist == 1) {
+                java.util.Arrays.fill(out, o, o + match, out[o - 1])
+            } else {
+                var copied = minOf(dist, match)
+                System.arraycopy(out, o - dist, out, o, copied)
+                // When the match overlaps its source, repeat the decoded prefix in growing runs.
+                while (copied < match) {
+                    val n = minOf(copied, match - copied)
+                    System.arraycopy(out, o, out, o + copied, n)
+                    copied += n
+                }
+            }
+            o += match
         }
-        if (o < out.size) throw IOException("EROFS: LZ4 data ends early")
+        if (o < end) throw IOException("EROFS: LZ4 data ends early")
     }
 
     private fun packedData(): ByteArray {
@@ -419,5 +501,6 @@ class ErofsImage(private val src: RandomSource, private val cancelled: () -> Boo
         private const val CBLKCNT = 0x800
         private const val MAX_EXTENT = 256L shl 20
         private const val MAX_INDEX_BYTES = 32 * 1024 * 1024
+        private const val MAX_REUSED_BUFFER = 1024 * 1024
     }
 }

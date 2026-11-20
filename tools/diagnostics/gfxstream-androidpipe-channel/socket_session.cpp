@@ -1,5 +1,6 @@
 #include "socket_session.h"
 #include "shared_memory.h"
+#include "vulkan_socket.h"
 #include "../gfxstream-principal-scope/principal_scope.h"
 #include "host-common/android_pipe_common.h"
 #include <algorithm>
@@ -25,6 +26,7 @@ struct SocketSession::Impl {
     Device& device;
     int socket;
     std::unique_ptr<Session> pipe;
+    std::shared_ptr<VulkanSocket> direct;
     std::vector<uint8_t> in, out;
     bool process = false;
     bool confirmed = false;
@@ -33,7 +35,10 @@ struct SocketSession::Impl {
     std::shared_ptr<const Principal> principal;
     PeerCredentials peer{};
     Impl(Device& d, int fd) : device(d), socket(fd) {}
-    ~Impl() { if (socket >= 0) close(socket); }
+    ~Impl() {
+        if (direct) direct->stop();
+        if (socket >= 0) close(socket);
+    }
 };
 SocketSession::SocketSession(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 SocketSession::~SocketSession() = default;
@@ -65,18 +70,20 @@ void SocketSession::bindPrincipal(std::shared_ptr<const Principal> principal) {
 bool SocketSession::ownsProcessPipe() const { return impl_->ownsProcessPipe; }
 int SocketSession::fd() const { return impl_->socket; }
 short SocketSession::events() const {
+    if (impl_->direct) return 0;
     return (impl_->in.size() < kLimit ? POLLIN : 0) | (!impl_->out.empty() ? POLLOUT : 0);
 }
 bool SocketSession::needsPump() {
     auto& s = *impl_;
-    if (!s.pipe) return false;
+    if (!s.pipe || s.direct) return false;
     if (s.process) return !s.confirmed && s.in.size() >= sizeof(int32_t);
     unsigned state = s.pipe->poll();
     return (state & PIPE_POLL_HUP) || (!s.in.empty() && (state & PIPE_POLL_OUT)) ||
            (s.out.size() < kLimit && (state & PIPE_POLL_IN));
 }
-bool SocketSession::pump() {
+bool SocketSession::pump(short events) {
     auto& s = *impl_;
+    if (s.direct) return !(events & (POLLERR | POLLHUP | POLLNVAL));
     if (s.in.size() < kLimit) {
         uint8_t buf[4096];
         ssize_t n;
@@ -114,9 +121,17 @@ bool SocketSession::pump() {
             s.pipe = s.device.open(Service::Process);
         } else {
             PrincipalScope scope(s.principal);
+            // The worker validates the bound process ID before decoding Vulkan.
+            const int fd = s.principal ? s.socket : -1;
+            VulkanSocketScope socketScope(fd, s.in, n);
             s.pipe = s.device.open(Service::OpenGLES);
+            s.direct = socketScope.socket();
         }
         if (!s.pipe) return false;
+        if (s.direct) {
+            s.in.clear();
+            return true;
+        }
         s.in.erase(s.in.begin(), s.in.begin() + n);
     }
     if (s.process) {

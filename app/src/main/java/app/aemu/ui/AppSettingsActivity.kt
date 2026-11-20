@@ -1,5 +1,6 @@
 package app.aemu.ui
 
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -11,6 +12,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.annotation.DrawableRes
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -26,6 +28,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
@@ -157,6 +160,45 @@ private fun AppSettings(onBack: () -> Unit, onRestyle: () -> Unit) {
                 }
             }
 
+            item {
+                Section(stringResource(R.string.as_links)) {
+                    AboutLinkRow(
+                        icon = Icons.Rounded.Public,
+                        title = stringResource(R.string.as_project_address),
+                        subtitle = "github.com/poohpiggy/RedMagicEMU",
+                        path = "poohpiggy/RedMagicEMU",
+                    )
+                    AboutLinkRow(
+                        icon = Icons.Rounded.Person,
+                        title = stringResource(R.string.as_developer),
+                        subtitle = "poohpiggy",
+                        path = "poohpiggy",
+                        avatar = R.drawable.about_avatar_poohpiggy,
+                    )
+                }
+            }
+
+            item {
+                Section(stringResource(R.string.as_acknowledgments)) {
+                    AboutLinkRow(
+                        icon = Icons.Rounded.Code,
+                        title = "AEmulator",
+                        subtitle = stringResource(R.string.as_upstream_credit, "uxazu"),
+                        path = "uxazu/AEmulator",
+                        author = "uxazu",
+                        avatar = R.drawable.about_avatar_uxazu,
+                    )
+                    AboutLinkRow(
+                        icon = Icons.Rounded.Code,
+                        title = "SENSES",
+                        subtitle = stringResource(R.string.as_original_credit, "Istratii-tech"),
+                        path = "Istratii-tech/SENSES",
+                        author = "Istratii-tech",
+                        avatar = R.drawable.about_avatar_istratii_tech,
+                    )
+                }
+            }
+
         }
     }
 
@@ -203,6 +245,44 @@ private fun AboutCard() {
                 Text(stringResource(R.string.as_about), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
             }
         }
+    }
+}
+
+@Composable
+private fun AboutLinkRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    path: String,
+    @DrawableRes avatar: Int? = null,
+    author: String = path,
+) {
+    val ctx = LocalContext.current
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        ListItem(
+            headlineContent = { Text(title) },
+            supportingContent = { Text(subtitle) },
+            leadingContent = { Icon(icon, null, tint = MaterialTheme.colorScheme.primary) },
+            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            modifier = Modifier.weight(1f).clickable(role = Role.Button) { openGithub(ctx, path) },
+        )
+        if (avatar != null) {
+            IconButton(onClick = { openGithub(ctx, author) }, modifier = Modifier.padding(end = 8.dp)) {
+                Image(
+                    painterResource(avatar),
+                    contentDescription = stringResource(R.string.as_open_profile, author),
+                    modifier = Modifier.size(36.dp).clip(CircleShape),
+                )
+            }
+        }
+    }
+}
+
+private fun openGithub(context: Context, path: String) {
+    try {
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/$path")))
+    } catch (_: ActivityNotFoundException) {
+        Toast.makeText(context, R.string.as_link_unavailable, Toast.LENGTH_SHORT).show()
     }
 }
 

@@ -7,10 +7,15 @@ static int testMappedBuffer(PFN_vkGetInstanceProcAddr get, VkInstance instance,
                             VkPhysicalDevice physical) {
     enum {
         words = 64, bytes = words * sizeof(uint32_t), mappedCount = 2,
-#ifdef RME_TEST_CACHED_MEMORY
+#if defined(RME_TEST_CACHED_MEMORY) || defined(RME_TEST_COHERENT_DEVICE_LOCAL)
         bufferCount = 3,
 #else
         bufferCount = mappedCount,
+#endif
+#ifdef RME_TEST_COHERENT_DEVICE_LOCAL
+        explicitCacheSync = 0,
+#else
+        explicitCacheSync = 1,
 #endif
     };
 #define INSTANCE(name)                                                          \
@@ -56,6 +61,9 @@ static int testMappedBuffer(PFN_vkGetInstanceProcAddr get, VkInstance instance,
     DEVICE(GetDeviceQueue);
     DEVICE(CreateBuffer);
     DEVICE(GetBufferMemoryRequirements);
+#ifdef RME_TEST_COHERENT_DEVICE_LOCAL
+    DEVICE(GetBufferMemoryRequirements2);
+#endif
     DEVICE(AllocateMemory);
     DEVICE(BindBufferMemory);
     DEVICE(MapMemory);
@@ -96,6 +104,18 @@ static int testMappedBuffer(PFN_vkGetInstanceProcAddr get, VkInstance instance,
         CHECK(CreateBuffer(device, &bufferInfo, NULL, &buffers[i]));
         VkMemoryRequirements req;
         GetBufferMemoryRequirements(device, buffers[i], &req);
+#ifdef RME_TEST_COHERENT_DEVICE_LOCAL
+        const VkBufferMemoryRequirementsInfo2 query = {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2, .buffer = buffers[i],
+        };
+        VkMemoryRequirements2 extended = {.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2};
+        GetBufferMemoryRequirements2(device, &query, &extended);
+        const VkMemoryRequirements *also = &extended.memoryRequirements;
+        if (also->size != req.size || also->alignment != req.alignment || also->memoryTypeBits != req.memoryTypeBits) {
+            fprintf(stderr, "GUEST_VULKAN_PUBLIC_MEMORY_FAILED inconsistent requirements buffer=%zu\n", i);
+            return 1;
+        }
+#endif
         const VkMemoryPropertyFlags mappedFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
 #ifdef RME_TEST_CACHED_MEMORY
                                            VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
@@ -120,7 +140,12 @@ static int testMappedBuffer(PFN_vkGetInstanceProcAddr get, VkInstance instance,
             .allocationSize = req.size, .memoryTypeIndex = type,
         };
         CHECK(AllocateMemory(device, &alloc, NULL, &memory[i]));
-        CHECK(BindBufferMemory(device, buffers[i], memory[i], 0));
+        VkResult bind = BindBufferMemory(device, buffers[i], memory[i], 0);
+        if (bind != VK_SUCCESS) {
+            fprintf(stderr, "GUEST_VULKAN_PUBLIC_MEMORY_FAILED bind buffer=%zu type=%u result=%d\n",
+                    i, type, bind);
+            return 1;
+        }
         if (i >= mappedCount) continue;
         CHECK(MapMemory(device, memory[i], 0, VK_WHOLE_SIZE, 0, &mapped[i]));
         ranges[i] = (VkMappedMemoryRange){
@@ -130,7 +155,7 @@ static int testMappedBuffer(PFN_vkGetInstanceProcAddr get, VkInstance instance,
 
     uint32_t *input = mapped[0];
     for (uint32_t i = 0; i < words; ++i) input[i] = i * 11 + 5;
-    CHECK(FlushMappedMemoryRanges(device, 1, ranges));
+    if (explicitCacheSync) CHECK(FlushMappedMemoryRanges(device, 1, ranges));
     const VkCommandPoolCreateInfo poolInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = family,
     };
@@ -150,7 +175,7 @@ static int testMappedBuffer(PFN_vkGetInstanceProcAddr get, VkInstance instance,
     VkMemoryBarrier barrier = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
     };
-#ifdef RME_TEST_CACHED_MEMORY
+#if defined(RME_TEST_CACHED_MEMORY) || defined(RME_TEST_COHERENT_DEVICE_LOCAL)
     CmdCopyBuffer(command, buffers[0], buffers[2], 1, &copy);
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
@@ -179,7 +204,7 @@ static int testMappedBuffer(PFN_vkGetInstanceProcAddr get, VkInstance instance,
     };
     CHECK(QueueSubmit(queue, 1, &submit, fence));
     CHECK(WaitForFences(device, 1, &fence, VK_TRUE, UINT64_C(5000000000)));
-    CHECK(InvalidateMappedMemoryRanges(device, mappedCount, ranges));
+    if (explicitCacheSync) CHECK(InvalidateMappedMemoryRanges(device, mappedCount, ranges));
     const uint32_t *output = mapped[1];
     unsigned errors = 0;
     for (uint32_t i = 0; i < words; ++i) errors += input[i] != fill || output[i] != i * 11 + 5;

@@ -65,6 +65,7 @@ struct bth { int sock; char *scratch; };
 static char storage[256];
 static void *bscratch(struct bth *t) { return t->scratch; }
 static void *balloc(u64 size, u64 id) { (void)id; return size <= sizeof storage ? storage : NULL; }
+static void bhold(void *ptr, int fd) { (void)ptr; (void)fd; assert(0 && "unexpected FD array"); }
 static int wants_sid(u64 ptr) { (void)ptr; return 0; }
 #define bct_log(t, phase) ((void)0)
 ''' + receive + r'''

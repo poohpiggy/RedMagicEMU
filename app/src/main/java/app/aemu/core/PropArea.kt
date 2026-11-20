@@ -207,12 +207,7 @@ class PropAreaV2(b: ByteBuffer, chan: FileChannel?) : PropArea(b, chan) {
     override fun get(name: String): String? {
         val propOff = findProperty(name, alloc = false)
         if (propOff <= 0) return null
-        val pos = DATA_OFFSET + propOff
-        val serial = b.getInt(pos)
-        val len = (serial ushr 24).coerceIn(0, VALUE_MAX - 1)
-        val v = ByteArray(len)
-        for (i in 0 until len) v[i] = b.get(pos + 4 + i)
-        return String(v, Charsets.UTF_8)
+        return readValue(DATA_OFFSET + propOff, name)
     }
 
     @Synchronized
@@ -220,19 +215,53 @@ class PropAreaV2(b: ByteBuffer, chan: FileChannel?) : PropArea(b, chan) {
         val nb = name.toByteArray(Charsets.UTF_8)
         var vb = value.toByteArray(Charsets.UTF_8)
         if (nb.isEmpty() || nb.size >= NAME_MAX_V2) return false
-        if (vb.size >= VALUE_MAX) vb = vb.copyOf(VALUE_MAX - 1)
+        val readOnly = name.startsWith("ro.")
+        if (!readOnly && vb.size >= VALUE_MAX) vb = vb.copyOf(VALUE_MAX - 1)
 
         val propOff = findProperty(name, alloc = true)
         if (propOff <= 0) return false
 
         val pos = DATA_OFFSET + propOff
+        if (vb.size >= VALUE_MAX) {
+            if (readValue(pos, name) == value) return true
+            return writeLongValue(propOff, vb)
+        }
         val s0 = b.getInt(pos)
         b.putInt(pos, s0 or 1) // dirty bit
         for (i in vb.indices) b.put(pos + 4 + i, vb[i])
         b.put(pos + 4 + vb.size, 0)
-        b.putInt(pos, (vb.size shl 24) or (((s0 or 1) + 1) and 0xffffff))
+        val counter = if (readOnly) 0 else ((s0 or 1) + 1) and 0xffffff
+        b.putInt(pos, (vb.size shl 24) or counter)
         b.putInt(4, b.getInt(4) + 1) // header serial_++
         return true
+    }
+
+    private fun writeLongValue(propOff: Int, value: ByteArray): Boolean {
+        val offset = allocateObj(value.size + 1)
+        if (offset < 0) return false
+        for (i in value.indices) b.put(DATA_OFFSET + offset + i, value[i])
+        val pos = DATA_OFFSET + propOff
+        for (i in LONG_LEGACY_MESSAGE.indices) b.put(pos + 4 + i, LONG_LEGACY_MESSAGE[i])
+        b.put(pos + 4 + LONG_LEGACY_MESSAGE.size, 0)
+        b.putInt(pos + LONG_VALUE_OFFSET, offset - propOff)
+        b.putInt(pos, (LONG_LEGACY_MESSAGE.size shl 24) or LONG_FLAG)
+        b.putInt(4, b.getInt(4) + 1)
+        return true
+    }
+
+    private fun readValue(pos: Int, name: String): String {
+        val serial = b.getInt(pos)
+        if (name.startsWith("ro.") && serial and LONG_FLAG != 0) {
+            val start = pos + b.getInt(pos + LONG_VALUE_OFFSET)
+            val end = DATA_OFFSET + b.getInt(0)
+            if (start <= pos || start >= end || end > b.capacity()) return ""
+            var limit = start
+            while (limit < end && b.get(limit) != 0.toByte()) limit++
+            if (limit == end) return ""
+            return String(ByteArray(limit - start) { b.get(start + it) }, Charsets.UTF_8)
+        }
+        val length = (serial ushr 24).coerceIn(0, VALUE_MAX - 1)
+        return String(ByteArray(length) { b.get(pos + 4 + it) }, Charsets.UTF_8)
     }
 
     override fun all(): List<Pair<String, String>> {
@@ -250,16 +279,11 @@ class PropAreaV2(b: ByteBuffer, chan: FileChannel?) : PropArea(b, chan) {
         val propOff = b.getInt(pos + 4)
         if (propOff > 0 && propOff + 96 <= dataSize) {
             val pPos = DATA_OFFSET + propOff
-            val serial = b.getInt(pPos)
-            val vlen = (serial ushr 24).coerceIn(0, VALUE_MAX - 1)
-            val vb = ByteArray(vlen) { b.get(pPos + 4 + it) }
-            val valStr = String(vb, Charsets.UTF_8)
-
             var nlen = 0
             while (pPos + 96 + nlen < b.capacity() && b.get(pPos + 96 + nlen) != 0.toByte()) nlen++
             val nb = ByteArray(nlen) { b.get(pPos + 96 + it) }
             val nameStr = String(nb, Charsets.UTF_8)
-            out.add(nameStr to valStr)
+            out.add(nameStr to readValue(pPos, nameStr))
         }
         val left = b.getInt(pos + 8)
         if (left > 0) collect(left, out)
@@ -377,6 +401,10 @@ class PropAreaV2(b: ByteBuffer, chan: FileChannel?) : PropArea(b, chan) {
     companion object {
         private const val DATA_OFFSET = 128
         private const val VALUE_MAX = 92
+        // Bionic stores a relative offset after the legacy inline buffer for long read-only values.
+        private const val LONG_FLAG = 1 shl 16
+        private const val LONG_VALUE_OFFSET = 4 + 56
+        private val LONG_LEGACY_MESSAGE = "Must use __system_property_read_callback() to read".toByteArray()
         private const val NAME_MAX_V2 = 512
         private const val BT_MIN_SIZE = 24
         private const val INFO_MIN_SIZE = 128

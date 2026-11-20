@@ -36,7 +36,7 @@
 
 /* A guest window: a texture and a depth/stencil buffer; with a multisampled config (samples) the guest draws into
  * multisampled buffers (msfbo), resolved into the texture before it is read. */
-struct surf { uint32_t key; int w, h, samples; GLuint fbo, col, rbo, msfbo, mscol, msds; };
+struct surf { uint32_t key; int w, h, samples, color_only; GLuint fbo, col, rbo, msfbo, mscol, msds; };
 struct hctx {
     uint32_t id;
     int pid, version, busy, doomed, fresh;
@@ -74,6 +74,8 @@ struct conn {
     uint8_t *rep; size_t rep_n, rep_cap;
     void *scr[16]; int nscr;
     uint8_t *px; size_t px_cap;
+    uint8_t *fmt; size_t fmt_cap;
+    uint8_t *stage; long stage_cap;
     unsigned long frames, unknown;
     /* the connection of the guest's composer: the context that puts finished frames on the phone's screen */
     EGLContext pctx;
@@ -616,15 +618,6 @@ static struct hctx *ctx_find(uint32_t id) {
     pthread_mutex_unlock(&g_lock);
     return x;
 }
-static void ctx_destroy(struct hctx *x) {
-    pthread_mutex_lock(&g_lock);
-    for (struct hctx **pp = &g_ctx; *pp; pp = &(*pp)->next) if (*pp == x) { *pp = x->next; break; }
-    pthread_mutex_unlock(&g_lock);
-    eglDestroySurface(g_dpy, x->pb);
-    eglDestroyContext(g_dpy, x->egl);
-    for (int i = 0; i < 16; i++) free(x->last[i].copy);
-    free(x->ext); free(x->extv); free(x);
-}
 static void ms_drop(struct surf *s) {
     if (s->msfbo) { glDeleteFramebuffers(1, &s->msfbo); glDeleteRenderbuffers(1, &s->mscol); glDeleteRenderbuffers(1, &s->msds); }
     s->msfbo = s->mscol = s->msds = 0;
@@ -637,28 +630,40 @@ static void surf_alloc(struct surf *s, int w, int h) {
     /* The window's colour is a renderbuffer, not a texture: programs bind texture names they never generated
      * (MIUI's camera binds its SurfaceTexture as 1), and a texture here could be one of them - the program's
      * glTexImage2D would then resize and overwrite the window itself. */
-    if (!s->fbo) { glGenFramebuffers(1, &s->fbo); glGenRenderbuffers(1, &s->col); glGenRenderbuffers(1, &s->rbo); }
+    if (!s->fbo) {
+        glGenFramebuffers(1, &s->fbo);
+        glGenRenderbuffers(1, &s->col);
+        if (!s->color_only) glGenRenderbuffers(1, &s->rbo);
+    }
     glBindRenderbuffer(GL_RENDERBUFFER, s->col);
     glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, w, h);
-    glBindRenderbuffer(GL_RENDERBUFFER, s->rbo);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
     glBindFramebuffer(GL_FRAMEBUFFER, s->fbo);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, s->col);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, s->rbo);
+    if (s->rbo) {
+        glBindRenderbuffer(GL_RENDERBUFFER, s->rbo);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, s->rbo);
+    }
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) LOG("a %dx%d window's framebuffer is not complete", w, h);
     if (s->samples > 0) {
         GLint max = 0;
         glGetIntegerv(GL_MAX_SAMPLES, &max);
         int n = s->samples < max ? s->samples : max;
         if (n > 0) {
-            if (!s->msfbo) { glGenFramebuffers(1, &s->msfbo); glGenRenderbuffers(1, &s->mscol); glGenRenderbuffers(1, &s->msds); }
+            if (!s->msfbo) {
+                glGenFramebuffers(1, &s->msfbo);
+                glGenRenderbuffers(1, &s->mscol);
+                if (!s->color_only) glGenRenderbuffers(1, &s->msds);
+            }
             glBindRenderbuffer(GL_RENDERBUFFER, s->mscol);
             glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, GL_RGBA8, w, h);
-            glBindRenderbuffer(GL_RENDERBUFFER, s->msds);
-            glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, GL_DEPTH24_STENCIL8, w, h);
             glBindFramebuffer(GL_FRAMEBUFFER, s->msfbo);
             glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, s->mscol);
-            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, s->msds);
+            if (s->msds) {
+                glBindRenderbuffer(GL_RENDERBUFFER, s->msds);
+                glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, GL_DEPTH24_STENCIL8, w, h);
+                glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, s->msds);
+            }
             if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
                 LOG("a %dx%d window with %d samples is not complete: single-sampled", w, h, n);
                 ms_drop(s);
@@ -676,6 +681,38 @@ static void surf_drop(struct surf *s) {
     ms_drop(s);
     memset(s, 0, sizeof(*s));
 }
+static void ctx_drop_surfaces(struct hctx *x) {
+    size_t i = 0, count = sizeof x->surfs / sizeof x->surfs[0];
+    while (i < count && !x->surfs[i].fbo) i++;
+    if (i == count) return;
+
+    EGLContext current = eglGetCurrentContext();
+    EGLSurface draw = eglGetCurrentSurface(EGL_DRAW), read = eglGetCurrentSurface(EGL_READ);
+    if (!eglMakeCurrent(g_dpy, x->pb, x->pb, x->egl)) {
+        LOG("failed to bind context %u for surface cleanup: 0x%x", x->id, eglGetError());
+        return;
+    }
+    for (; i < count; i++) if (x->surfs[i].fbo) surf_drop(&x->surfs[i]);
+    if (!eglMakeCurrent(g_dpy, draw, read, current)) {
+        LOG("failed to restore context after surface cleanup: 0x%x", eglGetError());
+        C->dead = 1;
+    }
+}
+static void ctx_destroy(struct hctx *x) {
+    pthread_mutex_lock(&g_lock);
+    for (struct hctx **pp = &g_ctx; *pp; pp = &(*pp)->next) if (*pp == x) { *pp = x->next; break; }
+    struct hctx *peer = g_ctx;
+    while (peer && peer->root != x->root) peer = peer->next;
+    int shared = peer != NULL;
+    pthread_mutex_unlock(&g_lock);
+
+    /* Renderbuffers in a surviving share group outlive the context that created them. */
+    if (shared) ctx_drop_surfaces(x);
+    eglDestroySurface(g_dpy, x->pb);
+    eglDestroyContext(g_dpy, x->egl);
+    for (int i = 0; i < 16; i++) free(x->last[i].copy);
+    free(x->ext); free(x->extv); free(x);
+}
 static void release_current(void) {
     struct hctx *x = C->ctx;
     if (!x) return;
@@ -684,7 +721,7 @@ static void release_current(void) {
     x->busy = 0;
     if (x->doomed) ctx_destroy(x);
 }
-static uint32_t make_current(uint32_t id, uint32_t key, int w, int h, int samples) {
+static uint32_t make_current(uint32_t id, uint32_t key, int w, int h, int samples, int color_only) {
     struct hctx *x = ctx_find(id);
     if (!x) return 0;
     if (C->ctx != x) {
@@ -699,8 +736,11 @@ static uint32_t make_current(uint32_t id, uint32_t key, int w, int h, int sample
         for (int i = 0; i < 8; i++) { if (x->surfs[i].key == key) s = &x->surfs[i]; else if (!x->surfs[i].key && !spare) spare = &x->surfs[i]; }
         if (!s) {
             if (!spare) { spare = &x->surfs[0]; surf_drop(spare); }
-            s = spare; s->key = key;
+            s = spare;
         }
+        if (s->fbo && s->color_only != color_only) surf_drop(s);
+        s->key = key;
+        s->color_only = color_only;
         C->surf = s;
         if (!s->fbo || s->w != w || s->h != h || s->samples != samples) {
             if (s->samples != samples) ms_drop(s);
@@ -832,13 +872,12 @@ static void swap(int w, int h) {
 /* OP_SWAP_FMT: the frame in the guest window's own format and row order. Converting and flipping in the guest
  * ran as emulated code under qemu on 32-bit firmwares (2.x windows are RGB_565: a per-pixel loop over the whole
  * window on every swap, the live wallpaper and the RenderScript app list of 2.3 at 20-30 frames a second). */
-static __thread uint8_t *t_fmt; static __thread size_t t_fmt_cap;
 static void swap_fmt(int w, int h, uint32_t format, uint32_t stride) {
     if (w <= 0 || h <= 0 || stride < (uint32_t)w || stride > 16384) { C->dead = 1; return; }
     uint32_t bpp = format == 4 ? 2 : 4;
     size_t need = (size_t)stride * (size_t)h * bpp;
-    if (t_fmt_cap < need) { free(t_fmt); t_fmt = malloc(need); t_fmt_cap = t_fmt ? need : 0; }
-    if (!t_fmt) { C->dead = 1; return; }
+    if (C->fmt_cap < need) { free(C->fmt); C->fmt = malloc(need); C->fmt_cap = C->fmt ? need : 0; }
+    if (!C->fmt) { C->dead = 1; return; }
     struct hctx *x = C->ctx; struct surf *s = C->surf;
     int have = x && s && s->w == w && s->h == h;
     if (have) {
@@ -865,7 +904,7 @@ static void swap_fmt(int w, int h, uint32_t format, uint32_t stride) {
         if (pbo) glBindBuffer(GL_PIXEL_PACK_BUFFER, (GLuint)pbo);
         for (int y = 0; y < h; y++) {
             const uint8_t *src = C->px + (size_t)(h - 1 - y) * (size_t)w * 4;
-            uint8_t *dst = t_fmt + (size_t)y * stride * bpp;
+            uint8_t *dst = C->fmt + (size_t)y * stride * bpp;
             if (format == 4) {
                 uint16_t *d = (uint16_t *)dst;
                 for (int i = 0; i < w; i++, src += 4) d[i] = (uint16_t)((src[0] >> 3) << 11 | (src[1] >> 2) << 5 | src[2] >> 3);
@@ -873,9 +912,9 @@ static void swap_fmt(int w, int h, uint32_t format, uint32_t stride) {
                 for (int i = 0; i < w; i++, src += 4, dst += 4) { dst[0] = src[2]; dst[1] = src[1]; dst[2] = src[0]; dst[3] = src[3]; }
             } else memcpy(dst, src, (size_t)w * 4);
         }
-    } else memset(t_fmt, 0, need);
+    } else memset(C->fmt, 0, need);
     reply_flush();
-    wr_all(t_fmt, need);
+    wr_all(C->fmt, need);
     C->frames++;
 
 }
@@ -1073,7 +1112,6 @@ static void (*buffer_storage)(GLenum, GLsizeiptr, const void *, GLbitfield);
  * *upload 1: the bytes are handed over with glBufferData once written (the plain way). */
 static long ring_take(struct hctx *x, long n, uint8_t **to, int *upload) {
     static int has = -1;
-    static __thread uint8_t *stage; static __thread long stage_cap;
     if (has < 0) {
         const char *e = (const char *)glGetString(GL_EXTENSIONS);
         buffer_storage = e && strstr(e, "GL_EXT_buffer_storage") ? (void *)eglGetProcAddress("glBufferStorageEXT") : 0;
@@ -1101,11 +1139,11 @@ static long ring_take(struct hctx *x, long n, uint8_t **to, int *upload) {
         *to = x->pmap + at; *upload = 0;
         return at;
     }
-    if (stage_cap < n) { free(stage); stage = malloc((size_t)n); stage_cap = stage ? n : 0; }
+    if (C->stage_cap < n) { free(C->stage); C->stage = malloc((size_t)n); C->stage_cap = C->stage ? n : 0; }
     if (!x->ring) glGenBuffers(1, &x->ring);
     glBindBuffer(GL_ARRAY_BUFFER, x->ring);
-    *to = stage; *upload = 1;
-    return stage ? 0 : -1;
+    *to = C->stage; *upload = 1;
+    return C->stage ? 0 : -1;
 }
 static void draw_client(const uint8_t *p) {
     struct hctx *x = C->ctx;
@@ -1190,7 +1228,8 @@ static void hd_other(unsigned op, const uint8_t *p, uint32_t len) {
     }
     case OP_MAKE_CURRENT: {
         uint32_t id = rd32(&p), key = rd32(&p); int w = (int)rd32(&p), h = (int)rd32(&p), samples = len >= 20 ? (int)rd32(&p) : 0;
-        reply32(make_current(id, key, w, h, samples));
+        int color_only = len >= 24 && rd32(&p) == 1;
+        reply32(make_current(id, key, w, h, samples, color_only));
         break;
     }
     case OP_RELEASE: release_current(); reply32(1); break;
@@ -1405,10 +1444,11 @@ static void *serve(void *arg) {
     if (c.frames) LOG("a drawing thread of pid %d is gone after %lu frames", c.pid, c.frames);
     release_current();
     present_drop();
-    eglReleaseThread();
     pid_count(c.pid, -1);
+    eglReleaseThread();
     close(c.fd);
     free(c.in); free(c.rep); free(c.px);
+    free(c.fmt); free(c.stage);
     return 0;
 }
 static void *acceptor(void *arg) {

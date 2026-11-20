@@ -2,8 +2,10 @@ package app.aemu.ui
 
 import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.text.format.Formatter
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -14,6 +16,7 @@ import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -21,8 +24,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.RadioButton
@@ -57,10 +62,10 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LargeFlexibleTopAppBar
 import androidx.compose.material3.LinearWavyProgressIndicator
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
@@ -71,6 +76,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -87,8 +93,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogProperties
+import androidx.core.os.BundleCompat
 import app.aemu.core.GuestImage
 import app.aemu.core.BatteryModeIntent
 import app.aemu.R
@@ -99,6 +109,16 @@ val ACTION_BOOT = BuildConfig.APPLICATION_ID + ".BOOT"
 
 class MainActivity : ComponentActivity() {
     private val model: LibraryModel by viewModels()
+    private var storageGranted by mutableStateOf<Boolean?>(null)
+    private var storageSettingsUnavailable by mutableStateOf(false)
+    private var pendingStorageIntent: Intent? = null
+    private var requestedNotifications = false
+    private val storageSettings = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        completeStorageRequest()
+    }
+    private val legacyStorage = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        completeStorageRequest()
+    }
 
     /** Language this activity was created with: a change means its string resources are stale and need context recreation. */
     private var style = ""
@@ -112,21 +132,68 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        askPermissions()
-        if (shouldHandleInitialIntent(restored = savedInstanceState != null)) handleView(intent)
-        setContent { AemuTheme { Library(model) } }
+        pendingStorageIntent = if (shouldHandleInitialIntent(restored = savedInstanceState != null)) intent
+            else savedInstanceState?.let { BundleCompat.getParcelable(it, PENDING_STORAGE_INTENT, Intent::class.java) }
+        setContent {
+            AemuTheme {
+                if (storageGranted == true) {
+                    Library(model)
+                } else {
+                    Surface(Modifier.fillMaxSize()) {
+                        if (storageGranted == false) {
+                            StorageAccessDialog(storageSettingsUnavailable, ::requestStorageAccess, ::finishAndRemoveTask)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        handleView(intent)
+        pendingStorageIntent = intent
         if (styleOf(applicationContext) != style) recreate()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putParcelable(PENDING_STORAGE_INTENT, pendingStorageIntent)
+        super.onSaveInstanceState(outState)
     }
 
     override fun onResume() {
         super.onResume()
         if (styleOf(applicationContext) != style) { recreate(); return }
+        refreshStorageAccess()
+    }
+
+    private fun refreshStorageAccess() {
+        if (isFinishing) return
+        storageGranted = hasRequiredStorageAccess(this)
+        if (storageGranted != true) return
+        askForNotifications()
+        val pending = pendingStorageIntent
+        pendingStorageIntent = null
+        handleView(pending)
         model.refresh()
+    }
+
+    private fun requestStorageAccess() {
+        storageSettingsUnavailable = false
+        if (Build.VERSION.SDK_INT < 30) {
+            val permission = Manifest.permission.WRITE_EXTERNAL_STORAGE
+            val prefs = getPreferences(MODE_PRIVATE)
+            if (!prefs.getBoolean(LEGACY_STORAGE_REQUESTED, false) || shouldShowRequestPermissionRationale(permission)) {
+                prefs.edit().putBoolean(LEGACY_STORAGE_REQUESTED, true).apply()
+                legacyStorage.launch(permission)
+                return
+            }
+        }
+        storageSettingsUnavailable = !openStorageAccessSettings(this, storageSettings::launch)
+    }
+
+    private fun completeStorageRequest() {
+        refreshStorageAccess()
+        if (storageGranted == false) finishAndRemoveTask()
     }
 
     private fun handleView(i: Intent?) {
@@ -147,12 +214,17 @@ class MainActivity : ComponentActivity() {
         if (i?.action == ACTION_BOOT) i.getStringExtra("id")?.let { VmActivity.start(this, it, i.getBooleanExtra("recovery", false)) }
     }
 
-    private fun askPermissions() {
-        val want = ArrayList<String>()
-        if (Build.VERSION.SDK_INT >= 33) want += Manifest.permission.POST_NOTIFICATIONS
-        if (Build.VERSION.SDK_INT <= 32) want += Manifest.permission.WRITE_EXTERNAL_STORAGE
-        val need = want.filter { checkSelfPermission(it) != android.content.pm.PackageManager.PERMISSION_GRANTED }
-        if (need.isNotEmpty()) requestPermissions(need.toTypedArray(), 1)
+    private fun askForNotifications() {
+        if (Build.VERSION.SDK_INT < 33 || requestedNotifications) return
+        requestedNotifications = true
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+        }
+    }
+
+    private companion object {
+        const val PENDING_STORAGE_INTENT = "pendingStorageIntent"
+        const val LEGACY_STORAGE_REQUESTED = "legacyStorageRequested"
     }
 }
 
@@ -162,98 +234,186 @@ internal fun shouldHandleInitialIntent(restored: Boolean): Boolean = !restored
 fun Library(model: LibraryModel) {
     val images by model.images.collectAsState()
     val imp by model.import.collectAsState()
+    val reset by model.reset.collectAsState()
     val importRecovery by model.importRecovery.collectAsState()
     val ctx = LocalContext.current
-    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { model.import(it) } }
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null && hasRequiredStorageAccess(ctx)) model.import(uri)
+    }
     var settingsFor by remember { mutableStateOf<GuestImage?>(null) }
-    val state = singleSystemState(images?.size ?: 0, imp.active, images != null, imp.done != null)
+    var resetFor by remember { mutableStateOf<GuestImage?>(null) }
+    val state = singleSystemState(images?.size ?: 0, imp.active, images != null, imp.completed)
 
     Scaffold(topBar = {
-        LargeFlexibleTopAppBar(title = { Text(stringResource(R.string.app_name)) }, actions = {
+        TopAppBar(title = { Text(stringResource(R.string.app_name)) }, actions = {
             IconButton(onClick = { ctx.startActivity(Intent(ctx, AppSettingsActivity::class.java)) }) {
                 Icon(Icons.Rounded.Info, stringResource(R.string.about_title))
             }
         })
     }) { pad ->
-        Column(Modifier.fillMaxSize().padding(pad).verticalScroll(rememberScrollState()).padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            StorageAccessCard()
-            importRecovery.token?.let { displayed ->
-                Card {
-                    Column(Modifier.padding(20.dp)) {
-                        Text(stringResource(R.string.import_interrupted), style = MaterialTheme.typography.titleMedium)
-                        TextButton(onClick = { model.dismissInterruptedImport(displayed) }) { Text(stringResource(R.string.ok)) }
+        BoxWithConstraints(
+            Modifier.fillMaxSize().padding(pad),
+            contentAlignment = Alignment.TopCenter,
+        ) {
+            val phoneHeight = (maxHeight * 0.638f).coerceIn(144.dp, 462.dp)
+            Column(
+                Modifier.widthIn(max = 520.dp).fillMaxWidth()
+                    .verticalScroll(rememberScrollState()).heightIn(min = maxHeight).padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
+            ) {
+                importRecovery.token?.let { displayed ->
+                    Card {
+                        Column(Modifier.padding(20.dp)) {
+                            Text(stringResource(R.string.import_interrupted), style = MaterialTheme.typography.titleMedium)
+                            TextButton(onClick = { model.dismissInterruptedImport(displayed) }) { Text(stringResource(R.string.ok)) }
+                        }
                     }
                 }
-            }
-            importRecovery.error?.let { error ->
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-                    Column(Modifier.padding(20.dp)) {
-                        Text(stringResource(R.string.import_recovery_error), style = MaterialTheme.typography.titleMedium)
-                        Text(error)
-                        TextButton(onClick = model::retryImportRecovery) { Text(stringResource(R.string.retry)) }
+                importRecovery.error?.let { error ->
+                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                        Column(Modifier.padding(20.dp)) {
+                            Text(stringResource(R.string.import_recovery_error), style = MaterialTheme.typography.titleMedium)
+                            Text(error)
+                            TextButton(onClick = model::retryImportRecovery) { Text(stringResource(R.string.retry)) }
+                        }
                     }
                 }
-            }
-            if (imp.active || imp.error != null || imp.cancelled || imp.done != null) {
-                ImportCard(imp, onCancel = model::cancelImport, onDismiss = model::dismissImport, canDismiss = state != SingleSystemState.LOADING)
-            }
-            when (state) {
-                SingleSystemState.EMPTY -> {
-                    Text(stringResource(R.string.single_not_imported), style = MaterialTheme.typography.titleLarge)
-                    Text(stringResource(R.string.single_target))
-                    Button(onClick = { pick.launch(arrayOf("*/*")) }) { Text(stringResource(R.string.single_choose)) }
+                if (!imp.active && (imp.error != null || imp.cancelled)) {
+                    ImportCard(imp, onDismiss = model::dismissImport, canDismiss = state != SingleSystemState.LOADING)
                 }
-                SingleSystemState.LOADING -> LoadingIndicator()
-                SingleSystemState.IMPORTING -> Unit
-                SingleSystemState.CONFLICT -> Text(stringResource(R.string.single_conflict), color = MaterialTheme.colorScheme.error)
-                SingleSystemState.READY -> {
-                    val img = images!!.single()
-                    Text(stringResource(R.string.single_ready), style = MaterialTheme.typography.titleLarge)
-                    Text(stringResource(R.string.single_target))
-                    Button(onClick = { VmActivity.start(ctx, img.id) }) { Text(stringResource(R.string.start)) }
-                    TextButton(onClick = { settingsFor = img }) { Text(stringResource(R.string.instance_settings)) }
+                when (state) {
+                    SingleSystemState.EMPTY -> HomeDevice(null, R.string.single_not_imported, phoneHeight) {
+                        Button(onClick = { pick.launch(arrayOf("*/*")) }) { Text(stringResource(R.string.single_choose)) }
+                    }
+                    SingleSystemState.LOADING -> LoadingIndicator(Modifier.align(Alignment.CenterHorizontally))
+                    SingleSystemState.IMPORTING -> HomeDevice(
+                        null, null, phoneHeight,
+                        screen = { HomeImportProgress(imp.progress, importScreenStep(imp.step)) },
+                    ) {
+                        TextButton(onClick = model::cancelImport) { Text(stringResource(R.string.cancel)) }
+                    }
+                    SingleSystemState.CONFLICT -> Text(stringResource(R.string.single_conflict), color = MaterialTheme.colorScheme.error)
+                    SingleSystemState.READY -> {
+                        val img = images!!.single()
+                        val resetting = reset == ResetState.RUNNING
+                        val actionPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                        HomeDevice(img.id, R.string.single_ready, phoneHeight) {
+                            Row(
+                                Modifier.widthIn(max = 360.dp).fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Button(
+                                    onClick = { VmActivity.start(ctx, img.id) },
+                                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                                    enabled = !resetting,
+                                    contentPadding = actionPadding,
+                                ) {
+                                    Text(stringResource(R.string.start), fontSize = 16.sp, textAlign = TextAlign.Center)
+                                }
+                                FilledTonalButton(
+                                    onClick = { settingsFor = img },
+                                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                                    enabled = !resetting,
+                                    contentPadding = actionPadding,
+                                ) {
+                                    Text(stringResource(R.string.instance_settings), fontSize = 16.sp, textAlign = TextAlign.Center)
+                                }
+                            }
+                        }
+                        reset?.let { status ->
+                            val message = when (status) {
+                                ResetState.RUNNING -> R.string.reset_in_progress
+                                ResetState.DONE -> R.string.reset_done
+                                ResetState.BUSY -> R.string.reset_running
+                                ResetState.FAILED -> R.string.reset_failed
+                            }
+                            if (resetting) LinearWavyProgressIndicator(modifier = Modifier.fillMaxWidth())
+                            Text(
+                                stringResource(message),
+                                modifier = Modifier.fillMaxWidth(),
+                                textAlign = TextAlign.Center,
+                                color = when (status) {
+                                    ResetState.BUSY, ResetState.FAILED -> MaterialTheme.colorScheme.error
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                            )
+                        }
+                    }
                 }
             }
         }
     }
     settingsFor?.let { img ->
-        SettingsSheet(img, onDismiss = { settingsFor = null }, onSave = { s, customBattery ->
+        SettingsSheet(img, onDismiss = { settingsFor = null }, onReset = {
+            settingsFor = null
+            resetFor = img
+        }, onSave = { s, customBattery ->
             model.updateSettings(img, s) {
                 BatteryModeIntent.publish(ctx, s.batterySync, customBattery)
             }
         })
     }
+    resetFor?.let { img ->
+        AlertDialog(
+            onDismissRequest = { resetFor = null },
+            title = { Text(stringResource(R.string.reset_title, img.name)) },
+            text = { Text(stringResource(R.string.reset_text)) },
+            confirmButton = {
+                Button(
+                    onClick = { resetFor = null; model.resetData(img.id) },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                ) { Text(stringResource(R.string.reset_data)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { resetFor = null }) { Text(stringResource(R.string.cancel)) }
+            },
+        )
+    }
 
 }
 
-/** Доступ ко всем файлам: общая папка гостя в «Внутренний накопитель/AEmulator». */
 @Composable
-private fun StorageAccessCard() {
-    if (Build.VERSION.SDK_INT < 30) return
-    val ctx = LocalContext.current
-    var granted by remember { mutableStateOf(android.os.Environment.isExternalStorageManager()) }
-    val life = androidx.lifecycle.compose.LocalLifecycleOwner.current
-    androidx.compose.runtime.DisposableEffect(life) {
-        val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
-            if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) granted = android.os.Environment.isExternalStorageManager()
-        }
-        life.lifecycle.addObserver(obs)
-        onDispose { life.lifecycle.removeObserver(obs) }
+private fun StorageAccessDialog(settingsUnavailable: Boolean, onAccept: () -> Unit, onDecline: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDecline,
+        properties = DialogProperties(dismissOnClickOutside = false),
+        title = { Text(stringResource(R.string.storage_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(stringResource(R.string.storage_text))
+                if (settingsUnavailable) {
+                    Text(stringResource(R.string.storage_settings_unavailable), color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        confirmButton = { Button(onClick = onAccept) { Text(stringResource(R.string.storage_accept)) } },
+        dismissButton = { TextButton(onClick = onDecline) { Text(stringResource(R.string.storage_decline)) } },
+    )
+}
+
+internal fun hasRequiredStorageAccess(context: Context): Boolean =
+    if (Build.VERSION.SDK_INT >= 30) Environment.isExternalStorageManager()
+    else context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+
+private fun openStorageAccessSettings(context: Context, launch: (Intent) -> Unit): Boolean {
+    val packageUri = android.net.Uri.parse("package:${context.packageName}")
+    val settings = if (Build.VERSION.SDK_INT >= 30) {
+        listOf(
+            Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, packageUri),
+            Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION),
+        )
+    } else {
+        listOf(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri))
     }
-    if (granted) return
-    Card(shape = MaterialTheme.shapes.large, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)) {
-        Column(Modifier.padding(20.dp)) {
-            Text(stringResource(R.string.storage_title), style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(4.dp))
-            Text(stringResource(R.string.storage_text), style = MaterialTheme.typography.bodyMedium)
-            Spacer(Modifier.height(12.dp))
-            Button(onClick = {
-                runCatching {
-                    ctx.startActivity(Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                        android.net.Uri.parse("package:${ctx.packageName}")))
-                }.onFailure { ctx.startActivity(Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
-            }) { Text(stringResource(R.string.allow)) }
+    return settings.any { intent ->
+        try {
+            launch(intent)
+            true
+        } catch (_: android.content.ActivityNotFoundException) {
+            false
+        } catch (_: SecurityException) {
+            false
         }
     }
 }
@@ -276,38 +436,28 @@ private fun EmptyState(onHelp: () -> Unit) {
 }
 
 @Composable
-private fun ImportCard(s: ImportState, onCancel: () -> Unit, onDismiss: () -> Unit, canDismiss: Boolean = true) {
+private fun ImportCard(s: ImportState, onDismiss: () -> Unit, canDismiss: Boolean = true) {
     Card(
         colors = CardDefaults.cardColors(containerColor = if (s.error != null) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer),
         shape = MaterialTheme.shapes.large,
     ) {
         Column(Modifier.padding(20.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (s.active) LoadingIndicator(Modifier.size(40.dp)) else Icon(if (s.error != null) Icons.Rounded.Warning else Icons.Rounded.Android, null)
+                Icon(if (s.error != null) Icons.Rounded.Warning else Icons.Rounded.Android, null)
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(when { s.error != null -> stringResource(R.string.import_failed); s.active -> stringResource(R.string.import_running); s.cancelled -> stringResource(R.string.import_cancelled); else -> stringResource(R.string.import_done) },
+                    Text(stringResource(if (s.error != null) R.string.import_failed else R.string.import_cancelled),
                         style = MaterialTheme.typography.titleMedium)
                     Text(s.file, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
-            Spacer(Modifier.height(12.dp))
-            when {
-                s.error != null -> Text(s.error, style = MaterialTheme.typography.bodyMedium)
-                s.active -> {
-                    if (s.progress in 0f..1f) LinearWavyProgressIndicator(progress = { s.progress }, modifier = Modifier.fillMaxWidth())
-                    else LinearWavyProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    Spacer(Modifier.height(8.dp))
-                    Text(s.step, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                s.done != null -> {
-                    Text(stringResource(R.string.single_target), style = MaterialTheme.typography.bodyMedium)
-                    visibleImportWarnings(s.done.warnings).forEach { Text("• $it", style = MaterialTheme.typography.bodySmall) }
-                }
+            s.error?.let {
+                Spacer(Modifier.height(12.dp))
+                Text(it, style = MaterialTheme.typography.bodyMedium)
             }
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                if (s.active) TextButton(onClick = onCancel) { Text(stringResource(R.string.cancel)) } else TextButton(enabled = canDismiss, onClick = onDismiss) { Text(stringResource(R.string.ok)) }
+                TextButton(enabled = canDismiss, onClick = onDismiss) { Text(stringResource(R.string.ok)) }
             }
         }
     }

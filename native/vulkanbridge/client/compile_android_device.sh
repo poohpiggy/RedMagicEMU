@@ -24,7 +24,11 @@ ln -s "$6" "$tmp/guest/vulkan_enc"
 patch --batch --fuzz=0 -p1 -d "$tmp" -i "$root/tools/diagnostics/gfxstream-d7a-null-instance/fix.patch"
 patch --batch --fuzz=0 -p1 -d "$tmp" -i "$root/tools/diagnostics/gfxstream-instance-create/fix.patch"
 patch --batch --fuzz=0 -p1 -d "$tmp" -i "$root/tools/diagnostics/gfxstream-null-host-connection/fix.patch"
-patch --batch --fuzz=0 -p1 -d "$tmp" -i "$root/tools/diagnostics/gfxstream-wsi-advertisement/fix.patch"
+if [ "${RME_TEST_ANDROID_READBACK_WSI:-0}" = 1 ]; then
+  patch --batch --fuzz=0 -p1 -d "$tmp" -i "$root/native/vulkanbridge/client/android_readback_wsi.patch"
+else
+  patch --batch --fuzz=0 -p1 -d "$tmp" -i "$root/tools/diagnostics/gfxstream-wsi-advertisement/fix.patch"
+fi
 patch --batch --fuzz=0 -p1 -d "$tmp" -i "$root/tools/diagnostics/gfxstream-native-buffer-version/fix.patch"
 if [ "$#" -eq 7 ]; then
   patch --batch --fuzz=0 -p1 -d "$tmp" -i "$root/native/vulkanbridge/client/device_emu_pipe.patch"

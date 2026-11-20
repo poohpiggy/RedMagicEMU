@@ -16,13 +16,16 @@ import java.nio.file.StandardOpenOption.CREATE
 import java.nio.file.StandardOpenOption.WRITE
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Experimental, cooperative lease. Not wired to VM startup or an isolation guarantee. */
+/** Coordinates Guest startup, shutdown and reset across the app's processes. */
 internal class InstanceRuntimeLease private constructor(
     private val handle: Handle,
     private val lock: FileLock,
     private val pathIdentity: () -> Any?,
     private val key: Any,
+    private val path: Path,
 ) : Closeable {
+    class InUse : IOException("Instance is already in use")
+
     private val closed = AtomicBoolean(false)
 
     // A valid file lock alone does not prove Guest child processes stopped after owner death.
@@ -32,7 +35,11 @@ internal class InstanceRuntimeLease private constructor(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        try { lock.release() } finally { handle.close() }
+        try {
+            try { lock.release() } finally { handle.close() }
+        } finally {
+            synchronized(localLeases) { localLeases.remove(path) }
+        }
     }
 
     private class Handle(val channel: FileChannel, val descriptorIdentity: () -> Any?, val close: () -> Unit) {
@@ -43,6 +50,7 @@ internal class InstanceRuntimeLease private constructor(
 
     companion object {
         const val FILE_NAME = ".redmagic-runtime.lock"
+        private val localLeases = HashSet<Path>()
 
         /** Uses the opened descriptor's inode, not a pre-open or post-open path guess. */
         fun acquire(instance: File, id: String): InstanceRuntimeLease = acquireImpl(instance, id, { path ->
@@ -74,15 +82,26 @@ internal class InstanceRuntimeLease private constructor(
             val base = instance.absoluteFile.parentFile ?: throw IOException("Invalid instance parent")
             if (instance.name != id || !Files.isDirectory(base.toPath(), NOFOLLOW_LINKS) ||
                 !InstancePathSafety.safeInstance(base, id)) throw IOException("Invalid instance identity")
-            val path = File(instance, FILE_NAME).toPath()
+            val path = instance.canonicalFile.toPath().resolve(FILE_NAME)
+            // A second open/close of this inode can release the process's POSIX lock.
+            if (!synchronized(localLeases) { localLeases.add(path) }) throw InUse()
+            try {
+                return acquireFile(path, open, identity)
+            } catch (t: Throwable) {
+                synchronized(localLeases) { localLeases.remove(path) }
+                throw t
+            }
+        }
+
+        private fun acquireFile(path: Path, open: (Path) -> Handle, identity: (Path) -> Any?): InstanceRuntimeLease {
             val handle = try { open(path) } catch (e: Exception) { throw IOException("Cannot open runtime lock", e) }
             try {
                 val key = handle.descriptorIdentity() ?: throw IOException("Cannot verify descriptor identity")
                 if (identity(path) != key) throw IOException("Runtime lock inode mismatch")
                 val lock = try { handle.channel.tryLock() } catch (_: OverlappingFileLockException) { null }
-                    ?: throw IOException("Instance is already in use")
-                val lease = InstanceRuntimeLease(handle, lock, { identity(path) }, key)
-                if (!lease.isValid()) { lease.close(); throw IOException("Runtime lock identity changed") }
+                    ?: throw InUse()
+                val lease = InstanceRuntimeLease(handle, lock, { identity(path) }, key, path)
+                if (!lease.isValid()) { lock.release(); throw IOException("Runtime lock identity changed") }
                 return lease
             } catch (t: Throwable) {
                 try { handle.close() } catch (close: Exception) { t.addSuppressed(close) }

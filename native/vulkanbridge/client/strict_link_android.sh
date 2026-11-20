@@ -11,6 +11,10 @@ guest=$6
 gles=$7
 drm=$8
 m="$mesa/guest/mesa/src"
+set --
+if [ "${RME_TEST_ANDROID_READBACK_WSI:-0}" = 1 ]; then
+  set -- "$out/android_readback_wsi.o"
+fi
 "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang++" \
   -shared -Wl,--no-undefined -Wl,--error-limit=0 -Wl,-soname,libvulkan.so -o "$out/libvulkan-client.so" \
   "$out/public.o" "$out/gfxstream_vk_entrypoints.o" "$out/device.o" "$out/command.o" \
@@ -20,6 +24,7 @@ m="$mesa/guest/mesa/src"
   "$out/android_native_image.o" \
   "$out/android_swapchain_flow.o" "$out/android_swapchain_flow_android.o" \
   "$out/android_swapchain_object.o" \
+  "$@" \
   "$encoder"/*.o "$out/emu_pipe.o" "$stream"/*.o \
   -Wl,--start-group "$m/vulkan/runtime/libvulkan_runtime.a" \
   "$m/vulkan/util/libvulkan_util.a" "$m/vulkan/wsi/libvulkan_wsi.a" \

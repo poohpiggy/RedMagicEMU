@@ -8,10 +8,11 @@ import java.nio.file.LinkOption
 object InstanceAdmission {
     const val SYSTEM_FINGERPRINT = "REDMAGIC/NX809J/NX809J:16/BQ2A.250705.001-BP2A.250605.031.A3/20260130.143527:user/release-keys"
     const val BOOT_FINGERPRINT = "REDMAGIC/NX809J/NX809J:16/BQ2A.250705.001-BP2A.250605.031.A3/20260130.145957:user/release-keys"
+    internal const val INSTALLED_SYSTEM_FINGERPRINT = "REDMAGIC/NX809J/NX809J:16/BQ2A.250705.001-BP2A.250605.031.A3/20260317.232707:user/release-keys"
     private val allowed = setOf(SYSTEM_FINGERPRINT, BOOT_FINGERPRINT)
     private val keys = setOf("ro.build.fingerprint", "ro.system.build.fingerprint", "ro.bootimage.build.fingerprint")
 
-    /** Use the saved value if present; otherwise read the system properties for older instances. */
+    /** Validate the installed build of a previously upgraded instance, or the original import fingerprint. */
     fun requireVerified(instanceDir: File, storedFingerprint: String? = null) {
         val images = instanceDir.absoluteFile.parentFile ?: error("Invalid instance directory")
         app.aemu.importer.PendingImports.withImagesLock(images) {
@@ -27,7 +28,16 @@ object InstanceAdmission {
             check(candidates.size == 1 && candidates.single() == id) {
                 "Multiple or unavailable instances: resolve the conflict before starting"
             }
-            requireFingerprint(storedFingerprint ?: readFingerprint(instanceDir))
+            check(!Files.exists(instanceDir.toPath().resolve("ota/trial"), LinkOption.NOFOLLOW_LINKS)) {
+                "Guest firmware files from an unfinished system change cannot be started"
+            }
+            if (Files.isDirectory(instanceDir.toPath().resolve("ota/applied"), LinkOption.NOFOLLOW_LINKS)) {
+                check(readFingerprint(instanceDir) == INSTALLED_SYSTEM_FINGERPRINT) {
+                    "Installed Guest firmware fingerprint does not match the target"
+                }
+            } else {
+                requireFingerprint(storedFingerprint ?: readFingerprint(instanceDir))
+            }
         }
     }
 

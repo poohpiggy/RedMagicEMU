@@ -51,7 +51,7 @@ static struct bth { int tid, bfd, sock; char *scratch; } g_bth[NTH];
 #define SCRATCH (INLINE_MAX + 8192)
 
 // buffers of delivered transactions live in the area the guest mapped from the binder descriptor
-struct bhdr { u64 size, id; u32 used, big; u64 pad; };
+struct bhdr { u64 size, id; u32 used, big; u64 borrowed_count; };
 static u64 g_bmap, g_bmap_size;
 static volatile int g_block;
 
@@ -73,7 +73,7 @@ static void *balloc(u64 n, u64 id) {
                         r->size = h->size - n - sizeof *h; r->used = 0; r->big = 0;
                         h->size = n;
                     }
-                    h->used = 1; h->big = 0; h->id = id;
+                    h->used = 1; h->big = 0; h->id = id; h->borrowed_count = 0;
                     bunlock();
                     return h + 1;
                 }
@@ -85,13 +85,26 @@ static void *balloc(u64 n, u64 id) {
     u64 total = (n + sizeof(struct bhdr) + 4095) & ~4095UL;
     struct bhdr *h = (struct bhdr *)S6(NR_mmap, 0, total, 3, 0x22, -1, 0);
     if ((u64)h >= (u64)-4095) return 0;
-    h->size = total; h->used = 1; h->big = 1; h->id = id;
+    h->size = total; h->used = 1; h->big = 1; h->id = id; h->borrowed_count = 0;
     return h + 1;
+}
+
+// Store borrowed descriptors after the parcel so closing them does not read guest-visible handle fields.
+static int *borrowed_end(struct bhdr *h) {
+    return (int *)((char *)h + h->size + (h->big ? 0 : sizeof *h));
+}
+
+static void bhold(void *ptr, int fd) {
+    struct bhdr *h = (struct bhdr *)ptr - 1;
+    h->borrowed_count++;
+    *(borrowed_end(h) - h->borrowed_count) = fd;
 }
 
 static u64 bfree(u64 ptr) {
     struct bhdr *h = (struct bhdr *)ptr - 1;
     u64 id = h->id;
+    int *end = borrowed_end(h);
+    for (u64 i = 1; i <= h->borrowed_count; i++) S1(NR_close, *(end - i));
     if (h->big) S2(NR_munmap, h, h->size);
     else { block(); h->used = 0; bunlock(); }
     return id;
@@ -370,8 +383,11 @@ static long bread(struct bth *t, struct bwr *w) {
     memcpy(out, t->scratch, h.br_size); out = (u32 *)((char *)out + h.br_size);
     if (h.flags & F_TXN) {
         u64 dsz = A8(h.data_size), total = dsz + h.offsets_size + h.extra_size;
-        char *buf = balloc(total ? total : 8, h.id);
-        if (!buf) return -ENOMEM;
+        char *buf = balloc((total ? total : 8) + (u64)nfds * sizeof(int), h.id);
+        if (!buf) {
+            for (int i = 0; i < nfds; i++) S1(NR_close, fds[i]);
+            return -ENOMEM;
+        }
         if (h.flags & F_BIG) {
             u64 got = 0;
             while (got < total) { long k = S4(NR_pread64, fds[0], buf + got, total - got, got); if (k <= 0) break; got += (u64)k; }
@@ -396,7 +412,11 @@ static long bread(struct bth *t, struct bwr *w) {
                 struct bbo *par = (struct bbo *)(buf + offs[f->parent]);
                 if (par->type != T_PTR || f->parent_offset + f->num_fds * 4 > par->length) continue;
                 int *dst = (int *)(par->buffer + f->parent_offset);
-                for (u64 j = 0; j < f->num_fds; j++, k++) dst[j] = k < nfds ? fds[k] : -1;
+                // Like kernel Binder, FD arrays belong to the transaction. A plain T_FD belongs to its receiver.
+                for (u64 j = 0; j < f->num_fds; j++, k++) {
+                    dst[j] = k < nfds ? fds[k] : -1;
+                    if (k < nfds) bhold(buf, fds[k]);
+                }
             }
         }
         struct btd d = { h.ptr, h.cookie, h.code, h.tflags, h.sender_pid, h.sender_euid, h.data_size, h.offsets_size, (u64)buf, (u64)offs };
