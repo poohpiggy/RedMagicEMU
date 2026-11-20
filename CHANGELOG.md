@@ -2,6 +2,7 @@
 
 ## RedMagicEMU 0.6.6-beta
 
+- Fixed the stock NX809J camera preview crash in the GLES bridge.
 - Faster, checked firmware imports with progress on the home screen.
 - Per-instance data reset and a keep-screen-on control.
 - Android Vulkan swapchains and a direct command stream to the host renderer.

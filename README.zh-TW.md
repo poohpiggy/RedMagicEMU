@@ -8,10 +8,11 @@
 
 RedMagicEMU 是一個獨立維護的 Android 韌體模擬器。目前支援匯入 REDMAGIC NX809J 的原廠 Android 16（API 36、ARM64）韌體，在 Android 主機上執行原廠系統。主機裝置品牌不限。
 
-[下載 0.6.6-beta APK](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.6.6-beta)
+[下載 0.6.6-beta APK](https://github.com/poohpiggy/RedMagicEMU/releases/download/0.6.6-beta/RedMagicEMU-0.6.6-beta.apk)
 
 ## 0.6.6-beta
 
+- 修正 NX809J 原廠相機啟動時預覽閃退的問題。
 - 首頁透過執行個體卡片顯示韌體及執行狀態。匯入時會在卡片上顯示進度，縮短解包與驗證的等待時間。
 - 可以個別重設執行個體的資料。執行個體設定提供記憶體、解析度及垂直同步選項，浮動選單可以讓螢幕保持開啟。
 - Vulkan 支援 Android 視窗和交換鏈。修正安兔兔 GPU 場景啟動時閃退的問題，並減少主機與 Guest 之間的命令往返及畫面複製開銷。
