@@ -12,11 +12,14 @@ import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest as CR
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.media.Image
 import android.media.ImageReader
 import android.net.LocalSocket
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.AtomicFile
 import android.util.Size
 import java.io.ByteArrayOutputStream
@@ -33,6 +36,7 @@ import java.nio.ByteOrder
  * API 36: "video 1" selects the admitted 1080p60 recording session. Type 5 carries
  * an int64 sensor time in nanoseconds and an int32 RGBA/YV12 slot in memory shared by the
  * descriptor on type 6. "release <slot>" returns a slot. "video 0" restores photo preview.
+ * "controls" updates the NX809J Pro session. Type 7 carries sensor metadata before its image.
  * "zoom <ratio×100>": digital zoom of every frame (preview, recording and picture).
  * "size <w> <h>": NV21 previews of that size (the 640×480 frame cropped to its shape in the centre and scaled);
  * type-3 frames then carry it in their header. Pictures stay 640×480.
@@ -51,7 +55,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
     private val served = api in CameraProfile.API_RANGE
     private val server = UnixServer(paths.socket("aemu_cam"), "camera") { c -> Session(c).run() }
     @Volatile var onPermissionNeeded: (() -> Unit)? = null
-    private data class StillTarget(val id: String, val size: Size, val sensor: Rect?)
+    private data class StillTarget(val id: String, val size: Size, val sensor: Rect?, val controls: TargetCameraControls)
     @Volatile private var stillTargets: List<StillTarget?> = emptyList()
     internal var rearVideoMode: TargetCameraVideoMode? = null
         private set
@@ -102,21 +106,31 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                 ).filterNotNull().flatMap { it.asSequence() }
                     .filter { it.width > 0 && it.height > 0 && it.width.toLong() * it.height <= 64 * 1024 * 1024 }
                     .maxByOrNull { it.width.toLong() * it.height } ?: return@runCatching null
-                StillTarget(id, jpeg, camera.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE))
+                StillTarget(id, jpeg, camera.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE), TargetCameraControls(camera))
             }.onFailure { log("camera: unable to inspect ${if (front) "front" else "back"} JPEG sizes: ${it.message}") }.getOrNull()
         }
         val sizes = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
         targets.forEach { target -> sizes.putInt(target?.size?.width ?: W).putInt(target?.size?.height ?: H) }
-        val file = AtomicFile(File(paths.root, "dev/.aemu-camera-jpeg"))
+        val controls = ByteBuffer.allocate(2 * TargetCameraControls.CAP_BYTES).order(ByteOrder.LITTLE_ENDIAN)
+        targets.forEach { target ->
+            if (target != null) target.controls.writeCaps(controls)
+            else controls.position(controls.position() + TargetCameraControls.CAP_BYTES)
+        }
+        publishCameraFile("dev/.aemu-camera-jpeg", sizes.array())
+        publishCameraFile("dev/.aemu-camera-controls", controls.array())
+        stillTargets = targets
+    }
+
+    private fun publishCameraFile(name: String, bytes: ByteArray) {
+        val file = AtomicFile(File(paths.root, name))
         val output = file.startWrite()
         try {
-            output.write(sizes.array())
+            output.write(bytes)
             file.finishWrite(output)
         } catch (failure: Exception) {
             file.failWrite(output)
             throw failure
         }
-        stillTargets = targets
     }
 
     private inner class Session(private val sock: LocalSocket) {
@@ -140,6 +154,36 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         @Volatile private var guestParams: Map<String, String> = emptyMap()
         @Volatile private var still: ImageReader? = null
         private var stillTarget: StillTarget? = null
+        private var controls: TargetCameraControls.Request? = null
+        private var professional = false
+        private var lastAutoExposure: TotalCaptureResult? = null
+        private var lastAutoWhiteBalance: TotalCaptureResult? = null
+        private var lastLoggedControls: Any? = null
+        private var tint = 0
+        private var tintCheckedAt = 0L
+        private var tintModified = -1L
+        private val previewImages = ResultImages(::frame)
+        private val jpegImages = ResultImages(::stillDone)
+        private val controlResult = ByteBuffer.allocate(48).order(ByteOrder.LITTLE_ENDIAN)
+        private val previewCallback = object : CameraCaptureSession.CaptureCallback() {
+            override fun onCaptureCompleted(s: CameraCaptureSession, r: CR, result: TotalCaptureResult) {
+                if (s !== session) return
+                if (r.get(CR.CONTROL_AE_MODE) != CR.CONTROL_AE_MODE_OFF) lastAutoExposure = result
+                val firstAutoWb = lastAutoWhiteBalance == null && r.get(CR.CONTROL_AWB_MODE) != CR.CONTROL_AWB_MODE_OFF
+                if (r.get(CR.CONTROL_AWB_MODE) != CR.CONTROL_AWB_MODE_OFF) lastAutoWhiteBalance = result
+                if (controls != null) previewImages.result(result)
+                val requested = r.tag
+                if (professional && requested != null && requested != lastLoggedControls) {
+                    lastLoggedControls = requested
+                    log("camera: Pro preview ISO ${result.get(CaptureResult.SENSOR_SENSITIVITY)}, " +
+                        "exposure ${result.get(CaptureResult.SENSOR_EXPOSURE_TIME)} ns, " +
+                        "EV index ${result.get(CaptureResult.CONTROL_AE_EXPOSURE_COMPENSATION)}, " +
+                        "focus ${result.get(CaptureResult.LENS_FOCUS_DISTANCE)}, " +
+                        "WB ${result.get(CaptureResult.COLOR_CORRECTION_GAINS)}")
+                }
+                if (professional && (refreshTint() || firstAutoWb && tint != 0)) updatePreviewControls()
+            }
+        }
         @Volatile private var session: CameraCaptureSession? = null
         @Volatile private var preview: android.hardware.camera2.CaptureRequest.Builder? = null
         @Volatile private var pictureSize = android.util.Size(W, H)
@@ -191,6 +235,17 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                             wantVideo = p.getOrNull(1) == "1"
                             if ((video != null) != (videoAllowed && wantVideo) && !shot)
                                 device?.let { configure(it, useVideo = wantVideo) }
+                        }
+                        "controls", "camera-controls" -> if (api == 36) handler.post {
+                            val updated = TargetCameraControls.Request.parse(p)
+                            val pro = p[0] == "controls" && updated != null
+                            if (updated != controls || pro != professional) {
+                                if (pro && !professional) tintCheckedAt = 0
+                                professional = pro
+                                controls = updated
+                                if (pro) refreshTint()
+                                updatePreviewControls()
+                            }
                         }
                         "release" -> if (api == 36) p.getOrNull(1)?.toIntOrNull()?.let { slot ->
                             handler.post { videoMemory?.release(slot) }
@@ -256,6 +311,8 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         }
 
         private fun closeOutputs() {
+            previewImages.clear()
+            jpegImages.clear()
             session?.close()
             session = null
             preview = null
@@ -326,11 +383,13 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                 } else {
                     val ir = ImageReader.newInstance(W, H, ImageFormat.YUV_420_888, 2)
                     reader = ir
-                    ir.setOnImageAvailableListener({ r -> if (r === reader) r.acquireLatestImage()?.use { frame(it) } }, handler)
-                    val request = d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply { addTarget(ir.surface) }
-                    characteristics?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
-                        ?.filter { it.upper == 30 }?.maxByOrNull { it.lower }
-                        ?.let { request.set(CR.CONTROL_AE_TARGET_FPS_RANGE, it) }
+                    ir.setOnImageAvailableListener({ r ->
+                        if (r === reader) r.acquireLatestImage()?.let { image ->
+                            if (controls == null) image.use { frame(it, null) }
+                            else previewImages.image(image)
+                        }
+                    }, handler)
+                    val request = previewRequest(d, ir)
                     preview = request
                     val size = if (served) pictureSize else stillTarget?.size
                     val st = size?.let {
@@ -339,11 +398,98 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                             .getOrNull()
                     }
                     still = st
-                    st?.setOnImageAvailableListener({ r -> if (r === still) r.acquireLatestImage()?.use { stillDone(it) } }, handler)
-                    if (served) applyTo(request)
+                    st?.setOnImageAvailableListener({ r ->
+                        if (r === still) r.acquireLatestImage()?.let { image ->
+                            if (controls == null) image.use { stillDone(it, null) }
+                            else jpegImages.image(image)
+                        }
+                    }, handler)
                     d.createCaptureSession(listOfNotNull(ir.surface, st?.surface), captureSession(generation, request), handler)
                 }
             }.onFailure { log("camera: unable to configure host camera: ${it.message}"); closeOutputs() }
+        }
+
+        private fun previewRequest(device: CameraDevice, reader: ImageReader): CR.Builder =
+            device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                addTarget(reader.surface)
+                characteristics?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                    ?.filter { it.upper == 30 }?.maxByOrNull { it.lower }
+                    ?.let { set(CR.CONTROL_AE_TARGET_FPS_RANGE, it) }
+                if (served) applyTo(this)
+                setProControls(this)
+            }
+
+        private fun setProControls(request: CR.Builder) {
+            controls?.let {
+                val appliedTint = if (professional) tint else 0
+                stillTarget?.controls?.apply(request, it, lastAutoExposure, lastAutoWhiteBalance, appliedTint)
+                request.setTag(it to appliedTint)
+            }
+        }
+
+        private fun updatePreviewControls() {
+            val d = device ?: return
+            val ir = reader ?: return
+            runCatching {
+                val request = previewRequest(d, ir)
+                preview = request
+                session?.setRepeatingRequest(request.build(), previewCallback, handler)
+            }.onFailure { log("camera: manual controls failed: ${it.message}") }
+        }
+
+        private fun refreshTint(): Boolean {
+            val now = SystemClock.uptimeMillis()
+            if (now - tintCheckedAt < 150) return false
+            tintCheckedAt = now
+            // NX809J persists the Pro tint control without setting a Camera2 gain.
+            val prefs = File(paths.root, "data/data/com.android.camera/shared_prefs/com.android.camera_PRO_0.xml")
+            val modified = prefs.lastModified()
+            if (modified == tintModified) return false
+            tintModified = modified
+            val previous = tint
+            tint = runCatching {
+                if (modified == 0L || prefs.length() > 128 * 1024 ||
+                    !prefs.canonicalFile.toPath().startsWith(paths.root.canonicalFile.toPath())) 0
+                else PRO_TINT.find(prefs.readText())?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            }.onFailure { log("camera: unable to read Pro tint: ${it.message}") }.getOrDefault(0)
+            return tint != previous
+        }
+
+        /** The ImageReader and Camera2 result callback can arrive in either order. */
+        private inner class ResultImages(private val deliver: (Image, TotalCaptureResult?) -> Unit) {
+            private val results = LinkedHashMap<Long, TotalCaptureResult>()
+            private var pending: Image? = null
+
+            fun image(image: Image) {
+                finish(null)
+                val result = results.remove(image.timestamp)
+                if (result != null) image.use { deliver(it, result) }
+                else {
+                    pending = image
+                    handler.postDelayed({ if (pending === image) finish(null) }, 100)
+                }
+            }
+
+            fun result(result: TotalCaptureResult) {
+                val timestamp = result.get(CaptureResult.SENSOR_TIMESTAMP) ?: return
+                if (pending?.timestamp == timestamp) finish(result)
+                else {
+                    results[timestamp] = result
+                    if (results.size > 4) results.remove(results.keys.first())
+                }
+            }
+
+            fun clear() {
+                pending?.close()
+                pending = null
+                results.clear()
+            }
+
+            private fun finish(result: TotalCaptureResult?) {
+                val image = pending ?: return
+                pending = null
+                image.use { deliver(it, result) }
+            }
         }
 
         private fun captureSession(generation: Int, request: CR.Builder, highSpeed: Boolean = false) =
@@ -352,11 +498,11 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                     if (closed || generation != sessionGeneration) { s.close(); return }
                     session = s
                     runCatching {
-                        val capture = request.build()
+                        val capture = (preview ?: request).build()
                         if (highSpeed) {
                             val high = s as CameraConstrainedHighSpeedCaptureSession
                             high.setRepeatingBurst(high.createHighSpeedRequestList(capture), null, handler)
-                        } else s.setRepeatingRequest(capture, null, handler)
+                        } else s.setRepeatingRequest(capture, if (api == 36 && preview != null) previewCallback else null, handler)
                     }.onFailure { log("camera: unable to start host capture: ${it.message}") }
                 }
 
@@ -366,12 +512,31 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                 }
             }
 
-        private fun frame(img: Image) {
+        private fun frame(img: Image, result: TotalCaptureResult?) {
             if (!streaming && !shot) return
             val t0 = System.nanoTime()
             toNv21(img)
             if (mirror) mirrorNv21()
-            process(t0)
+            process(t0, result)
+        }
+
+        private fun sendControlResult(result: TotalCaptureResult?) {
+            val exposure = result?.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: return
+            val sensitivity = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: return
+            controlResult.clear()
+            controlResult.putLong(exposure)
+            controlResult.putLong(result.get(CaptureResult.SENSOR_FRAME_DURATION) ?: exposure)
+            controlResult.putInt(sensitivity)
+            controlResult.putInt(result.get(CaptureResult.CONTROL_AE_EXPOSURE_COMPENSATION) ?: 0)
+            controlResult.putFloat(result.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: 0f)
+            controlResult.put((result.get(CaptureResult.CONTROL_AE_STATE) ?: 0).toByte())
+            controlResult.put((result.get(CaptureResult.CONTROL_AF_STATE) ?: 0).toByte())
+            controlResult.put((result.get(CaptureResult.CONTROL_AWB_STATE) ?: 0).toByte())
+            controlResult.put((result.get(CaptureResult.LENS_STATE) ?: 0).toByte())
+            val gains = result.get(CaptureResult.COLOR_CORRECTION_GAINS)
+            controlResult.putFloat(gains?.red ?: 0f).putFloat(gains?.greenEven ?: 0f)
+            controlResult.putFloat(gains?.greenOdd ?: 0f).putFloat(gains?.blue ?: 0f)
+            send(7, controlResult.array(), controlResult.capacity(), w = 0, h = 0)
         }
 
         /** the test picture instead of the camera (a file "camera.test" in the image's run directory): see TestScene */
@@ -395,7 +560,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             handler.post(tick)
         }
 
-        private fun process(t0: Long) {
+        private fun process(t0: Long, result: TotalCaptureResult? = null) {
             val z = zoom
             if (z > 100) zoomNv21(z)
             runCatching {
@@ -423,7 +588,11 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                 if (ov != 0) OverlayFeed.show(ov, frame, ow * oh * 3 / 2, ow, oh, OverlayFeed.NV21, unplaced = true, turn = turn)
                 if (!onlyNv21) toRgba()
                 val t1 = System.nanoTime()
-                if (onlyNv21) send(3, frame, ow * oh * 3 / 2, w = ow, h = oh) else send(1, rgba, rgba.size, nv21)
+                if (onlyNv21) send(3, frame, ow * oh * 3 / 2, w = ow, h = oh)
+                else {
+                    if (controls != null) sendControlResult(result)
+                    send(1, rgba, rgba.size, nv21)
+                }
                 convNs += t1 - t0; sendNs += System.nanoTime() - t1
                 if (++frames == 30) {
                     // the host's own picture brightness: a dark guest preview with a dark host frame is the scene, not a bug
@@ -491,7 +660,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             runCatching { session?.close() }; runCatching { still?.close() }
             val st = runCatching { ImageReader.newInstance(pictureSize.width, pictureSize.height, ImageFormat.JPEG, 2) }.getOrNull()
             still = st; session = null
-            st?.setOnImageAvailableListener({ rr -> rr.acquireLatestImage()?.use { stillDone(it) } }, handler)
+            st?.setOnImageAvailableListener({ rr -> rr.acquireLatestImage()?.use { stillDone(it, null) } }, handler)
             @Suppress("DEPRECATION")
             runCatching {
                 d.createCaptureSession(listOfNotNull(ir.surface, st?.surface), object : CameraCaptureSession.StateCallback() {
@@ -507,6 +676,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             return runCatching {
                 val r = d.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply { addTarget(st.surface) }
                 if (served) applyTo(r)
+                setProControls(r)
                 val p = guestParams
                 r.set(CR.JPEG_QUALITY, (p["jpeg-quality"]?.toIntOrNull() ?: 90).coerceIn(1, 100).toByte())
                 // the guest's "rotation" (Parameters.setRotation): the turn its camera application wants in the file
@@ -524,16 +694,29 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                         sensor.top + crop.bottom * sensor.height() / H,
                     ))
                 }
-                s.capture(r.build(), null, handler)
+                jpegImages.clear()
+                val callback = if (controls != null) object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(s: CameraCaptureSession, request: CR, result: TotalCaptureResult) {
+                        if (s !== session) return
+                        if (professional) log("camera: Pro JPEG ISO ${result.get(CaptureResult.SENSOR_SENSITIVITY)}, " +
+                            "exposure ${result.get(CaptureResult.SENSOR_EXPOSURE_TIME)} ns, " +
+                            "focus ${result.get(CaptureResult.LENS_FOCUS_DISTANCE)}")
+                        jpegImages.result(result)
+                    }
+                } else null
+                s.capture(r.build(), callback, handler)
                 true
             }.getOrDefault(false)
         }
 
-        private fun stillDone(img: Image) {
+        private fun stillDone(img: Image, result: TotalCaptureResult?) {
             val b = img.planes[0].buffer
             val a = ByteArray(b.remaining()); b.get(a)
             streaming = false   // a picture stops the preview until the guest starts it again
-            if (api == 36) send(2, a, a.size, w = img.width, h = img.height) else send(2, a, a.size)
+            if (api == 36) {
+                sendControlResult(result)
+                send(2, a, a.size, w = img.width, h = img.height)
+            } else send(2, a, a.size)
             log("camera: picture ${img.width}x${img.height}, ${a.size / 1024} KB")
             if (wantVideo) device?.let { configure(it, useVideo = true) }
         }
@@ -661,6 +844,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
     }
 
     companion object {
+        private val PRO_TINT = Regex("""<int\s+name="pref_camera_color_tint_key"\s+value="(-?\d+)"\s*/>""")
         const val W = 640
         const val H = 480
     }

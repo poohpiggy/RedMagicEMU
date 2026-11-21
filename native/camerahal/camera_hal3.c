@@ -8,6 +8,7 @@
  *     type 1: RGBA_8888 (640x480) followed by NV21; type 2: JPEG of a picture.
  *     type 5: uint64 sensor timestamp and uint32 RGBA/YV12 slot for "video 1".
  *     type 6: empty payload with the shared memory descriptor.
+ *     type 7: physical sensor metadata for the following preview or JPEG.
  *
  * Streams: IMPLEMENTATION_DEFINED becomes RGBA_8888 (what the software GL of the guest samples), YCbCr_420_888 is
  * NV21 in one block (the layout the engine's gralloc reports from lock_ycbcr), BLOB is the host's JPEG. A stream of
@@ -50,6 +51,7 @@ extern int clock_gettime(int clock, struct timespec64 *ts);
 #define VIDEO_BYTES (VIDEO_RGBA_BYTES + VIDEO_W * VIDEO_H * 3 / 2)
 #define VIDEO_QUEUE 4
 #define NUBIA_VIDEO_60_MODE 0x8004
+#define NUBIA_PRO_MODE 0x800a
 #define MAX_ZOOM 4
 #define JPEG_MAX (1 << 20)
 #define JPEG_PIXEL_LIMIT (64 * 1024 * 1024)
@@ -147,6 +149,21 @@ struct camera3_ops {
 struct request { uint32_t frame; int nbuf; struct stream_buffer bufs[MAX_BUFS]; const void *handles[MAX_BUFS]; void *settings; };
 struct still_size { int32_t width, height; };
 struct video_frame { unsigned slot; uint64_t timestamp; };
+struct pro_caps {
+    int64_t exposure[2], max_frame_duration;
+    int32_t iso[2], ev[2], ev_step[2];
+    float focus;
+    uint32_t flags, af_modes, awb_modes;
+};
+struct pro_result {
+    int64_t exposure, frame_duration;
+    int32_t iso, ev;
+    float focus;
+    uint8_t ae_state, af_state, awb_state, lens_state;
+    float gains[4];
+};
+_Static_assert(sizeof(struct pro_caps) == 64, "camera capabilities wire size");
+_Static_assert(sizeof(struct pro_result) == 48, "camera result wire size");
 
 struct camera3 {
     struct hw_device common;
@@ -162,6 +179,9 @@ struct camera3 {
     volatile unsigned frame_seq;
     unsigned char *jpeg; volatile unsigned jpeg_len, jpeg_seq;
     struct still_size still_size;
+    int pro_mode;
+    char pro_command[192];
+    struct pro_result next_result, frame_result, jpeg_result, result;
     int video_enabled, video_stream, pull_video;
     unsigned char *video_pixels;
     struct video_frame video_frames[VIDEO_QUEUE];
@@ -285,7 +305,8 @@ static const struct ent STATIC[] = {
       CONTROL_VIDEO_STABILIZATION_MODE, EDGE_MODE, FLASH_MODE, HOT_PIXEL_MODE, JPEG_ORIENTATION, JPEG_QUALITY,
       JPEG_THUMBNAIL_QUALITY, JPEG_THUMBNAIL_SIZE, LENS_APERTURE, LENS_FILTER_DENSITY, LENS_FOCAL_LENGTH,
       LENS_FOCUS_DISTANCE, LENS_OPTICAL_STABILIZATION_MODE, NOISE_REDUCTION_MODE, SCALER_CROP_REGION, SHADING_MODE,
-      STATISTICS_FACE_DETECT_MODE, STATISTICS_LENS_SHADING_MAP_MODE, TONEMAP_MODE),
+      STATISTICS_FACE_DETECT_MODE, STATISTICS_LENS_SHADING_MAP_MODE, TONEMAP_MODE,
+      COLOR_CORRECTION_MODE, COLOR_CORRECTION_GAINS, SENSOR_EXPOSURE_TIME, SENSOR_SENSITIVITY),
     I(REQUEST_AVAILABLE_RESULT_KEYS,
       COLOR_CORRECTION_ABERRATION_MODE, CONTROL_AE_ANTIBANDING_MODE, CONTROL_AE_EXPOSURE_COMPENSATION, CONTROL_AE_LOCK,
       CONTROL_AE_MODE, CONTROL_AE_TARGET_FPS_RANGE, CONTROL_AE_PRECAPTURE_TRIGGER, CONTROL_AF_MODE, CONTROL_AF_TRIGGER,
@@ -296,7 +317,7 @@ static const struct ent STATIC[] = {
       STATISTICS_FACE_DETECT_MODE, STATISTICS_LENS_SHADING_MAP_MODE, TONEMAP_MODE,
       CONTROL_AE_STATE, CONTROL_AF_STATE, CONTROL_AWB_STATE, FLASH_STATE, LENS_STATE, REQUEST_PIPELINE_DEPTH,
       SENSOR_TIMESTAMP, SENSOR_ROLLING_SHUTTER_SKEW, SENSOR_EXPOSURE_TIME, SENSOR_SENSITIVITY,
-      CONTROL_POST_RAW_SENSITIVITY_BOOST, STATISTICS_SCENE_FLICKER),
+      CONTROL_POST_RAW_SENSITIVITY_BOOST, STATISTICS_SCENE_FLICKER, SENSOR_FRAME_DURATION, COLOR_CORRECTION_GAINS),
     I(REQUEST_AVAILABLE_CHARACTERISTICS_KEYS,
       COLOR_CORRECTION_AVAILABLE_ABERRATION_MODES, CONTROL_AE_AVAILABLE_ANTIBANDING_MODES, CONTROL_AE_AVAILABLE_MODES,
       CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES, CONTROL_AE_COMPENSATION_RANGE, CONTROL_AE_COMPENSATION_STEP,
@@ -399,8 +420,31 @@ static int rear_video_enabled(int id) {
     return enabled;
 }
 
+static struct pro_caps pro_caps_for(int id) {
+    struct pro_caps caps[2] = {0};
+    FILE *file = fopen("/dev/.aemu-camera-controls", "rb");
+    if (!file) return caps[id];
+    size_t count = fread(caps, sizeof(caps[0]), COUNT(caps), file);
+    fclose(file);
+    return count == COUNT(caps) ? caps[id] : (struct pro_caps){0};
+}
+
+static unsigned pro_modes(uint8_t *modes, unsigned limit, uint32_t mask) {
+    unsigned n = 0;
+    for (unsigned i = 0; i < limit; i++) if (mask & (1u << i)) modes[n++] = (uint8_t)i;
+    return n;
+}
+
 static void *build_static_info(int id, struct still_size still, int video) {
     struct ent entries[COUNT(STATIC)];
+    const struct pro_caps pro = pro_caps_for(id);
+    const int manual_sensor = (pro.flags & 1u) && pro.iso[0] > 0 && pro.iso[1] >= pro.iso[0] &&
+        pro.exposure[0] > 0 && pro.exposure[1] >= pro.exposure[0] && pro.max_frame_duration >= pro.exposure[1];
+    uint8_t af_modes[6], awb_modes[9];
+    unsigned af_count = pro_modes(af_modes, COUNT(af_modes), pro.af_modes & ((1u << 0) | (1u << 4)));
+    unsigned awb_count = pro_modes(awb_modes, COUNT(awb_modes), pro.awb_modes & ((pro.flags & 2u) ? ~0u : ~1u));
+    const uint8_t ae_modes[] = {0, 1};
+    const uint8_t approximate_focus = 1;
     const int32_t jpeg_max = jpeg_capacity(still);
     const int32_t fps_ranges[] = {15, 30, 30, 30, 50, 60, 60, 60};
     const int32_t formats[] = {
@@ -422,6 +466,36 @@ static void *build_static_info(int id, struct still_size still, int video) {
         entries[i] = STATIC[i];
         switch (entries[i].tag) {
         case JPEG_MAX_SIZE: entries[i].data = &jpeg_max; break;
+        case CONTROL_AE_AVAILABLE_MODES:
+            if (manual_sensor) { entries[i].data = ae_modes; entries[i].count = COUNT(ae_modes); }
+            break;
+        case CONTROL_AE_COMPENSATION_RANGE:
+            if (pro.ev[0] < pro.ev[1] && pro.ev_step[0] > 0 && pro.ev_step[1] > 0) entries[i].data = pro.ev;
+            break;
+        case CONTROL_AE_COMPENSATION_STEP:
+            if (pro.ev[0] < pro.ev[1] && pro.ev_step[0] > 0 && pro.ev_step[1] > 0) entries[i].data = pro.ev_step;
+            break;
+        case CONTROL_AF_AVAILABLE_MODES:
+            if (af_count) { entries[i].data = af_modes; entries[i].count = af_count; }
+            break;
+        case CONTROL_AWB_AVAILABLE_MODES:
+            if (awb_count) { entries[i].data = awb_modes; entries[i].count = awb_count; }
+            break;
+        case LENS_INFO_MINIMUM_FOCUS_DISTANCE:
+            if (pro.focus > 0) entries[i].data = &pro.focus;
+            break;
+        case LENS_INFO_FOCUS_DISTANCE_CALIBRATION:
+            if (pro.focus > 0) entries[i].data = &approximate_focus;
+            break;
+        case SENSOR_INFO_SENSITIVITY_RANGE:
+            if (manual_sensor) entries[i].data = pro.iso;
+            break;
+        case SENSOR_INFO_EXPOSURE_TIME_RANGE:
+            if (manual_sensor) entries[i].data = pro.exposure;
+            break;
+        case SENSOR_INFO_MAX_FRAME_DURATION:
+            if (manual_sensor) entries[i].data = &pro.max_frame_duration;
+            break;
         case CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES:
             if (video) { entries[i].data = fps_ranges; entries[i].count = COUNT(fps_ranges); }
             break;
@@ -629,6 +703,8 @@ static void *reader(void *arg) {
             if (read_full(d->fd, back, len) < 0) break;
             pthread_mutex_lock(d->lock);
             unsigned char *t = d->frame; d->frame = back; back = t;
+            d->frame_result = d->next_result;
+            d->next_result = (struct pro_result){0};
             d->frame_seq++;
             pthread_mutex_unlock(d->lock);
             if (!back) back = malloc(flen);     /* the first frame: there was no older one to take over */
@@ -650,8 +726,12 @@ static void *reader(void *arg) {
             if (read_full(d->fd, j, len) < 0) { free(j); break; }
             pthread_mutex_lock(d->lock);
             free(d->jpeg); d->jpeg = j; d->jpeg_len = (unsigned)len;
+            d->jpeg_result = d->next_result;
+            d->next_result = (struct pro_result){0};
             d->jpeg_seq++;
             pthread_mutex_unlock(d->lock);
+        } else if (hdr[0] == 7 && len == sizeof(d->next_result)) {
+            if (read_full(d->fd, &d->next_result, sizeof(d->next_result)) < 0) break;
         } else if (skip(d->fd, len) < 0) break;
     }
     free(back);
@@ -659,9 +739,21 @@ static void *reader(void *arg) {
 }
 
 /* ---- requests ---- */
+static void result_entry(void *m, uint32_t tag, const void *value, size_t count) {
+    struct ro_entry entry;
+    if (md_find && md_update && md_find(m, tag, &entry) == 0)
+        md_update(m, entry.index, value, count, 0);
+    else
+        md_add(m, tag, value, count);
+}
+
+static void result_value(void *m, uint32_t tag, const void *value) {
+    result_entry(m, tag, value, 1);
+}
+
 static void *result_metadata(struct camera3 *d, uint64_t ts) {
     const void *s = d->last ? d->last : d->templates[1];
-    void *m = md_alloc((s ? md_entries(s) : 0) + 13, (s ? md_data(s) : 0) + 160);
+    void *m = md_alloc((s ? md_entries(s) : 0) + 17, (s ? md_data(s) : 0) + 200);
     if (!m) return 0;
     if (s) md_append(m, s);
     static const uint8_t converged = 2, zero = 0, depth = 1;
@@ -670,19 +762,28 @@ static void *result_metadata(struct camera3 *d, uint64_t ts) {
      * Exposure is one 30 fps frame; ISO and boost match the advertised ranges. */
     const int64_t virtual_exposure_ns = d->pull_video ? 16666666 : 33333333;
     static const int32_t virtual_iso = 100, virtual_boost = 100;
+    const struct pro_result *host = &d->result;
+    const int measured = host->exposure > 0 && host->iso > 0;
     int64_t t = (int64_t)ts;
     md_add(m, SENSOR_TIMESTAMP, &t, 1);
     md_add(m, REQUEST_PIPELINE_DEPTH, &depth, 1);
-    md_add(m, CONTROL_AE_STATE, &converged, 1);
-    md_add(m, CONTROL_AF_STATE, &zero, 1);
-    md_add(m, CONTROL_AWB_STATE, &converged, 1);
+    result_value(m, CONTROL_AE_STATE, measured ? &host->ae_state : &converged);
+    result_value(m, CONTROL_AF_STATE, measured ? &host->af_state : &zero);
+    result_value(m, CONTROL_AWB_STATE, measured ? &host->awb_state : &converged);
     md_add(m, FLASH_STATE, &zero, 1);
-    md_add(m, LENS_STATE, &zero, 1);
+    result_value(m, LENS_STATE, measured ? &host->lens_state : &zero);
     md_add(m, STATISTICS_SCENE_FLICKER, &zero, 1);
     md_add(m, SENSOR_ROLLING_SHUTTER_SKEW, &skew, 1);
-    md_add(m, SENSOR_EXPOSURE_TIME, &virtual_exposure_ns, 1);
-    md_add(m, SENSOR_SENSITIVITY, &virtual_iso, 1);
-    md_add(m, CONTROL_POST_RAW_SENSITIVITY_BOOST, &virtual_boost, 1);
+    result_value(m, SENSOR_EXPOSURE_TIME, measured ? &host->exposure : &virtual_exposure_ns);
+    result_value(m, SENSOR_SENSITIVITY, measured ? &host->iso : &virtual_iso);
+    result_value(m, CONTROL_POST_RAW_SENSITIVITY_BOOST, &virtual_boost);
+    if (measured) {
+        result_value(m, SENSOR_FRAME_DURATION, &host->frame_duration);
+        result_value(m, CONTROL_AE_EXPOSURE_COMPENSATION, &host->ev);
+        result_value(m, LENS_FOCUS_DISTANCE, &host->focus);
+        if (host->gains[0] > 0 && host->gains[1] > 0 && host->gains[2] > 0 && host->gains[3] > 0)
+            result_entry(m, COLOR_CORRECTION_GAINS, host->gains, COUNT(host->gains));
+    }
     return m;
 }
 
@@ -728,6 +829,62 @@ static void select_video(struct camera3 *d, int selected) {
     say(d, selected ? "video 1\n" : "video 0\n");
 }
 
+static const void *request_value(const void *settings, uint32_t tag, size_t count) {
+    struct ro_entry entry;
+    return settings && md_find(settings, tag, &entry) == 0 && entry.count == count ? entry.data : 0;
+}
+
+static int request_i32(const void *settings, uint32_t tag) {
+    const int32_t *value = request_value(settings, tag, 1);
+    return value ? *value : 0;
+}
+
+static int request_u8(const void *settings, uint32_t tag, int fallback) {
+    const uint8_t *value = request_value(settings, tag, 1);
+    return value ? *value : fallback;
+}
+
+static int64_t send_pro_controls(struct camera3 *d) {
+    const void *s = d->last;
+    const char *section = "org.codeaurora.qcamera3.iso_exp_priority";
+    const int32_t priority = request_i32(s, vendor_tag(section, "select_priority"));
+    const int64_t *prioritized = request_value(s, vendor_tag(section, "use_iso_exp_priority"), 1);
+    const int32_t priority_iso = request_i32(s, vendor_tag(section, "use_iso_value"));
+    const int manual_ae = request_u8(s, CONTROL_AE_MODE, 1) == 0 || request_u8(s, CONTROL_MODE, 1) == 0;
+    const int64_t *exposure = request_value(s, SENSOR_EXPOSURE_TIME, 1);
+    const int64_t time = manual_ae && exposure && *exposure > 0 ? *exposure :
+        (priority == 1 && prioritized && *prioritized > 0 ? *prioritized : 0);
+    const int sensor_iso = request_i32(s, SENSOR_SENSITIVITY);
+    const int iso = manual_ae && sensor_iso > 0 ? sensor_iso : priority_iso;
+    const float *focus = request_value(s, LENS_FOCUS_DISTANCE, 1);
+    const float *gains = request_value(s, COLOR_CORRECTION_GAINS, 4);
+    const int awb = request_u8(s, CONTROL_AWB_MODE, 1);
+    if (awb != 0 || request_u8(s, COLOR_CORRECTION_MODE, 1) != 0) gains = 0;
+    const char *wb_section = "org.codeaurora.qcamera3.manualWB";
+    float tint_gains[4];
+    const uint32_t tint_mode = vendor_tag(wb_section, "partial_mwb_mode");
+    if (awb == 0 && tint_mode && request_i32(s, tint_mode) == 2) {
+        const float *tint = request_value(s, vendor_tag(wb_section, "gains"), 3);
+        if (tint) {
+            tint_gains[0] = tint[0];
+            tint_gains[1] = tint_gains[2] = tint[1];
+            tint_gains[3] = tint[2];
+            gains = tint_gains;
+        }
+    }
+    char command[sizeof(d->pro_command)];
+    const char *name = d->pro_mode == 1 ? "controls" : "camera-controls";
+    int n = snprintf(command, sizeof(command), "%s %d %d %lld %d %g %d %g %g %g %g\n", name,
+        request_i32(s, CONTROL_AE_EXPOSURE_COMPENSATION), iso, (long long)time,
+        request_u8(s, CONTROL_AF_MODE, 4), focus ? *focus : 0.f, awb,
+        gains ? gains[0] : 0.f, gains ? gains[1] : 0.f, gains ? gains[2] : 0.f, gains ? gains[3] : 0.f);
+    if (n > 0 && n < (int)sizeof(command) && strcmp(d->pro_command, command)) {
+        say(d, command);
+        memcpy(d->pro_command, command, (size_t)n + 1);
+    }
+    return time > 1000000000 ? 1000000000 : time;
+}
+
 static void answer(struct camera3 *d, struct request *r) {
     const struct gralloc_module *g = gralloc();
     int blob = 0, preview = 0;
@@ -736,6 +893,7 @@ static void answer(struct camera3 *d, struct request *r) {
         else preview = 1;
     }
     if (r->settings) { if (d->last) md_free(d->last); d->last = r->settings; r->settings = 0; }
+    const int64_t exposure = d->pro_mode ? send_pro_controls(d) : 0;
     struct crop crop = request_crop(d->last);
     struct ro_entry fps;
     const int fast = d->video_stream && d->last &&
@@ -765,7 +923,8 @@ static void answer(struct camera3 *d, struct request *r) {
         say(d, "start\n");      /* a picture stops the host's preview */
     }
     if (preview && (!blob || has_new_frame(d, fseq, jseq, 0, 1)))
-        for (int i = 0; i < (fast ? 1200 : 150) && d->running && !has_new_frame(d, fseq, jseq, 1, blob); i++) usleep(fast ? 1000 : 2000);
+        for (int i = 0; i < (fast ? 1200 : 150 + exposure / 2000000) && d->running &&
+             !has_new_frame(d, fseq, jseq, 1, blob); i++) usleep(fast ? 1000 : 2000);
     if (!d->running || !has_new_frame(d, fseq, jseq, preview, blob)) {
         fail_no_frame(d, r);
         return;
@@ -773,6 +932,7 @@ static void answer(struct camera3 *d, struct request *r) {
 
     pthread_mutex_lock(d->lock);
     const struct video_frame *video_frame = fast && preview ? &d->video_frames[d->video_head % VIDEO_QUEUE] : 0;
+    d->result = d->pro_mode ? (blob ? d->jpeg_result : d->frame_result) : (struct pro_result){0};
     uint64_t ts = video_frame ? video_frame->timestamp : now_ns();
     struct crop video_crop = { crop.left * VIDEO_W / W, crop.top * VIDEO_H / H,
                                crop.width * VIDEO_W / W, crop.height * VIDEO_H / H };
@@ -859,10 +1019,12 @@ static int d_configure(struct camera3 *d, struct stream_config *c) {
     if (!c || !c->num) return -22;
     for (int i = 0; i < 500 && d->head != d->tail; i++) usleep(2000);
     int video_stream = c->mode == NUBIA_VIDEO_60_MODE;
+    int encoder_stream = 0;
     for (uint32_t i = 0; i < c->num; i++) {
         struct stream *s = c->streams[i];
         if (!s || s->type != 0 /* CAMERA3_STREAM_OUTPUT */) return -22;
         const int full_hd = s->width == VIDEO_W && s->height == VIDEO_H;
+        if (s->usage & USAGE_VIDEO_ENCODER) encoder_stream = 1;
         if (s->format == FORMAT_IMPLEMENTATION_DEFINED) {
             const int encoder = d->video_enabled && full_hd && (s->usage & USAGE_VIDEO_ENCODER);
             s->format = encoder ? FORMAT_YV12 : FORMAT_RGBA_8888;
@@ -876,6 +1038,12 @@ static int d_configure(struct camera3 *d, struct stream_config *c) {
         s->max_buffers = 4;
     }
     d->video_stream = d->video_enabled && video_stream;
+    const int pro_mode = c->mode == NUBIA_PRO_MODE ? 1 : (c->mode == 0 && !encoder_stream && !d->video_stream ? 2 : 0);
+    if (d->pro_mode && !pro_mode) {
+        say(d, "controls reset\n");
+        d->pro_command[0] = 0;
+    }
+    d->pro_mode = pro_mode;
     if (!d->video_stream) select_video(d, 0);
     say(d, "start\n");
     return 0;

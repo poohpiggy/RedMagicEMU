@@ -296,4 +296,6 @@ static const struct { const char *section, *name; int type; } g_vtags[] = {
     { "org.quic.camera2.objectTrackingResults", "TrackerStatus", 1 },
     /* Nubia accepts a missing lux result, but its key must resolve. */
     { "org.quic.camera2.statsconfigs", "AECLuxIndex", 2 },
+    { "org.codeaurora.qcamera3.manualWB", "partial_mwb_mode", 1 },
+    { "org.codeaurora.qcamera3.manualWB", "gains", 2 },
 };
