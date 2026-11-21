@@ -240,6 +240,9 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     private val hostVulkan = HostVulkanVmHost(HostVulkanService(), ::log) { android.os.Process.myPid() }
     private val hostOpenCl = HostOpenClVmHost(::log)
     private val videoRuntime = TargetVideoRuntime(paths.root) { ctx.assets.open(it) }
+    private val cameraModeRuntime = TargetCameraModeRuntime(paths.root) {
+        EngineAssets.open(ctx, "engines/n64-36-camera-adapter/rme-camera-adapter.jar")
+    }
     private val videoSocket = paths.socket(TargetVideoRuntime.SOCKET)
     @Volatile private var videoHost: Process? = null
     private val cameraEncoderSocket = paths.socket(TargetVideoRuntime.CAMERA_ENCODER_SOCKET)
@@ -553,7 +556,9 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         // 1. дерево
         val fixer = TreeFixer(ctx, paths, img, ::log)
         fixer.fixup()
-        if (engine == Engine.N64 && img.api == 36 && img.model == "NX809J") {
+        val targetCamera = engine == Engine.N64 && img.api == 36 && img.model == "NX809J"
+        val singleRearCamera = if (targetCamera) cameraModeRuntime.install() else false
+        if (targetCamera) {
             videoRuntime.restoreCameraEncoder()
             val rear1080p60 = camera.prepareRearVideo() && prepareGuestCameraEncoder()
             if (!rear1080p60) camera.disableRearVideo()
@@ -596,6 +601,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             log("lte: radio event channel unavailable; Ethernet retained")
         }
         val overrides = LinkedHashMap<String, String>()
+        if (singleRearCamera) overrides["ro.vendor.feature.camera_system_info"] = "single"
         // 2.3: ro.kernel.qemu=1 включает в фреймворке режим эмулятора — ставим его только mediaserver
         overrides["ro.kernel.qemu"] = if (engine == Engine.GB) "0" else "1"
         overrides["ro.kernel.qemu.gles"] = if (s.gpu && (s.hwui || engine == Engine.GB)) "1" else "0"
@@ -2283,10 +2289,13 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             openClCleanupFailure?.let { log("OpenCL host cleanup unconfirmed: ${it.message}") }
             adb.stop()
             var videoCleanupFailure: Throwable? = null
+            var cameraModeCleanupFailure: Throwable? = null
             if (admissionState.admitted) {
                 log("stopping system")
                 runCatching { guestRunner.run(listOf("/system/bin/sync"), 5_000, start = ::startCleanupSync) }
                 killAll()
+                cameraModeCleanupFailure = runCatching { cameraModeRuntime.restore() }.exceptionOrNull()
+                cameraModeCleanupFailure?.let { log("Guest camera mode cleanup unconfirmed: ${it.message}") }
                 if (videoHost != null) {
                     videoCleanupFailure = runCatching {
                         videoRuntime.restore()
@@ -2312,7 +2321,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                 Keeper.release(ctx)
             }
             val cleanupFailures = listOfNotNull(dnsCleanupFailure, radioCleanupFailure,
-                vibrationCleanupFailure, vulkanCleanupFailure, openClCleanupFailure, videoCleanupFailure)
+                vibrationCleanupFailure, vulkanCleanupFailure, openClCleanupFailure, videoCleanupFailure, cameraModeCleanupFailure)
             cleanupFailures.firstOrNull()?.let { failure ->
                 cleanupFailures.drop(1).filter { it !== failure }.forEach(failure::addSuppressed)
                 throw failure
