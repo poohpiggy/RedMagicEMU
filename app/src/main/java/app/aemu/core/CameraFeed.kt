@@ -240,6 +240,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         private var wantVideo = false
         private var video: TargetCameraVideoFrames? = null
         private var videoSurface: Surface? = null
+        private var videoClockOffset = 0L
         private var videoMemory: TargetCameraVideoMemory? = null
         private var sessionGeneration = 0
         private val videoSample = ByteBuffer.allocate(12 + 48).order(ByteOrder.LITTLE_ENDIAN)
@@ -413,6 +414,11 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             val mode = rearVideoMode?.takeIf { useVideo && videoAllowed }
             runCatching {
                 if (mode != null) {
+                    // REALTIME sensor timestamps include host suspend time. Guest recorder audio uses monotonic time.
+                    videoClockOffset = if (characteristics?.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
+                        CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME) {
+                        SystemClock.elapsedRealtimeNanos() - System.nanoTime()
+                    } else 0L
                     var frameCount = 0
                     var firstTimestamp = 0L
                     val memory = videoMemory ?: TargetCameraVideoMemory().also { newMemory ->
@@ -510,7 +516,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
 
         private fun sendVideoSample(timestamp: Long, slot: Int, result: TotalCaptureResult?) {
             videoSample.clear()
-            videoSample.putLong(timestamp).putInt(slot)
+            videoSample.putLong(timestamp - videoClockOffset).putInt(slot)
             encodeControlResult(result)?.let { videoSample.put(it) }
             send(5, videoSample.array(), videoSample.position(),
                 w = TargetCameraVideoMode.WIDTH, h = TargetCameraVideoMode.HEIGHT)
