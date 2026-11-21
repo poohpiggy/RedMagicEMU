@@ -53,6 +53,8 @@ extern int clock_gettime(int clock, struct timespec64 *ts);
 #define VIDEO_QUEUE 4
 #define NUBIA_VIDEO_60_MODE 0x8004
 #define NUBIA_PRO_MODE 0x800a
+#define NUBIA_VIDEO_30_MODE 0x800c
+enum control_mode { CONTROLS_NONE, CONTROLS_PRO_PHOTO, CONTROLS_CAMERA, CONTROLS_VIDEO };
 #define MAX_ZOOM 4
 #define JPEG_MAX (1 << 20)
 #define JPEG_PIXEL_LIMIT (64 * 1024 * 1024)
@@ -149,7 +151,6 @@ struct camera3_ops {
 
 struct request { uint32_t frame; int nbuf; struct stream_buffer bufs[MAX_BUFS]; const void *handles[MAX_BUFS]; void *settings; };
 struct still_size { int32_t width, height; };
-struct video_frame { unsigned slot; uint64_t timestamp; };
 struct pro_caps {
     int64_t exposure[2], max_frame_duration;
     int32_t iso[2], ev[2], ev_step[2];
@@ -165,6 +166,7 @@ struct pro_result {
 };
 _Static_assert(sizeof(struct pro_caps) == 64, "camera capabilities wire size");
 _Static_assert(sizeof(struct pro_result) == 48, "camera result wire size");
+struct video_frame { unsigned slot; uint64_t timestamp; struct pro_result measured; };
 
 struct camera3 {
     struct hw_device common;
@@ -188,6 +190,7 @@ struct camera3 {
     int raw_pending;
     int raw_stream;
     int pro_mode;
+    int64_t control_exposure;
     char pro_command[192];
     struct pro_result next_result, frame_result, jpeg_result, result;
     int video_enabled, video_stream, pull_video;
@@ -815,14 +818,17 @@ static void *reader(void *arg) {
             d->frame_seq++;
             pthread_mutex_unlock(d->lock);
             if (!back) back = malloc(flen);     /* the first frame: there was no older one to take over */
-        } else if (hdr[0] == 5 && d->video_pixels && hdr[1] == VIDEO_W && hdr[2] == VIDEO_H && len == 12) {
+        } else if (hdr[0] == 5 && d->video_pixels && hdr[1] == VIDEO_W && hdr[2] == VIDEO_H &&
+                   (len == 12 || len == 12 + sizeof(struct pro_result))) {
             uint64_t timestamp;
             uint32_t slot;
+            struct pro_result measured = {0};
             if (read_full(d->fd, &timestamp, sizeof(timestamp)) < 0 || read_full(d->fd, &slot, sizeof(slot)) < 0) break;
+            if (len != 12 && read_full(d->fd, &measured, sizeof(measured)) < 0) break;
             if (slot >= VIDEO_QUEUE) continue;
             pthread_mutex_lock(d->lock);
             if (timestamp > d->video_timestamp && d->video_tail - d->video_head < VIDEO_QUEUE) {
-                d->video_frames[d->video_tail++ % VIDEO_QUEUE] = (struct video_frame){slot, timestamp};
+                d->video_frames[d->video_tail++ % VIDEO_QUEUE] = (struct video_frame){slot, timestamp, measured};
                 d->video_timestamp = timestamp;
             } else release_slot(d, slot);
             pthread_mutex_unlock(d->lock);
@@ -1025,11 +1031,20 @@ static int64_t send_pro_controls(struct camera3 *d) {
         }
     }
     char command[sizeof(d->pro_command)];
-    const char *name = d->pro_mode == 1 ? "controls" : "camera-controls";
-    int n = snprintf(command, sizeof(command), "%s %d %d %lld %d %g %d %g %g %g %g\n", name,
+    const int video = d->pro_mode == CONTROLS_VIDEO;
+    const char *name = video ? "video-controls" : (d->pro_mode == CONTROLS_PRO_PHOTO ? "controls" : "camera-controls");
+    const int af = video && !focus ? -1 : request_u8(s, CONTROL_AF_MODE, 4);
+    int n = snprintf(command, sizeof(command), "%s %d %d %lld %d %g %d %g %g %g %g", name,
         request_i32(s, CONTROL_AE_EXPOSURE_COMPENSATION), iso, (long long)time,
-        request_u8(s, CONTROL_AF_MODE, 4), focus ? *focus : 0.f, awb,
+        af, focus ? *focus : 0.f, awb,
         gains ? gains[0] : 0.f, gains ? gains[1] : 0.f, gains ? gains[2] : 0.f, gains ? gains[3] : 0.f);
+    if (n <= 0 || n >= (int)sizeof(command)) return 0;
+    if (video) {
+        const int tint = request_i32(s, vendor_tag("com.nubia.chi", "color_tint"));
+        n += snprintf(command + n, sizeof(command) - (size_t)n, " %d\n", tint);
+    } else {
+        n += snprintf(command + n, sizeof(command) - (size_t)n, "\n");
+    }
     if (n > 0 && n < (int)sizeof(command) && strcmp(d->pro_command, command)) {
         say(d, command);
         memcpy(d->pro_command, command, (size_t)n + 1);
@@ -1045,8 +1060,11 @@ static void answer(struct camera3 *d, struct request *r) {
         else if (r->bufs[i].stream->format == FORMAT_RAW_SENSOR) raw = 1;
         else preview = 1;
     }
-    if (r->settings) { if (d->last) md_free(d->last); d->last = r->settings; r->settings = 0; }
-    const int64_t exposure = d->pro_mode ? send_pro_controls(d) : 0;
+    const int changed = r->settings != NULL;
+    if (changed) { if (d->last) md_free(d->last); d->last = r->settings; r->settings = 0; }
+    if (d->pro_mode && (changed || !d->pro_command[0]))
+        d->control_exposure = send_pro_controls(d);
+    const int64_t exposure = d->control_exposure;
     struct crop crop = request_crop(d->last, &d->raw);
     struct ro_entry fps;
     const int fast = d->video_stream && d->last &&
@@ -1103,8 +1121,10 @@ static void answer(struct camera3 *d, struct request *r) {
     pthread_mutex_lock(d->lock);
     const struct video_frame *video_frame = fast && preview ? &d->video_frames[d->video_head % VIDEO_QUEUE] : 0;
     const struct raw_result raw_properties = d->raw_metadata;
-    d->result = raw ? d->raw_controls :
-        (d->pro_mode ? (blob ? d->jpeg_result : d->frame_result) : (struct pro_result){0});
+    d->result = raw ? d->raw_controls : (struct pro_result){0};
+    if (!raw && d->pro_mode) {
+        d->result = video_frame ? video_frame->measured : (blob ? d->jpeg_result : d->frame_result);
+    }
     uint64_t ts = video_frame ? video_frame->timestamp : now_ns();
     struct crop video_crop = { crop.left * VIDEO_W / W, crop.top * VIDEO_H / H,
                                crop.width * VIDEO_W / W, crop.height * VIDEO_H / H };
@@ -1238,10 +1258,15 @@ static int d_configure(struct camera3 *d, struct stream_config *c) {
         s->max_buffers = 4;
     }
     d->video_stream = d->video_enabled && video_stream;
-    const int pro_mode = c->mode == NUBIA_PRO_MODE ? 1 : (c->mode == 0 && !encoder_stream && !d->video_stream ? 2 : 0);
-    if (d->pro_mode && !pro_mode) {
-        say(d, "controls reset\n");
+    int pro_mode = CONTROLS_NONE;
+    if (c->mode == NUBIA_PRO_MODE) pro_mode = CONTROLS_PRO_PHOTO;
+    else if (d->id == 0 && encoder_stream && (c->mode == NUBIA_VIDEO_30_MODE || c->mode == NUBIA_VIDEO_60_MODE))
+        pro_mode = CONTROLS_VIDEO;
+    else if (c->mode == 0 && !encoder_stream && !d->video_stream) pro_mode = CONTROLS_CAMERA;
+    if (d->pro_mode != pro_mode) {
+        if (d->pro_mode) say(d, "controls reset\n");
         d->pro_command[0] = 0;
+        d->control_exposure = 0;
     }
     d->pro_mode = pro_mode;
     if (raw_stream != d->raw_stream) {
@@ -1258,10 +1283,10 @@ static const void *d_template(struct camera3 *d, int type) {
     if (!d->templates[type]) {
         struct ent entries[COUNT(TEMPLATE)];
         memcpy(entries, TEMPLATE, sizeof(entries));
-        if (d->raw.width) {
-            for (size_t i = 0; i < COUNT(entries); i++) {
-                if (entries[i].tag == SCALER_CROP_REGION) entries[i].data = d->raw.active;
-            }
+        static const uint8_t continuous_focus = 4; /* advertised CONTINUOUS_PICTURE */
+        for (size_t i = 0; i < COUNT(entries); i++) {
+            if (d->raw.width && entries[i].tag == SCALER_CROP_REGION) entries[i].data = d->raw.active;
+            if (d->id == 0 && type == 3 && entries[i].tag == CONTROL_AF_MODE) entries[i].data = &continuous_focus;
         }
         void *m = md_build(entries, COUNT(entries), 4);
         if (!m) return 0;

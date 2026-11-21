@@ -40,18 +40,28 @@ internal class TargetCameraControls(private val camera: CC) {
         if (mode in 0..30) mask or (1 shl mode) else mask
     }
 
-    fun apply(request: CR.Builder, controls: Request, autoExposure: CaptureResult?, autoWhiteBalance: CaptureResult?, tint: Int) {
-        if (manualSensor && (controls.iso > 0 || controls.exposure > 0)) {
+    fun apply(
+        request: CR.Builder,
+        controls: Request,
+        autoExposure: CaptureResult?,
+        autoWhiteBalance: CaptureResult?,
+        tint: Int,
+        videoFramePeriod: Long? = null,
+    ) {
+        if (manualSensor && (controls.iso > 0 || controls.exposure > 0) &&
+            (videoFramePeriod == null || videoFramePeriod >= checkNotNull(shutter).lower)) {
             val sensitivity = checkNotNull(iso)
             val exposure = checkNotNull(shutter)
+            val duration = minOf(videoFramePeriod ?: 33_333_333L, frameDuration)
+            val limit = if (videoFramePeriod == null) exposureLimit else minOf(exposureLimit, duration)
             val isoValue = (controls.iso.takeIf { it > 0 } ?: autoExposure?.get(CaptureResult.SENSOR_SENSITIVITY) ?: 100)
                 .coerceIn(sensitivity.lower, sensitivity.upper)
             val exposureValue = (controls.exposure.takeIf { it > 0 } ?: autoExposure?.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: 33_333_333L)
-                .coerceIn(exposure.lower, exposureLimit)
+                .coerceIn(exposure.lower, limit)
             request.set(CR.CONTROL_AE_MODE, CR.CONTROL_AE_MODE_OFF)
             request.set(CR.SENSOR_SENSITIVITY, isoValue)
             request.set(CR.SENSOR_EXPOSURE_TIME, exposureValue)
-            request.set(CR.SENSOR_FRAME_DURATION, maxOf(exposureValue, minOf(33_333_333L, frameDuration)))
+            request.set(CR.SENSOR_FRAME_DURATION, maxOf(exposureValue, duration))
         } else if (ev != null && evStep != null && evStep.numerator > 0 && evStep.denominator > 0) {
             request.set(CR.CONTROL_AE_EXPOSURE_COMPENSATION, controls.ev.coerceIn(ev.lower, ev.upper))
         }
@@ -60,7 +70,10 @@ internal class TargetCameraControls(private val camera: CC) {
             if (focus > 0f && controls.af == CR.CONTROL_AF_MODE_OFF)
                 request.set(CR.LENS_FOCUS_DISTANCE, controls.focus.coerceIn(0f, focus))
         }
-        val reference = controls.gains ?: autoWhiteBalance?.get(CaptureResult.COLOR_CORRECTION_GAINS)
+        val reference = controls.gains ?: autoWhiteBalance
+            ?.takeIf { videoFramePeriod == null || controls.awb <= CR.CONTROL_AWB_MODE_AUTO ||
+                it.get(CaptureResult.CONTROL_AWB_MODE) == controls.awb }
+            ?.get(CaptureResult.COLOR_CORRECTION_GAINS)
         val gains = if (reference != null && tint != 0) {
             // Positive tint adds magenta by reducing green relative to red and blue.
             val green = 2f.pow(-tint.coerceIn(-150, 150) / 300f)
@@ -77,10 +90,20 @@ internal class TargetCameraControls(private val camera: CC) {
     }
 
     data class Request(val ev: Int, val iso: Int, val exposure: Long, val af: Int, val focus: Float,
-                       val awb: Int, val gains: RggbChannelVector?) {
+                       val awb: Int, val gains: RggbChannelVector?, val tint: Int) {
+        /** Keep the host video template's automatic focus and white-balance modes. */
+        fun videoOverrides(): Request? {
+            val manualFocus = af == CR.CONTROL_AF_MODE_OFF
+            val presetWhiteBalance = awb > CR.CONTROL_AWB_MODE_AUTO
+            if (ev == 0 && iso <= 0 && exposure <= 0 && !manualFocus && !presetWhiteBalance &&
+                gains == null && tint == 0) return null
+            return copy(af = if (manualFocus) af else -1, awb = if (presetWhiteBalance) awb else -1)
+        }
+
         companion object {
             fun parse(fields: List<String>): Request? {
-                if (fields.size != 11) return null
+                val video = fields.firstOrNull() == "video-controls"
+                if (fields.size != (if (video) 12 else 11)) return null
                 val ev = fields[1].toIntOrNull() ?: return null
                 val iso = fields[2].toIntOrNull() ?: return null
                 val exposure = fields[3].toLongOrNull() ?: return null
@@ -88,7 +111,8 @@ internal class TargetCameraControls(private val camera: CC) {
                 val focus = fields[5].toFloatOrNull()?.takeIf { it.isFinite() } ?: return null
                 val awb = fields[6].toIntOrNull() ?: return null
                 val gains = fields.subList(7, 11).map { it.toFloatOrNull()?.takeIf { value -> value.isFinite() } ?: return null }
-                return Request(ev, iso, exposure, af, focus, awb, normalizedGains(gains))
+                val tint = if (video) fields[11].toIntOrNull() ?: return null else 0
+                return Request(ev, iso, exposure, af, focus, awb, normalizedGains(gains), tint)
             }
         }
     }

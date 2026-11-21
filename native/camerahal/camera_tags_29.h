@@ -298,4 +298,5 @@ static const struct { const char *section, *name; int type; } g_vtags[] = {
     { "org.quic.camera2.statsconfigs", "AECLuxIndex", 2 },
     { "org.codeaurora.qcamera3.manualWB", "partial_mwb_mode", 1 },
     { "org.codeaurora.qcamera3.manualWB", "gains", 2 },
+    { "com.nubia.chi", "color_tint", 1 },
 };

@@ -22,6 +22,7 @@ import android.os.HandlerThread
 import android.os.SystemClock
 import android.util.AtomicFile
 import android.util.Size
+import android.view.Surface
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.OutputStream
@@ -34,9 +35,10 @@ import java.nio.ByteOrder
  *     int32 type, width, height, length + data — type 1: RGBA_8888 then NV21 (preview), type 2: JPEG (picture),
  *     type 3: NV21 only (preview, after "nv21").
  * API 36: "video 1" selects the admitted 1080p60 recording session. Type 5 carries
- * an int64 sensor time in nanoseconds and an int32 RGBA/YV12 slot in memory shared by the
- * descriptor on type 6. "release <slot>" returns a slot. "video 0" restores photo preview.
- * "controls" updates the NX809J Pro session. Type 7 carries sensor metadata before its image.
+ * an int64 sensor time, an int32 RGBA/YV12 slot, and optional matching control results.
+ * Type 6 shares the frame memory. "release <slot>" returns a slot. "video 0" restores photo preview.
+ * "controls" updates the NX809J Pro photo session, and "video-controls" applies controls to stock video.
+ * Type 7 carries sensor metadata before its image.
  * "zoom <ratio×100>": digital zoom of every frame (preview, recording and picture).
  * "size <w> <h>": NV21 previews of that size (the 640×480 frame cropped to its shape in the centre and scaled);
  * type-3 frames then carry it in their header. Pictures stay 640×480.
@@ -64,6 +66,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         var samples: ByteArray? = null
         var header: ByteArray? = null
     }
+    private data class VideoSample(val timestamp: Long, val slot: Int)
     @Volatile private var stillTargets: List<StillTarget?> = emptyList()
     internal var rearVideoMode: TargetCameraVideoMode? = null
         private set
@@ -179,6 +182,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         private var rawShot: RawCapture? = null
         private var controls: TargetCameraControls.Request? = null
         private var professional = false
+        private var videoControls = false
         private var lastAutoExposure: TotalCaptureResult? = null
         private var lastAutoWhiteBalance: TotalCaptureResult? = null
         private var lastLoggedControls: Any? = null
@@ -186,26 +190,45 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         private var tintCheckedAt = 0L
         private var tintModified = -1L
         private val previewImages = ResultImages(::frame)
+        private val videoResults = LinkedHashMap<Long, TotalCaptureResult>()
+        private var pendingVideoSample: VideoSample? = null
         private val jpegImages = ResultImages(::stillDone)
         private val rawImages = ResultImages(::rawDone)
         private val controlResult = ByteBuffer.allocate(48).order(ByteOrder.LITTLE_ENDIAN)
-        private val previewCallback = object : CameraCaptureSession.CaptureCallback() {
+        private val previewCallback = CameraResults()
+
+        private inner class CameraResults(
+            private val configuredSession: CameraCaptureSession? = null,
+            private val requestTag: Any? = null,
+        ) : CameraCaptureSession.CaptureCallback() {
             override fun onCaptureCompleted(s: CameraCaptureSession, r: CR, result: TotalCaptureResult) {
-                if (s !== session) return
+                // High-speed sessions forward capture callbacks from an underlying session object.
+                if ((configuredSession ?: s) !== session) return
                 if (r.get(CR.CONTROL_AE_MODE) != CR.CONTROL_AE_MODE_OFF) lastAutoExposure = result
-                val firstAutoWb = lastAutoWhiteBalance == null && r.get(CR.CONTROL_AWB_MODE) != CR.CONTROL_AWB_MODE_OFF
-                if (r.get(CR.CONTROL_AWB_MODE) != CR.CONTROL_AWB_MODE_OFF) lastAutoWhiteBalance = result
-                if (controls != null) previewImages.result(result)
-                val requested = r.tag
-                if (professional && requested != null && requested != lastLoggedControls) {
+                val autoWhiteBalance = r.get(CR.CONTROL_AWB_MODE) != CR.CONTROL_AWB_MODE_OFF
+                val previousWbMode = lastAutoWhiteBalance?.get(CaptureResult.CONTROL_AWB_MODE)
+                val firstAutoWb = autoWhiteBalance && (lastAutoWhiteBalance == null ||
+                    videoControls && previousWbMode != result.get(CaptureResult.CONTROL_AWB_MODE))
+                if (autoWhiteBalance) lastAutoWhiteBalance = result
+                if (videoSurface != null) {
+                    result.get(CaptureResult.SENSOR_TIMESTAMP)?.takeIf { controls != null }?.let { timestamp ->
+                        videoResults[timestamp] = result
+                        if (videoResults.size > 8) videoResults.remove(videoResults.keys.first())
+                    }
+                } else if (controls != null) previewImages.result(result)
+                val requested = r.tag ?: requestTag
+                if ((professional || videoControls) && requested != null && requested != lastLoggedControls) {
                     lastLoggedControls = requested
-                    log("camera: Pro preview ISO ${result.get(CaptureResult.SENSOR_SENSITIVITY)}, " +
+                    val stream = if (videoControls) "video" else "preview"
+                    log("camera: Pro $stream ISO ${result.get(CaptureResult.SENSOR_SENSITIVITY)}, " +
                         "exposure ${result.get(CaptureResult.SENSOR_EXPOSURE_TIME)} ns, " +
                         "EV index ${result.get(CaptureResult.CONTROL_AE_EXPOSURE_COMPENSATION)}, " +
                         "focus ${result.get(CaptureResult.LENS_FOCUS_DISTANCE)}, " +
                         "WB ${result.get(CaptureResult.COLOR_CORRECTION_GAINS)}")
                 }
-                if (professional && (refreshTint() || firstAutoWb && tint != 0)) updatePreviewControls()
+                val tintNeedsReference = firstAutoWb && (if (videoControls) controls?.tint ?: 0 else tint) != 0
+                if (professional && refreshTint() || (professional || videoControls) && tintNeedsReference)
+                    updatePreviewControls()
             }
         }
         @Volatile private var session: CameraCaptureSession? = null
@@ -216,9 +239,10 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         private var videoAllowed = false
         private var wantVideo = false
         private var video: TargetCameraVideoFrames? = null
+        private var videoSurface: Surface? = null
         private var videoMemory: TargetCameraVideoMemory? = null
         private var sessionGeneration = 0
-        private val videoSample = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN)
+        private val videoSample = ByteBuffer.allocate(12 + 48).order(ByteOrder.LITTLE_ENDIAN)
         private val nv21 = ByteArray(W * H * 3 / 2)
         private val zbuf = ByteArray(W * H * 3 / 2)
         private var sized = ByteArray(0)
@@ -283,12 +307,15 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                             if ((video != null) != (videoAllowed && wantVideo) && !shot)
                                 device?.let { configure(it, useVideo = wantVideo) }
                         }
-                        "controls", "camera-controls" -> if (api == 36) handler.post {
-                            val updated = TargetCameraControls.Request.parse(p)
+                        "controls", "camera-controls", "video-controls" -> if (api == 36) handler.post {
+                            val forVideo = p[0] == "video-controls"
+                            val parsed = TargetCameraControls.Request.parse(p)
+                            val updated = if (forVideo) parsed?.videoOverrides() else parsed
                             val pro = p[0] == "controls" && updated != null
-                            if (updated != controls || pro != professional) {
+                            if (updated != controls || pro != professional || forVideo != videoControls) {
                                 if (pro && !professional) tintCheckedAt = 0
                                 professional = pro
+                                videoControls = forVideo
                                 controls = updated
                                 if (pro) refreshTint()
                                 updatePreviewControls()
@@ -359,6 +386,10 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
 
         private fun closeOutputs() {
             previewImages.clear()
+            pendingVideoSample?.let { videoMemory?.release(it.slot) }
+            pendingVideoSample = null
+            videoResults.clear()
+            lastLoggedControls = null
             jpegImages.clear()
             rawImages.clear()
             session?.close()
@@ -370,6 +401,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             still = null
             rawReader?.close()
             rawReader = null
+            videoSurface = null
             video?.close()
             video = null
         }
@@ -406,8 +438,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                         shouldRead = { streaming && !closed },
                         onFrame = { timestamp, slot ->
                             if (streaming && !closed) {
-                                videoSample.putLong(0, timestamp).putInt(8, slot)
-                                send(5, videoSample.array(), 12, w = TargetCameraVideoMode.WIDTH, h = TargetCameraVideoMode.HEIGHT)
+                                queueVideoSample(timestamp, slot)
                                 if (frameCount++ == 0) firstTimestamp = timestamp
                                 if (frameCount == 121) {
                                     val rate = 120_000_000_000L / (timestamp - firstTimestamp)
@@ -423,11 +454,10 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                     )
                     video = source
                     val surface = source.open(handler)
-                    val request = d.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                        addTarget(surface)
-                        set(CR.CONTROL_AE_TARGET_FPS_RANGE, mode.fps)
+                    videoSurface = surface
+                    val callback = captureSession(generation) { s ->
+                        repeatVideo(s, d, surface, mode)
                     }
-                    val callback = captureSession(generation, request, highSpeed = mode.constrained)
                     if (mode.constrained) d.createConstrainedHighSpeedCaptureSession(listOf(surface), callback, handler)
                     else d.createCaptureSession(listOf(surface), callback, handler)
                 } else {
@@ -461,10 +491,29 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                     raw?.setOnImageAvailableListener({ r ->
                         if (r === rawReader) r.acquireNextImage()?.let(rawImages::image)
                     }, handler)
-                    d.createCaptureSession(listOfNotNull(ir.surface, st?.surface, raw?.surface),
-                        captureSession(generation, request), handler)
+                    val callback = captureSession(generation) { s ->
+                        s.setRepeatingRequest((preview ?: request).build(), if (api == 36) previewCallback else null, handler)
+                    }
+                    d.createCaptureSession(listOfNotNull(ir.surface, st?.surface, raw?.surface), callback, handler)
                 }
             }.onFailure { log("camera: unable to configure host camera: ${it.message}"); closeOutputs() }
+        }
+
+        private fun queueVideoSample(timestamp: Long, slot: Int) {
+            // The host may deliver result metadata after the texture callback. Hold one sample at most.
+            pendingVideoSample?.let { sendVideoSample(it.timestamp, it.slot, videoResults.remove(it.timestamp)) }
+            pendingVideoSample = null
+            val result = videoResults.remove(timestamp)
+            if (result == null && controls != null) pendingVideoSample = VideoSample(timestamp, slot)
+            else sendVideoSample(timestamp, slot, result)
+        }
+
+        private fun sendVideoSample(timestamp: Long, slot: Int, result: TotalCaptureResult?) {
+            videoSample.clear()
+            videoSample.putLong(timestamp).putInt(slot)
+            encodeControlResult(result)?.let { videoSample.put(it) }
+            send(5, videoSample.array(), videoSample.position(),
+                w = TargetCameraVideoMode.WIDTH, h = TargetCameraVideoMode.HEIGHT)
         }
 
         private fun previewRequest(device: CameraDevice, reader: ImageReader): CR.Builder =
@@ -477,21 +526,50 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                 setProControls(this)
             }
 
-        private fun setProControls(request: CR.Builder) {
+        private fun setProControls(request: CR.Builder, videoFramePeriod: Long? = if (videoControls) 33_333_333L else null) {
             controls?.let {
-                val appliedTint = if (professional) tint else 0
-                stillTarget?.controls?.apply(request, it, lastAutoExposure, lastAutoWhiteBalance, appliedTint)
+                val appliedTint = if (videoControls) it.tint else if (professional) tint else 0
+                stillTarget?.controls?.apply(request, it, lastAutoExposure, lastAutoWhiteBalance, appliedTint, videoFramePeriod)
                 request.setTag(it to appliedTint)
+            }
+        }
+
+        private fun repeatVideo(s: CameraCaptureSession, d: CameraDevice, surface: Surface, mode: TargetCameraVideoMode) {
+            val builder = d.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                addTarget(surface)
+                set(CR.CONTROL_AE_TARGET_FPS_RANGE, mode.fps)
+            }
+            fun submit(request: CR) {
+                val results = CameraResults(s, request.tag)
+                if (mode.constrained) {
+                    val high = s as CameraConstrainedHighSpeedCaptureSession
+                    high.setRepeatingBurst(high.createHighSpeedRequestList(request), results, handler)
+                } else s.setRepeatingRequest(request, results, handler)
+            }
+            val automatic = if (controls != null) builder.build() else null
+            try {
+                setProControls(builder, 1_000_000_000L / mode.fps.upper)
+                submit(builder.build())
+            } catch (error: IllegalArgumentException) {
+                if (automatic == null) throw error
+                log("camera: host rejected manual video settings, restoring automatic controls: ${error.message}")
+                submit(automatic)
             }
         }
 
         private fun updatePreviewControls() {
             val d = device ?: return
-            val ir = reader ?: return
             runCatching {
-                val request = previewRequest(d, ir)
-                preview = request
-                session?.setRepeatingRequest(request.build(), previewCallback, handler)
+                val surface = videoSurface
+                val mode = rearVideoMode
+                if (surface != null && mode != null) {
+                    session?.let { repeatVideo(it, d, surface, mode) }
+                } else {
+                    val ir = reader ?: return
+                    val request = previewRequest(d, ir)
+                    preview = request
+                    session?.setRepeatingRequest(request.build(), previewCallback, handler)
+                }
             }.onFailure { log("camera: manual controls failed: ${it.message}") }
         }
 
@@ -550,18 +628,12 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             }
         }
 
-        private fun captureSession(generation: Int, request: CR.Builder, highSpeed: Boolean = false) =
+        private fun captureSession(generation: Int, start: (CameraCaptureSession) -> Unit) =
             object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(s: CameraCaptureSession) {
                     if (closed || generation != sessionGeneration) { s.close(); return }
                     session = s
-                    runCatching {
-                        val capture = (preview ?: request).build()
-                        if (highSpeed) {
-                            val high = s as CameraConstrainedHighSpeedCaptureSession
-                            high.setRepeatingBurst(high.createHighSpeedRequestList(capture), null, handler)
-                        } else s.setRepeatingRequest(capture, if (api == 36 && preview != null) previewCallback else null, handler)
-                    }.onFailure { log("camera: unable to start host capture: ${it.message}") }
+                    runCatching { start(s) }.onFailure { log("camera: unable to start host capture: ${it.message}") }
                 }
 
                 override fun onConfigureFailed(s: CameraCaptureSession) {

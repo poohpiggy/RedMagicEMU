@@ -195,7 +195,7 @@ static int zoom_case(int format, int zoomed) {
 static int video_frame_freshness(void) {
     struct camera3 camera = {
         .video_enabled = 1, .pull_video = 1, .fd = -1,
-        .video_frames = {{0, 9000000}},
+        .video_frames = {{.slot = 0, .timestamp = 9000000}},
     };
     if (has_new_frame(&camera, 0, 0, 1, 0)) return 1;
     camera.video_tail = 1;
