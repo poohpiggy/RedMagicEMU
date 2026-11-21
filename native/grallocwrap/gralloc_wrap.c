@@ -77,6 +77,7 @@ struct wrap_device {
 #define HAL_PIXEL_FORMAT_RGBA_8888 1
 #define HAL_PIXEL_FORMAT_YV12 0x32315659
 #define HAL_PIXEL_FORMAT_YCRCB_420_SP 0x11
+#define HAL_PIXEL_FORMAT_RAW16 0x20
 #define HAL_PIXEL_FORMAT_BLOB 0x21
 #define HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED 0x22
 #define HAL_PIXEL_FORMAT_YCBCR_420_888 0x23
@@ -216,6 +217,13 @@ static int w_lock_ycbcr(const struct gralloc_module *m, const void *hnd, int usa
 static int alloc_any(struct alloc_device *r, int w, int h, int format, int usage, const void **handle, int *stride) {
     int unused = 0;
     if (format == HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED) format = HAL_PIXEL_FORMAT_RGBA_8888;
+    if (format == HAL_PIXEL_FORMAT_RAW16) {
+        int64_t size = (int64_t)w * h * 2;
+        if (w <= 0 || h <= 0 || (w & 15) || (h & 1) || size > 64 * 1024 * 1024) return -22;
+        int e = r->alloc(r, (int)((size + 3 + EXTRA) / 4), 1, HAL_PIXEL_FORMAT_RGBA_8888, usage, handle, &unused);
+        if (e == 0) *stride = w;
+        return e;
+    }
     if (format == HAL_PIXEL_FORMAT_BLOB) {      /* w bytes */
         if (w <= 0 || h != 1) return -22;
         int e = r->alloc(r, (int)((w + 3 + EXTRA) / 4), 1, HAL_PIXEL_FORMAT_RGBA_8888, usage, handle, &unused);
@@ -261,7 +269,7 @@ static int d_alloc(struct alloc_device *d, int w, int h, int format, int usage, 
     usage &= ~0x1000;
     int known = (format >= 1 && format <= 5) || format == HAL_PIXEL_FORMAT_YV12 || format == HAL_PIXEL_FORMAT_BLOB ||
                 format == HAL_PIXEL_FORMAT_YCRCB_420_SP || format == HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED ||
-                format == HAL_PIXEL_FORMAT_YCBCR_420_888;
+                format == HAL_PIXEL_FORMAT_YCBCR_420_888 || format == HAL_PIXEL_FORMAT_RAW16;
     if (!known) return -22;
     int e = alloc_any(r, w, h, format, usage, handle, stride);
     struct meta_note *m = e ? 0 : meta_note_at(*handle);

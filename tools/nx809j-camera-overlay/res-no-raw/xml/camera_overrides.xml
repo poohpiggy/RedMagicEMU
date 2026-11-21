@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<overlay>
+    <item target="array/pref_raw_entry" value="@array/raw_off_only" />
+    <item target="array/pref_raw_entryvalues" value="@array/raw_off_only" />
+</overlay>

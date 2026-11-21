@@ -27,12 +27,12 @@ class TargetCameraVideoAssetsTest {
         """.trimIndent()
         val file = File(root, preferences).also { it.parentFile.mkdirs(); it.writeText(original) }
 
-        TargetCameraVideoAssets.apply(root, true) { it.byteInputStream() }
+        TargetCameraVideoAssets.apply(root, true, true) { it.byteInputStream() }
         assertEquals("engines/n64-36-camera-1080p60/vendor#overlay#rme-nx809j-camera.apk", File(root, overlay).readText())
         assertEquals("engines/n64-36-camera-1080p60/vendor#etc#media_profiles_V1_0.xml", File(root, profiles).readText())
         assertEquals(original, file.readText())
 
-        TargetCameraVideoAssets.apply(root, false) { it.byteInputStream() }
+        TargetCameraVideoAssets.apply(root, false, true) { it.byteInputStream() }
         assertEquals("engines/n64-36/vendor#overlay#rme-nx809j-camera.apk", File(root, overlay).readText())
         assertEquals("engines/n64-36/vendor#etc#media_profiles_V1_0.xml", File(root, profiles).readText())
         assertEquals("""
@@ -51,7 +51,7 @@ class TargetCameraVideoAssetsTest {
         val currentProfiles = File(root, profiles).apply { parentFile.mkdirs(); writeText("profiles") }
 
         assertThrows(FileNotFoundException::class.java) {
-            TargetCameraVideoAssets.apply(root, true) {
+            TargetCameraVideoAssets.apply(root, true, true) {
                 if (it.endsWith(".xml")) throw FileNotFoundException(it)
                 it.byteInputStream()
             }
@@ -59,5 +59,26 @@ class TargetCameraVideoAssetsTest {
 
         assertEquals("overlay", currentOverlay.readText())
         assertEquals("profiles", currentProfiles.readText())
+    }
+
+    @Test fun disablesUnsupportedStillRawIndependentlyOfTheVideoProfile() {
+        val root = directory.newFolder()
+        val rawOverlay = File(root, "vendor/overlay/rme-nx809j-camera-no-raw.apk")
+        val prefs = File(root, "data/data/com.android.camera/shared_prefs/com.android.camera_PRO_0.xml")
+        val original = """<map><string name="pref_raw_key">on</string><string name="pref_camera_pro_tint_key">4</string></map>"""
+        prefs.parentFile.mkdirs()
+        val backup = File(prefs.path + ".bak")
+        prefs.writeText(original)
+        backup.writeText(original)
+
+        TargetCameraVideoAssets.apply(root, rear1080p60 = true, rearRaw = false) { it.byteInputStream() }
+        assertEquals("engines/n64-36-camera-no-raw/vendor#overlay#rme-nx809j-camera-no-raw.apk", rawOverlay.readText())
+        assertEquals("engines/n64-36-camera-1080p60/vendor#etc#media_profiles_V1_0.xml", File(root, profiles).readText())
+        assertEquals(original.replace(">on<", ">off<"), prefs.readText())
+        assertEquals(prefs.readText(), backup.readText())
+
+        TargetCameraVideoAssets.apply(root, rear1080p60 = false, rearRaw = true) { it.byteInputStream() }
+        assertEquals(false, rawOverlay.exists())
+        assertEquals(original.replace(">on<", ">off<"), prefs.readText())
     }
 }

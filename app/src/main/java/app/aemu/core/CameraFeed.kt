@@ -55,7 +55,15 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
     private val served = api in CameraProfile.API_RANGE
     private val server = UnixServer(paths.socket("aemu_cam"), "camera") { c -> Session(c).run() }
     @Volatile var onPermissionNeeded: (() -> Unit)? = null
-    private data class StillTarget(val id: String, val size: Size, val sensor: Rect?, val controls: TargetCameraControls)
+    private data class StillTarget(
+        val id: String, val size: Size, val sensor: Rect?,
+        val controls: TargetCameraControls, val raw: TargetCameraRaw?,
+    )
+    private class RawCapture(val request: Int) {
+        var jpeg: ByteArray? = null
+        var samples: ByteArray? = null
+        var header: ByteArray? = null
+    }
     @Volatile private var stillTargets: List<StillTarget?> = emptyList()
     internal var rearVideoMode: TargetCameraVideoMode? = null
         private set
@@ -76,9 +84,14 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         rearVideoMode = null
     }
 
+    internal fun prepareStillProfiles(): Boolean {
+        publishStillSizes()
+        return stillTargets.firstOrNull()?.raw != null
+    }
+
     fun start(): Boolean {
         if (api == 36) {
-            publishStillSizes()
+            if (stillTargets.isEmpty()) prepareStillProfiles()
             File(paths.root, "dev/.aemu-camera-video").writeText(if (rearVideoMode != null) "1" else "0")
         }
         return server.start(log)
@@ -106,7 +119,12 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                 ).filterNotNull().flatMap { it.asSequence() }
                     .filter { it.width > 0 && it.height > 0 && it.width.toLong() * it.height <= 64 * 1024 * 1024 }
                     .maxByOrNull { it.width.toLong() * it.height } ?: return@runCatching null
-                StillTarget(id, jpeg, camera.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE), TargetCameraControls(camera))
+                val raw = if (!front && camera.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK)
+                    runCatching { TargetCameraRaw.forCamera(camera) }
+                        .onFailure { log("camera: unable to inspect rear RAW capability: ${it.message}") }
+                        .getOrNull()
+                else null
+                StillTarget(id, jpeg, camera.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE), TargetCameraControls(camera), raw)
             }.onFailure { log("camera: unable to inspect ${if (front) "front" else "back"} JPEG sizes: ${it.message}") }.getOrNull()
         }
         val sizes = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
@@ -118,6 +136,8 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         }
         publishCameraFile("dev/.aemu-camera-jpeg", sizes.array())
         publishCameraFile("dev/.aemu-camera-controls", controls.array())
+        publishCameraFile("dev/.aemu-camera-raw", targets.firstOrNull()?.raw?.profile ?: ByteArray(TargetCameraRaw.PROFILE_BYTES))
+        targets.firstOrNull()?.raw?.let { log("camera: rear RAW sensor stream ${it.size}") }
         stillTargets = targets
     }
 
@@ -154,6 +174,9 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         @Volatile private var guestParams: Map<String, String> = emptyMap()
         @Volatile private var still: ImageReader? = null
         private var stillTarget: StillTarget? = null
+        private var rawReader: ImageReader? = null
+        private var wantRaw = false
+        private var rawShot: RawCapture? = null
         private var controls: TargetCameraControls.Request? = null
         private var professional = false
         private var lastAutoExposure: TotalCaptureResult? = null
@@ -164,6 +187,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         private var tintModified = -1L
         private val previewImages = ResultImages(::frame)
         private val jpegImages = ResultImages(::stillDone)
+        private val rawImages = ResultImages(::rawDone)
         private val controlResult = ByteBuffer.allocate(48).order(ByteOrder.LITTLE_ENDIAN)
         private val previewCallback = object : CameraCaptureSession.CaptureCallback() {
             override fun onCaptureCompleted(s: CameraCaptureSession, r: CR, result: TotalCaptureResult) {
@@ -224,11 +248,34 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                         }
                         "start" -> streaming = true
                         "stop" -> streaming = false
-                        "shot" -> {
+                        "shot", "shotraw" -> {
                             handler.post {
-                                shotCrop = if (api == 36) parseShotCrop(p) else null
+                                val raw = p[0] == "shotraw"
+                                rawShot = if (raw) {
+                                    val request = p.getOrNull(1)?.toUIntOrNull() ?: return@post
+                                    RawCapture(request.toInt()).also { capture ->
+                                        handler.postDelayed({
+                                            if (rawShot === capture) {
+                                                rawShot = null
+                                                shot = false
+                                            }
+                                        }, 5_000)
+                                    }
+                                } else null
+                                shotCrop = if (api == 36) parseShotCrop(if (raw) p.drop(1) else p) else null
                                 shot = true
                                 if (video != null) device?.let { configure(it, useVideo = false) }
+                            }
+                        }
+                        "raw" -> if (api == 36) handler.post {
+                            val requested = p.getOrNull(1) == "1"
+                            if (wantRaw != requested) {
+                                wantRaw = requested
+                                if (!requested && rawShot != null) {
+                                    rawShot = null
+                                    shot = false
+                                }
+                                if (!wantVideo) device?.let { configure(it, useVideo = false) }
                             }
                         }
                         "video" -> if (api == 36) handler.post {
@@ -313,6 +360,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         private fun closeOutputs() {
             previewImages.clear()
             jpegImages.clear()
+            rawImages.clear()
             session?.close()
             session = null
             preview = null
@@ -320,6 +368,8 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             reader = null
             still?.close()
             still = null
+            rawReader?.close()
+            rawReader = null
             video?.close()
             video = null
         }
@@ -400,11 +450,19 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                     still = st
                     st?.setOnImageAvailableListener({ r ->
                         if (r === still) r.acquireLatestImage()?.let { image ->
-                            if (controls == null) image.use { stillDone(it, null) }
+                            if (controls == null && rawShot == null) image.use { stillDone(it, null) }
                             else jpegImages.image(image)
                         }
                     }, handler)
-                    d.createCaptureSession(listOfNotNull(ir.surface, st?.surface), captureSession(generation, request), handler)
+                    val raw = stillTarget?.raw?.takeIf { wantRaw }?.let {
+                        ImageReader.newInstance(it.size.width, it.size.height, ImageFormat.RAW_SENSOR, 2)
+                    }
+                    rawReader = raw
+                    raw?.setOnImageAvailableListener({ r ->
+                        if (r === rawReader) r.acquireNextImage()?.let(rawImages::image)
+                    }, handler)
+                    d.createCaptureSession(listOfNotNull(ir.surface, st?.surface, raw?.surface),
+                        captureSession(generation, request), handler)
                 }
             }.onFailure { log("camera: unable to configure host camera: ${it.message}"); closeOutputs() }
         }
@@ -466,7 +524,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                 if (result != null) image.use { deliver(it, result) }
                 else {
                     pending = image
-                    handler.postDelayed({ if (pending === image) finish(null) }, 100)
+                    handler.postDelayed({ if (pending === image) finish(null) }, if (rawShot != null) 750 else 100)
                 }
             }
 
@@ -508,7 +566,15 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
 
                 override fun onConfigureFailed(s: CameraCaptureSession) {
                     s.close()
-                    if (generation == sessionGeneration) log("camera: host camera rejected capture session")
+                    if (closed || generation != sessionGeneration) return
+                    log("camera: host camera rejected capture session")
+                    if (rawReader != null) {
+                        wantRaw = false
+                        rawShot = null
+                        shot = false
+                        log("camera: restoring JPEG preview after host rejected RAW combination")
+                        device?.let { configure(it, useVideo = false) }
+                    }
                 }
             }
 
@@ -521,8 +587,13 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         }
 
         private fun sendControlResult(result: TotalCaptureResult?) {
-            val exposure = result?.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: return
-            val sensitivity = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: return
+            val data = encodeControlResult(result) ?: return
+            send(7, data, data.size, w = 0, h = 0)
+        }
+
+        private fun encodeControlResult(result: TotalCaptureResult?): ByteArray? {
+            val exposure = result?.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: return null
+            val sensitivity = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: return null
             controlResult.clear()
             controlResult.putLong(exposure)
             controlResult.putLong(result.get(CaptureResult.SENSOR_FRAME_DURATION) ?: exposure)
@@ -536,7 +607,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             val gains = result.get(CaptureResult.COLOR_CORRECTION_GAINS)
             controlResult.putFloat(gains?.red ?: 0f).putFloat(gains?.greenEven ?: 0f)
             controlResult.putFloat(gains?.greenOdd ?: 0f).putFloat(gains?.blue ?: 0f)
-            send(7, controlResult.array(), controlResult.capacity(), w = 0, h = 0)
+            return controlResult.array()
         }
 
         /** the test picture instead of the camera (a file "camera.test" in the image's run directory): see TestScene */
@@ -569,6 +640,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                     if (takeStill()) return
                     shot = true
                 }
+                if (shot && rawShot != null) return
                 if (shot) {
                     val crop = shotCrop
                     shot = false
@@ -673,10 +745,14 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         /** the picture through the phone's JPEG stream; false: none (the preview frame is used instead) */
         private fun takeStill(): Boolean {
             val d = device ?: return false; val s = session ?: return false; val st = still ?: return false
+            val rawCapture = rawShot
+            val raw = if (rawCapture != null) rawReader ?: return false else null
             return runCatching {
                 val r = d.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply { addTarget(st.surface) }
+                if (raw != null) r.addTarget(raw.surface)
                 if (served) applyTo(r)
                 setProControls(r)
+                if (rawCapture != null) r.setTag(rawCapture)
                 val p = guestParams
                 r.set(CR.JPEG_QUALITY, (p["jpeg-quality"]?.toIntOrNull() ?: 90).coerceIn(1, 100).toByte())
                 // the guest's "rotation" (Parameters.setRotation): the turn its camera application wants in the file
@@ -695,13 +771,15 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                     ))
                 }
                 jpegImages.clear()
-                val callback = if (controls != null) object : CameraCaptureSession.CaptureCallback() {
+                if (raw != null) rawImages.clear()
+                val callback = if (controls != null || raw != null) object : CameraCaptureSession.CaptureCallback() {
                     override fun onCaptureCompleted(s: CameraCaptureSession, request: CR, result: TotalCaptureResult) {
                         if (s !== session) return
                         if (professional) log("camera: Pro JPEG ISO ${result.get(CaptureResult.SENSOR_SENSITIVITY)}, " +
                             "exposure ${result.get(CaptureResult.SENSOR_EXPOSURE_TIME)} ns, " +
                             "focus ${result.get(CaptureResult.LENS_FOCUS_DISTANCE)}")
                         jpegImages.result(result)
+                        if (raw != null) rawImages.result(result)
                     }
                 } else null
                 s.capture(r.build(), callback, handler)
@@ -710,6 +788,14 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         }
 
         private fun stillDone(img: Image, result: TotalCaptureResult?) {
+            val rawCapture = result?.request?.tag as? RawCapture
+            if (rawShot != null || rawCapture != null) {
+                if (rawCapture == null || rawCapture !== rawShot) return
+                val buffer = img.planes.single().buffer
+                rawCapture.jpeg = ByteArray(buffer.remaining()).also { buffer.get(it) }
+                sendRawCapture(rawCapture)
+                return
+            }
             val b = img.planes[0].buffer
             val a = ByteArray(b.remaining()); b.get(a)
             streaming = false   // a picture stops the preview until the guest starts it again
@@ -719,6 +805,33 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             } else send(2, a, a.size)
             log("camera: picture ${img.width}x${img.height}, ${a.size / 1024} KB")
             if (wantVideo) device?.let { configure(it, useVideo = true) }
+        }
+
+        private fun rawDone(image: Image, result: TotalCaptureResult?) {
+            val target = stillTarget?.raw ?: return
+            val capture = result?.request?.tag as? RawCapture ?: return
+            if (capture !== rawShot) return
+            runCatching {
+                val metadata = TargetCameraRaw.result(result)
+                val measured = encodeControlResult(result)
+                check(metadata != null && measured != null) { "RAW sensor result lacks DNG metadata" }
+                capture.samples = target.samples(image)
+                capture.header = ByteBuffer.allocate(4 + metadata.size + measured.size)
+                    .order(ByteOrder.LITTLE_ENDIAN).putInt(capture.request).put(metadata).put(measured).array()
+                sendRawCapture(capture)
+            }.onFailure { log("camera: host RAW capture failed: ${it.message}") }
+        }
+
+        private fun sendRawCapture(capture: RawCapture) {
+            val target = stillTarget?.raw ?: return
+            val header = capture.header ?: return
+            val samples = capture.samples ?: return
+            val jpeg = capture.jpeg ?: return
+            rawShot = null
+            runCatching {
+                send(8, header, header.size, samples, target.size.width, target.size.height, jpeg)
+                log("camera: RAW ${target.size} paired with ${jpeg.size / 1024} KB JPEG")
+            }.onFailure { log("camera: unable to send RAW capture: ${it.message}") }
         }
 
         /** the frame flipped left-right (a "mirror" camera of the profile) */
@@ -731,10 +844,18 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             }
         }
 
-        private fun send(type: Int, a: ByteArray, n: Int, b: ByteArray? = null, w: Int = W, h: Int = H) {
+        private fun send(
+            type: Int, a: ByteArray, n: Int, b: ByteArray? = null, w: Int = W, h: Int = H, jpeg: ByteArray? = null,
+        ) {
             val hd = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
-            hd.putInt(type).putInt(w).putInt(h).putInt(n + (b?.size ?: 0))
-            synchronized(out) { out.write(hd.array()); if (n > 0) out.write(a, 0, n); if (b != null) out.write(b); out.flush() }
+            hd.putInt(type).putInt(w).putInt(h).putInt(n + (b?.size ?: 0) + (jpeg?.size ?: 0))
+            synchronized(out) {
+                out.write(hd.array())
+                if (n > 0) out.write(a, 0, n)
+                if (b != null) out.write(b)
+                if (jpeg != null) out.write(jpeg)
+                out.flush()
+            }
         }
 
         /** the frame cropped in the centre to the shape of w×h and scaled to it (nearest pixel) */

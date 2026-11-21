@@ -1,20 +1,23 @@
 param(
     [Parameter(Mandatory)] [string] $Sdk,
     [Parameter(Mandatory)] [string] $KeyStore,
-    [switch] $Rear1080p60
+    [switch] $Rear1080p60,
+    [switch] $DisableRaw
 )
 
 $ErrorActionPreference = "Stop"
 $buildTools = Join-Path $Sdk "build-tools/36.0.0"
 $androidJar = Join-Path $Sdk "platforms/android-36/android.jar"
 $engines = Join-Path $PSScriptRoot "../../app/src/main/assets/engines"
-$layer = if ($Rear1080p60) { "n64-36-camera-1080p60" } else { "n64-36" }
-$asset = Join-Path $engines "$layer/vendor#overlay#rme-nx809j-camera.apk"
+if ($DisableRaw -and $Rear1080p60) { throw "Build the video and RAW overlays separately" }
+$layer = if ($DisableRaw) { "n64-36-camera-no-raw" } elseif ($Rear1080p60) { "n64-36-camera-1080p60" } else { "n64-36" }
+$variant = if ($DisableRaw) { "-no-raw" } else { "" }
+$asset = Join-Path $engines "$layer/vendor#overlay#rme-nx809j-camera$variant.apk"
 $temp = Join-Path ([System.IO.Path]::GetTempPath()) ("rme-camera-overlay-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $temp | Out-Null
 
 try {
-    & "$buildTools/aapt2.exe" compile --dir "$PSScriptRoot/res" -o "$temp/resources.zip"
+    & "$buildTools/aapt2.exe" compile --dir "$PSScriptRoot/res$variant" -o "$temp/resources.zip"
     if ($LASTEXITCODE -ne 0) { throw "Failed to compile camera overlay resources" }
     $resources = @("$temp/resources.zip")
     if ($Rear1080p60) {
@@ -22,7 +25,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "Failed to compile the 1080p60 camera resources" }
         $resources += @("-R", "$temp/rear1080p60.zip")
     }
-    & "$buildTools/aapt2.exe" link -o "$temp/base.apk" --manifest "$PSScriptRoot/AndroidManifest.xml" -I $androidJar @resources
+    & "$buildTools/aapt2.exe" link -o "$temp/base.apk" --manifest "$PSScriptRoot/AndroidManifest$variant.xml" -I $androidJar @resources
     if ($LASTEXITCODE -ne 0) { throw "Failed to link camera overlay" }
     & "$buildTools/zipalign.exe" -f 4 "$temp/base.apk" "$temp/aligned.apk"
     if ($LASTEXITCODE -ne 0) { throw "Failed to align camera overlay" }
@@ -66,6 +69,7 @@ try {
         New-Item -ItemType Directory -Path (Join-Path $engines $layer) -Force | Out-Null
         [IO.File]::WriteAllText((Join-Path $engines "$layer/$profileName"), $profiles, [Text.UTF8Encoding]::new($false))
     }
+    if ($DisableRaw) { New-Item -ItemType Directory -Path (Join-Path $engines $layer) -Force | Out-Null }
     Copy-Item -LiteralPath "$temp/signed.apk" -Destination $asset
 } finally {
     Get-ChildItem -LiteralPath $temp -File | Remove-Item

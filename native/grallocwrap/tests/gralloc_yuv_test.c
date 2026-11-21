@@ -102,6 +102,27 @@ static void allocation_roundtrip(int format, int expected_pad) {
     backing = NULL;
 }
 
+static void raw16_allocation(void) {
+    struct alloc_device original = {0};
+    struct wrap_device wrapper = {0};
+    const void *handle = NULL;
+    int stride = 0;
+    original.alloc = mock_alloc;
+    wrapper.real = &original;
+    int result = d_alloc(&wrapper.dev, 640, 360, 0x20, 0x33, &handle, &stride);
+    check(result == 0 && handle && stride == 640, "allocate RAW16 with a packed pixel stride");
+    if (result || !handle) return;
+    const struct aosp_handle *h = handle;
+    struct meta_note *note = meta_note_at(handle);
+    check(h->size >= 640 * 360 * 2 + (int)META_ROOM, "reserve metadata after RAW16 samples");
+    check(note && note->magic == META_NOTE && note->format == 0x20 &&
+          note->w == 640 && note->h == 360 && note->stride == 640, "publish RAW16 mapper metadata");
+    munmap((void *)(uintptr_t)h->base, (size_t)h->size);
+    free((void *)h);
+    fclose(backing);
+    backing = NULL;
+}
+
 /* A reused YV12 buffer must invalidate the host copy on each successful CPU write. */
 static void yv12_write_generation(void) {
     struct alloc_device original = {0};
@@ -181,6 +202,7 @@ int main(void) {
     init();
     allocation_roundtrip(HAL_PIXEL_FORMAT_YV12, 640);
     allocation_roundtrip(HAL_PIXEL_FORMAT_YCBCR_420_888, 0);
+    raw16_allocation();
     yv12_write_generation();
 
     FILE *testfile = tmpfile();

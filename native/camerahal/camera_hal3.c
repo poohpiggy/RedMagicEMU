@@ -25,6 +25,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include "camera_tags_aosp.h"
+#include "camera_raw.h"
 
 extern long read(int fd, void *buf, unsigned long n);
 extern long write(int fd, const void *buf, unsigned long n);
@@ -179,6 +180,13 @@ struct camera3 {
     volatile unsigned frame_seq;
     unsigned char *jpeg; volatile unsigned jpeg_len, jpeg_seq;
     struct still_size still_size;
+    struct raw_profile raw;
+    struct raw_result raw_metadata;
+    struct pro_result raw_controls;
+    unsigned char *raw_frame;
+    uint32_t raw_request;
+    int raw_pending;
+    int raw_stream;
     int pro_mode;
     char pro_command[192];
     struct pro_result next_result, frame_result, jpeg_result, result;
@@ -435,7 +443,31 @@ static unsigned pro_modes(uint8_t *modes, unsigned limit, uint32_t mask) {
     return n;
 }
 
-static void *build_static_info(int id, struct still_size still, int video) {
+static struct raw_profile raw_profile_for(int id) {
+    struct raw_profile profile = {0};
+    if (id != 0) return profile;
+    FILE *file = fopen("/dev/.aemu-camera-raw", "rb");
+    if (!file) return profile;
+    const size_t count = fread(&profile, sizeof(profile), 1, file);
+    fclose(file);
+    return count == 1 && raw_profile_valid(&profile) ? profile : (struct raw_profile){0};
+}
+
+static const uint32_t raw_matrix_tags[] = {
+    SENSOR_COLOR_TRANSFORM1, SENSOR_CALIBRATION_TRANSFORM1, SENSOR_FORWARD_MATRIX1,
+    SENSOR_COLOR_TRANSFORM2, SENSOR_CALIBRATION_TRANSFORM2, SENSOR_FORWARD_MATRIX2,
+};
+static const int32_t raw_static_keys[] = {
+    SENSOR_BLACK_LEVEL_PATTERN, SENSOR_INFO_WHITE_LEVEL, SENSOR_INFO_COLOR_FILTER_ARRANGEMENT,
+    SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE, SENSOR_REFERENCE_ILLUMINANT1,
+    SENSOR_COLOR_TRANSFORM1, SENSOR_CALIBRATION_TRANSFORM1, SENSOR_FORWARD_MATRIX1,
+    SENSOR_REFERENCE_ILLUMINANT2, SENSOR_COLOR_TRANSFORM2, SENSOR_CALIBRATION_TRANSFORM2, SENSOR_FORWARD_MATRIX2,
+};
+static const int32_t raw_result_keys[] = {
+    SENSOR_NEUTRAL_COLOR_POINT, SENSOR_DYNAMIC_BLACK_LEVEL, SENSOR_DYNAMIC_WHITE_LEVEL,
+};
+
+static void *build_static_info_with_raw(int id, struct still_size still, int video, const struct raw_profile *raw) {
     struct ent entries[COUNT(STATIC)];
     const struct pro_caps pro = pro_caps_for(id);
     const int manual_sensor = (pro.flags & 1u) && pro.iso[0] > 0 && pro.iso[1] >= pro.iso[0] &&
@@ -445,23 +477,36 @@ static void *build_static_info(int id, struct still_size still, int video) {
     unsigned awb_count = pro_modes(awb_modes, COUNT(awb_modes), pro.awb_modes & ((pro.flags & 2u) ? ~0u : ~1u));
     const uint8_t ae_modes[] = {0, 1};
     const uint8_t approximate_focus = 1;
+    const uint8_t raw_caps[] = {0, 3}; /* BACKWARD_COMPATIBLE, RAW */
+    const int32_t raw_limits[] = {1, 3, 1};
+    int32_t characteristics_keys[100 + COUNT(raw_static_keys)], result_keys[64 + COUNT(raw_result_keys)];
     const int32_t jpeg_max = jpeg_capacity(still);
     const int32_t fps_ranges[] = {15, 30, 30, 30, 50, 60, 60, 60};
-    const int32_t formats[] = {
+    int32_t formats[36] = {
         SIZES(FORMAT_IMPLEMENTATION_DEFINED), SIZES(FORMAT_YCBCR_420_888),
         FORMAT_BLOB, still.width, still.height, 0,
         FORMAT_IMPLEMENTATION_DEFINED, VIDEO_W, VIDEO_H, 0,
     };
-    const int64_t durations[] = {
+    int64_t durations[36] = {
         DURATIONS(FORMAT_IMPLEMENTATION_DEFINED, 33333333), DURATIONS(FORMAT_YCBCR_420_888, 33333333),
         FORMAT_BLOB, still.width, still.height, 33333333,
         FORMAT_IMPLEMENTATION_DEFINED, VIDEO_W, VIDEO_H, 16666666,
     };
-    const int64_t stalls[] = {
+    int64_t stalls[36] = {
         DURATIONS(FORMAT_IMPLEMENTATION_DEFINED, 0), DURATIONS(FORMAT_YCBCR_420_888, 0),
         FORMAT_BLOB, still.width, still.height, 100000000,
         FORMAT_IMPLEMENTATION_DEFINED, VIDEO_W, VIDEO_H, 0,
     };
+    unsigned stream_count = video ? 32 : 28;
+    if (raw) {
+        const int32_t stream[] = {FORMAT_RAW_SENSOR, raw->width, raw->height, 0};
+        const int64_t duration[] = {FORMAT_RAW_SENSOR, raw->width, raw->height, raw->min_duration};
+        const int64_t stall[] = {FORMAT_RAW_SENSOR, raw->width, raw->height, raw->stall_duration};
+        memcpy(formats + stream_count, stream, sizeof(stream));
+        memcpy(durations + stream_count, duration, sizeof(duration));
+        memcpy(stalls + stream_count, stall, sizeof(stall));
+        stream_count += 4;
+    }
     for (size_t i = 0; i < COUNT(STATIC); i++) {
         entries[i] = STATIC[i];
         switch (entries[i].tag) {
@@ -496,24 +541,64 @@ static void *build_static_info(int id, struct still_size still, int video) {
         case SENSOR_INFO_MAX_FRAME_DURATION:
             if (manual_sensor) entries[i].data = &pro.max_frame_duration;
             break;
+        case REQUEST_AVAILABLE_CAPABILITIES:
+            if (raw) { entries[i].data = raw_caps; entries[i].count = COUNT(raw_caps); }
+            break;
+        case REQUEST_MAX_NUM_OUTPUT_STREAMS:
+            if (raw) entries[i].data = raw_limits;
+            break;
+        case SENSOR_INFO_ACTIVE_ARRAY_SIZE:
+            if (raw) entries[i].data = raw->active;
+            break;
+        case SENSOR_INFO_PIXEL_ARRAY_SIZE:
+            if (raw) entries[i].data = raw->pixels;
+            break;
+        case SENSOR_MAX_ANALOG_SENSITIVITY:
+            if (raw) entries[i].data = &raw->analog_iso;
+            break;
+        case LENS_INFO_AVAILABLE_APERTURES:
+            if (raw) entries[i].data = &raw->aperture;
+            break;
+        case LENS_INFO_AVAILABLE_FOCAL_LENGTHS:
+            if (raw) entries[i].data = &raw->focal;
+            break;
+        case REQUEST_AVAILABLE_CHARACTERISTICS_KEYS:
+            if (raw && entries[i].count + COUNT(raw_static_keys) <= COUNT(characteristics_keys)) {
+                const size_t base = entries[i].count;
+                const size_t extra = COUNT(raw_static_keys) - (raw->illuminant2 ? 0 : 4);
+                memcpy(characteristics_keys, entries[i].data, base * sizeof(*characteristics_keys));
+                memcpy(characteristics_keys + base, raw_static_keys, extra * sizeof(*characteristics_keys));
+                entries[i].data = characteristics_keys;
+                entries[i].count = base + extra;
+            }
+            break;
+        case REQUEST_AVAILABLE_RESULT_KEYS:
+            if (raw && entries[i].count + COUNT(raw_result_keys) <= COUNT(result_keys)) {
+                const size_t base = entries[i].count;
+                memcpy(result_keys, entries[i].data, base * sizeof(*result_keys));
+                memcpy(result_keys + base, raw_result_keys, sizeof(raw_result_keys));
+                entries[i].data = result_keys;
+                entries[i].count = base + COUNT(raw_result_keys);
+            }
+            break;
         case CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES:
             if (video) { entries[i].data = fps_ranges; entries[i].count = COUNT(fps_ranges); }
             break;
         case SCALER_AVAILABLE_STREAM_CONFIGURATIONS:
             entries[i].data = formats;
-            if (video) entries[i].count = COUNT(formats);
+            entries[i].count = stream_count;
             break;
         case SCALER_AVAILABLE_MIN_FRAME_DURATIONS:
             entries[i].data = durations;
-            if (video) entries[i].count = COUNT(durations);
+            entries[i].count = stream_count;
             break;
         case SCALER_AVAILABLE_STALL_DURATIONS:
             entries[i].data = stalls;
-            if (video) entries[i].count = COUNT(stalls);
+            entries[i].count = stream_count;
             break;
         }
     }
-    void *m = md_build(entries, COUNT(entries), 4);
+    void *m = md_build(entries, COUNT(entries), raw ? 48 : 4);
     if (!m) return 0;
     uint8_t facing = id ? 0 : 1;            /* LENS_FACING: 0 front, 1 back */
     int32_t orientation = id ? 270 : 90;    /* the phone's sensors are mounted sideways, frames come unrotated */
@@ -523,7 +608,23 @@ static void *build_static_info(int id, struct still_size still, int video) {
     int32_t role = id;
     uint32_t tag = vendor_tag("com.xiaomi.cameraid.role", "cameraId");
     if (tag) md_add(m, tag, &role, 1);
+    if (raw) {
+        const uint8_t cfa = raw->cfa, first = raw->illuminant1, second = raw->illuminant2;
+        md_add(m, SENSOR_INFO_COLOR_FILTER_ARRANGEMENT, &cfa, 1);
+        md_add(m, SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE, raw->precorrection, 4);
+        md_add(m, SENSOR_INFO_WHITE_LEVEL, &raw->white, 1);
+        md_add(m, SENSOR_BLACK_LEVEL_PATTERN, raw->black, 4);
+        md_add(m, SENSOR_REFERENCE_ILLUMINANT1, &first, 1);
+        if (second) md_add(m, SENSOR_REFERENCE_ILLUMINANT2, &second, 1);
+        for (unsigned i = 0; i < (second ? 6u : 3u); i++)
+            md_add(m, raw_matrix_tags[i], raw->matrices[i], 9);
+    }
     return m;
+}
+
+static void *build_static_info(int id, struct still_size still, int video) {
+    const struct raw_profile raw = raw_profile_for(id);
+    return build_static_info_with_raw(id, still, video, raw.width ? &raw : NULL);
 }
 
 static void *g_static[2];
@@ -578,7 +679,7 @@ static uint64_t now_ns(void) {
 
 struct crop { int left, top, width, height; };
 
-static struct crop request_crop(const void *settings) {
+static struct crop request_crop(const void *settings, const struct raw_profile *raw) {
     struct ro_entry entry;
     if (!settings || md_find(settings, SCALER_CROP_REGION, &entry) != 0 || entry.count != 4)
         return (struct crop){0, 0, W, H};
@@ -586,6 +687,12 @@ static struct crop request_crop(const void *settings) {
     /* CameraService maps CONTROL_ZOOM_RATIO to the center-only crop region. */
     const int32_t *crop = entry.data;
     int width = crop[2], height = crop[3];
+    if (raw->width) {
+        if (width > raw->active[2]) width = raw->active[2];
+        if (height > raw->active[3]) height = raw->active[3];
+        width = (int)((int64_t)width * W / raw->active[2]);
+        height = (int)((int64_t)height * H / raw->active[3]);
+    }
     if (width <= 0 || height <= 0) return (struct crop){0, 0, W, H};
     if (width < W / MAX_ZOOM) width = W / MAX_ZOOM;
     if (height < H / MAX_ZOOM) height = H / MAX_ZOOM;
@@ -730,6 +837,44 @@ static void *reader(void *arg) {
             d->next_result = (struct pro_result){0};
             d->jpeg_seq++;
             pthread_mutex_unlock(d->lock);
+        } else if (hdr[0] == 8 && d->raw.width && hdr[1] == d->raw.width && hdr[2] == d->raw.height) {
+            uint32_t request;
+            struct raw_result raw;
+            struct pro_result controls;
+            const size_t pixels = (size_t)d->raw.width * d->raw.height * 2;
+            const size_t fields = sizeof(request) + sizeof(raw) + sizeof(controls) + pixels;
+            if (len <= fields || len - fields > (size_t)jpeg_capacity(d->still_size) - 8) {
+                if (skip(d->fd, len) < 0) break;
+                continue;
+            }
+            const size_t jpeg_len = len - fields;
+            unsigned char *samples = malloc(pixels);
+            unsigned char *jpeg = malloc(jpeg_len);
+            if (!samples || !jpeg) {
+                free(samples); free(jpeg);
+                if (skip(d->fd, len) < 0) break;
+                continue;
+            }
+            if (read_full(d->fd, &request, sizeof(request)) < 0 || read_full(d->fd, &raw, sizeof(raw)) < 0 ||
+                read_full(d->fd, &controls, sizeof(controls)) < 0 || read_full(d->fd, samples, pixels) < 0 ||
+                read_full(d->fd, jpeg, jpeg_len) < 0) {
+                free(samples); free(jpeg);
+                break;
+            }
+            pthread_mutex_lock(d->lock);
+            if (d->raw_pending && request == d->raw_request && !d->raw_frame &&
+                raw.timestamp > 0 && controls.exposure > 0 && controls.iso > 0) {
+                d->raw_frame = samples;
+                d->raw_metadata = raw;
+                d->raw_controls = controls;
+                free(d->jpeg);
+                d->jpeg = jpeg;
+                d->jpeg_len = (unsigned)jpeg_len;
+                d->jpeg_seq++;
+            } else {
+                free(samples); free(jpeg);
+            }
+            pthread_mutex_unlock(d->lock);
         } else if (hdr[0] == 7 && len == sizeof(d->next_result)) {
             if (read_full(d->fd, &d->next_result, sizeof(d->next_result)) < 0) break;
         } else if (skip(d->fd, len) < 0) break;
@@ -753,7 +898,7 @@ static void result_value(void *m, uint32_t tag, const void *value) {
 
 static void *result_metadata(struct camera3 *d, uint64_t ts) {
     const void *s = d->last ? d->last : d->templates[1];
-    void *m = md_alloc((s ? md_entries(s) : 0) + 17, (s ? md_data(s) : 0) + 200);
+    void *m = md_alloc((s ? md_entries(s) : 0) + (d->raw.width ? 24 : 17), (s ? md_data(s) : 0) + 280);
     if (!m) return 0;
     if (s) md_append(m, s);
     static const uint8_t converged = 2, zero = 0, depth = 1;
@@ -794,6 +939,13 @@ static int has_new_frame(struct camera3 *d, unsigned fseq, unsigned jseq, int pr
                                      : d->frame && d->frame_seq != fseq;
     int ready = (!preview || fresh_preview) &&
                 (!blob || (d->jpeg && d->jpeg_seq != jseq));
+    pthread_mutex_unlock(d->lock);
+    return ready;
+}
+
+static int has_raw_frame(struct camera3 *d) {
+    pthread_mutex_lock(d->lock);
+    int ready = d->raw_frame != NULL;
     pthread_mutex_unlock(d->lock);
     return ready;
 }
@@ -887,14 +1039,15 @@ static int64_t send_pro_controls(struct camera3 *d) {
 
 static void answer(struct camera3 *d, struct request *r) {
     const struct gralloc_module *g = gralloc();
-    int blob = 0, preview = 0;
+    int blob = 0, preview = 0, raw = 0;
     for (int i = 0; i < r->nbuf; i++) {
         if (r->bufs[i].stream->format == FORMAT_BLOB) blob = 1;
+        else if (r->bufs[i].stream->format == FORMAT_RAW_SENSOR) raw = 1;
         else preview = 1;
     }
     if (r->settings) { if (d->last) md_free(d->last); d->last = r->settings; r->settings = 0; }
     const int64_t exposure = d->pro_mode ? send_pro_controls(d) : 0;
-    struct crop crop = request_crop(d->last);
+    struct crop crop = request_crop(d->last, &d->raw);
     struct ro_entry fps;
     const int fast = d->video_stream && d->last &&
                      md_find(d->last, CONTROL_AE_TARGET_FPS_RANGE, &fps) == 0 && fps.count == 2 &&
@@ -905,34 +1058,53 @@ static void answer(struct camera3 *d, struct request *r) {
      * most: nothing comes while the phone's camera permission is being asked) */
     pthread_mutex_lock(d->lock);
     unsigned jseq = d->jpeg_seq, fseq = d->frame_seq;
+    if (raw) {
+        d->raw_request = r->frame;
+        d->raw_pending = 1;
+    }
     pthread_mutex_unlock(d->lock);
-    if (blob) {
-        char cmd[48];
-        if (crop.width == W && crop.height == H) say(d, "shot\n");
+    const int still = blob || raw;
+    if (still) {
+        char cmd[64];
+        if (raw) {
+            snprintf(cmd, sizeof(cmd), "shotraw %u %d %d %d %d\n", r->frame,
+                     crop.left, crop.top, crop.width, crop.height);
+            say(d, cmd);
+        } else if (crop.width == W && crop.height == H) say(d, "shot\n");
         else {
             snprintf(cmd, sizeof(cmd), "shot %d %d %d %d\n", crop.left, crop.top, crop.width, crop.height);
             say(d, cmd);
         }
-        for (int i = 0; i < 1500 && d->running && !has_new_frame(d, fseq, jseq, 0, 1); i++) usleep(2000);
+        for (int i = 0; i < 1500 && d->running &&
+             !(raw ? has_raw_frame(d) : has_new_frame(d, fseq, jseq, 0, 1)); i++) usleep(2000);
         /* The host stops preview for JPEG. Frames received before that JPEG
          * cannot satisfy a preview output of this mixed request. */
         pthread_mutex_lock(d->lock);
+        if (raw) d->raw_pending = 0;
         fseq = d->frame_seq;
         while (d->video_head != d->video_tail) retire_video_frame(d);
         pthread_mutex_unlock(d->lock);
         say(d, "start\n");      /* a picture stops the host's preview */
     }
-    if (preview && (!blob || has_new_frame(d, fseq, jseq, 0, 1)))
+    if (preview && (!still || has_new_frame(d, fseq, jseq, 0, 1)))
         for (int i = 0; i < (fast ? 1200 : 150 + exposure / 2000000) && d->running &&
-             !has_new_frame(d, fseq, jseq, 1, blob); i++) usleep(fast ? 1000 : 2000);
-    if (!d->running || !has_new_frame(d, fseq, jseq, preview, blob)) {
+             !has_new_frame(d, fseq, jseq, 1, still); i++) usleep(fast ? 1000 : 2000);
+    if (!d->running || !has_new_frame(d, fseq, jseq, preview, still) || (raw && !has_raw_frame(d))) {
+        if (raw) {
+            pthread_mutex_lock(d->lock);
+            free(d->raw_frame);
+            d->raw_frame = NULL;
+            pthread_mutex_unlock(d->lock);
+        }
         fail_no_frame(d, r);
         return;
     }
 
     pthread_mutex_lock(d->lock);
     const struct video_frame *video_frame = fast && preview ? &d->video_frames[d->video_head % VIDEO_QUEUE] : 0;
-    d->result = d->pro_mode ? (blob ? d->jpeg_result : d->frame_result) : (struct pro_result){0};
+    const struct raw_result raw_properties = d->raw_metadata;
+    d->result = raw ? d->raw_controls :
+        (d->pro_mode ? (blob ? d->jpeg_result : d->frame_result) : (struct pro_result){0});
     uint64_t ts = video_frame ? video_frame->timestamp : now_ns();
     struct crop video_crop = { crop.left * VIDEO_W / W, crop.top * VIDEO_H / H,
                                crop.width * VIDEO_W / W, crop.height * VIDEO_H / H };
@@ -955,6 +1127,12 @@ static void answer(struct camera3 *d, struct request *r) {
                 copy(va, d->jpeg, d->jpeg_len);
                 struct { uint16_t id; uint32_t size; } tail = { 0x00ff, d->jpeg_len };
                 copy((char *)va + capacity - sizeof(tail), &tail, sizeof(tail));
+                b->status = 0;
+            }
+        } else if (s->format == FORMAT_RAW_SENSOR) {
+            const int capacity = d->raw.width * d->raw.height * 2;
+            if (d->raw_frame && ((const int *)*b->buffer)[6] >= capacity) {
+                memcpy(va, d->raw_frame, (size_t)capacity);
                 b->status = 0;
             }
         } else if (s->format == FORMAT_YV12 && (video_frame || d->frame)) {
@@ -980,6 +1158,10 @@ static void answer(struct camera3 *d, struct request *r) {
         g->unlock(g, *b->buffer);
     }
     if (video_frame) retire_video_frame(d);
+    if (raw) {
+        free(d->raw_frame);
+        d->raw_frame = NULL;
+    }
     pthread_mutex_unlock(d->lock);
 
     struct notify_msg n = {0};
@@ -990,12 +1172,26 @@ static void answer(struct camera3 *d, struct request *r) {
 
     void *meta = result_metadata(d, ts);
     if (meta) {
-        const int32_t region[] = { crop.left, crop.top, crop.width, crop.height };
+        int32_t region[] = { crop.left, crop.top, crop.width, crop.height };
+        if (d->raw.width) {
+            region[0] = d->raw.active[0] + (int)((int64_t)crop.left * d->raw.active[2] / W);
+            region[1] = d->raw.active[1] + (int)((int64_t)crop.top * d->raw.active[3] / H);
+            region[2] = (int)((int64_t)crop.width * d->raw.active[2] / W);
+            region[3] = (int)((int64_t)crop.height * d->raw.active[3] / H);
+        }
         struct ro_entry entry;
         if (md_find(meta, SCALER_CROP_REGION, &entry) == 0)
             md_update(meta, entry.index, region, COUNT(region), 0);
         else
             md_add(meta, SCALER_CROP_REGION, region, COUNT(region));
+        if (raw) {
+            result_value(meta, LENS_APERTURE, &raw_properties.aperture);
+            result_value(meta, LENS_FOCAL_LENGTH, &raw_properties.focal);
+            result_value(meta, CONTROL_POST_RAW_SENSITIVITY_BOOST, &raw_properties.boost);
+            result_entry(meta, SENSOR_NEUTRAL_COLOR_POINT, raw_properties.neutral, 3);
+            if (raw_properties.black[0] >= 0) result_entry(meta, SENSOR_DYNAMIC_BLACK_LEVEL, raw_properties.black, 4);
+            if (raw_properties.white > 0) result_value(meta, SENSOR_DYNAMIC_WHITE_LEVEL, &raw_properties.white);
+        }
     }
     struct capture_result res = { r->frame, meta, (uint32_t)r->nbuf, r->bufs, 0, 1 };
     d->cb->result(d->cb, &res);
@@ -1020,6 +1216,7 @@ static int d_configure(struct camera3 *d, struct stream_config *c) {
     for (int i = 0; i < 500 && d->head != d->tail; i++) usleep(2000);
     int video_stream = c->mode == NUBIA_VIDEO_60_MODE;
     int encoder_stream = 0;
+    int raw_stream = 0;
     for (uint32_t i = 0; i < c->num; i++) {
         struct stream *s = c->streams[i];
         if (!s || s->type != 0 /* CAMERA3_STREAM_OUTPUT */) return -22;
@@ -1029,7 +1226,10 @@ static int d_configure(struct camera3 *d, struct stream_config *c) {
             const int encoder = d->video_enabled && full_hd && (s->usage & USAGE_VIDEO_ENCODER);
             s->format = encoder ? FORMAT_YV12 : FORMAT_RGBA_8888;
         }
-        if (s->format != FORMAT_RGBA_8888 && s->format != FORMAT_YCBCR_420_888 &&
+        if (s->format == FORMAT_RAW_SENSOR) {
+            if (!d->raw.width || s->width != (unsigned)d->raw.width || s->height != (unsigned)d->raw.height) return -22;
+            raw_stream = 1;
+        } else if (s->format != FORMAT_RGBA_8888 && s->format != FORMAT_YCBCR_420_888 &&
             s->format != FORMAT_YV12 && s->format != FORMAT_BLOB) return -22;
         if ((s->format == FORMAT_YCBCR_420_888 || s->format == FORMAT_YV12) &&
             ((s->width | s->height) & 1)) return -22;
@@ -1044,6 +1244,10 @@ static int d_configure(struct camera3 *d, struct stream_config *c) {
         d->pro_command[0] = 0;
     }
     d->pro_mode = pro_mode;
+    if (raw_stream != d->raw_stream) {
+        d->raw_stream = raw_stream;
+        say(d, raw_stream ? "raw 1\n" : "raw 0\n");
+    }
     if (!d->video_stream) select_video(d, 0);
     say(d, "start\n");
     return 0;
@@ -1052,7 +1256,14 @@ static int d_configure(struct camera3 *d, struct stream_config *c) {
 static const void *d_template(struct camera3 *d, int type) {
     if (type < 1 || type > 6) return 0;
     if (!d->templates[type]) {
-        void *m = md_build(TEMPLATE, COUNT(TEMPLATE), 4);
+        struct ent entries[COUNT(TEMPLATE)];
+        memcpy(entries, TEMPLATE, sizeof(entries));
+        if (d->raw.width) {
+            for (size_t i = 0; i < COUNT(entries); i++) {
+                if (entries[i].tag == SCALER_CROP_REGION) entries[i].data = d->raw.active;
+            }
+        }
+        void *m = md_build(entries, COUNT(entries), 4);
         if (!m) return 0;
         uint8_t intent = (uint8_t)type;     /* CONTROL_CAPTURE_INTENT values are the template numbers */
         md_add(m, CONTROL_CAPTURE_INTENT, &intent, 1);
@@ -1107,7 +1318,7 @@ static int dev_close(struct hw_device *h) {
     for (unsigned i = d->head; i != d->tail; i++) if (d->queue[i % QUEUE].settings) md_free(d->queue[i % QUEUE].settings);
     for (int i = 0; i < 7; i++) if (d->templates[i]) md_free(d->templates[i]);
     if (d->last) md_free(d->last);
-    free(d->frame); free(d->jpeg);
+    free(d->frame); free(d->jpeg); free(d->raw_frame);
     if (d->video_pixels) munmap(d->video_pixels, (size_t)VIDEO_QUEUE * VIDEO_BYTES);
     free(d);
     return 0;
@@ -1126,6 +1337,7 @@ static int cam_open(const struct hw_module *m, const char *id, struct hw_device 
     d->ops = &ops;
     d->id = n;
     d->still_size = still_size_for(n);
+    d->raw = raw_profile_for(n);
     d->video_enabled = rear_video_enabled(n);
     d->fd = host_connect();
     if (d->fd < 0) { free(d); return -19; /* -ENODEV: the host does not serve a camera */ }

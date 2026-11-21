@@ -562,7 +562,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             videoRuntime.restoreCameraEncoder()
             val rear1080p60 = camera.prepareRearVideo() && prepareGuestCameraEncoder()
             if (!rear1080p60) camera.disableRearVideo()
-            TargetCameraVideoAssets.apply(paths.root, rear1080p60) { EngineAssets.open(ctx, it) }
+            TargetCameraVideoAssets.apply(paths.root, rear1080p60, camera.prepareStillProfiles()) { EngineAssets.open(ctx, it) }
             log("camera: ${if (rear1080p60) "rear 1080p60 available" else "baseline video profiles"}")
         }
         prepareGuestGpu(qemu)
