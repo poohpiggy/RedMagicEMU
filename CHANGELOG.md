@@ -1,5 +1,12 @@
 # Changelog
 
+## RedMagicEMU 0.6.7-beta (unreleased)
+
+- Fixed digital zoom and the mode-switch crashes in the stock NX809J camera.
+- Select native JPEG sizes from the host camera and preserve paired RAW/DNG and JPEG captures on supported rear cameras.
+- Verified stock 1080p60 rear recording, including professional exposure, focus, white balance, and tint controls, on the Redmi K80.
+- Aligned the host camera video timestamps with Guest recorder audio.
+
 ## RedMagicEMU 0.6.6-beta
 
 - Fixed the stock NX809J camera preview crash in the GLES bridge.
