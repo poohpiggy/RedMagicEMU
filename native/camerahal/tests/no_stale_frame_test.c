@@ -13,6 +13,7 @@ static int notified_error, notified_shutter, results, bad_result, lock_calls;
 static int fake_metadata, fake_result_metadata;
 static int32_t requested_crop[4];
 static int32_t reported_crop[4];
+static int32_t requested_jpeg_orientation;
 static void *fake_md_alloc(size_t entries, size_t bytes) { (void)entries; (void)bytes; return &fake_result_metadata; }
 static int fake_md_add(void *m, uint32_t tag, const void *p, size_t n) { (void)m; (void)tag; (void)p; (void)n; return 0; }
 static void fake_md_free(void *m) { (void)m; }
@@ -23,6 +24,10 @@ static int fake_md_append(void *dst, const void *src) {
     return 0;
 }
 static int fake_md_find(const void *m, uint32_t tag, struct ro_entry *entry) {
+    if (tag == JPEG_ORIENTATION && m == &fake_metadata) {
+        *entry = (struct ro_entry){ .count = 1, .data = &requested_jpeg_orientation };
+        return 0;
+    }
     if (tag != SCALER_CROP_REGION || (m != &fake_metadata && m != &fake_result_metadata)) return -1;
     *entry = (struct ro_entry){ .count = 4, .data = m == &fake_metadata ? requested_crop : reported_crop };
     return 0;
@@ -275,6 +280,36 @@ static int video_planar_crop(void) {
     return 0;
 }
 
+static int jpeg_orientation_case(void) {
+    int commands[2];
+    if (pipe(commands)) return 1;
+    struct camera3 d = { .running = 1, .fd = commands[1], .cb = &callbacks, .still_size = { W, H } };
+    struct stream jpg = { .width = W, .height = H, .format = FORMAT_BLOB };
+    const void *handle = jpeg_handle;
+    struct request req = { .frame = 73, .nbuf = 1, .settings = &fake_metadata };
+    req.bufs[0] = (struct stream_buffer){ .stream = &jpg, .buffer = &handle, .acquire_fence = -1 };
+    requested_crop[2] = W;
+    requested_crop[3] = H;
+    requested_jpeg_orientation = 90;
+    jpeg_handle[6] = JPEG_MAX;
+    struct arrival a = { &d, 0, 1, 0 };
+    long sender;
+    if (pthread_create(&sender, 0, deliver, &a)) { close(commands[0]); close(commands[1]); return 1; }
+    answer(&d, &req);
+    pthread_join(sender, 0);
+    close(commands[1]);
+    char wire[80] = {0};
+    long len = read(commands[0], wire, sizeof(wire) - 1);
+    close(commands[0]);
+    free(d.jpeg);
+    requested_jpeg_orientation = 0;
+    if (len < 0 || strcmp(wire, "shot 0 0 640 480 90\nstart\n")) {
+        fprintf(stderr, "JPEG capture must forward its requested clockwise rotation: %s", wire);
+        return 1;
+    }
+    return 0;
+}
+
 int main(void) {
     md_alloc = fake_md_alloc; md_add = fake_md_add; md_free = fake_md_free;
     md_entries = fake_md_count; md_data = fake_md_count; md_append = fake_md_append;
@@ -286,7 +321,7 @@ int main(void) {
     if (run_case(0, 0, 0, 0) || run_case(1, 0, 0, 0) || run_case(1, 0, 1, 0) ||
         run_case(1, 1, 0, 0) || run_case(1, 1, 1, 1) || run_case(1, 1, 1, 0) ||
         queue_lifetime_case() || video_frame_freshness() || video_descriptor_header() ||
-        video_encoder_uses_planar_yuv() || video_planar_crop()) return 1;
+        video_encoder_uses_planar_yuv() || video_planar_crop() || jpeg_orientation_case()) return 1;
     puts("no stale or synthetic preview frames: OK");
     return 0;
 }

@@ -3,7 +3,7 @@
  * no longer takes a HAL 1 device; a vendor camera application also needs a HAL 3 device for its vendor tags).
  *
  * The host side is the one of camera_hal.c: one unix socket connection per opened camera, /dev/socket/aemu_cam,
- * text commands ("open <id>", "start", "stop", "shot [left top width height]", "close"), frames back as
+ * text commands ("open <id>", "start", "stop", "shot [left top width height [rotation]]", "close"), frames back as
  *     int32 type, int32 width, int32 height, int32 length, then <length> bytes
  *     type 1: RGBA_8888 followed by NV21 using the header dimensions; type 2: JPEG of a picture.
  *     type 5: uint64 sensor timestamp and uint32 RGBA/YV12 slot for "video 1".
@@ -1126,14 +1126,18 @@ static void answer(struct camera3 *d, struct request *r) {
     pthread_mutex_unlock(d->lock);
     const int still = blob || raw;
     if (still) {
+        const int rotation = request_i32(d->last, JPEG_ORIENTATION);
+        char suffix[8] = "\n";
+        if (rotation == 90 || rotation == 180 || rotation == 270)
+            snprintf(suffix, sizeof(suffix), " %d\n", rotation);
         char cmd[64];
         if (raw) {
-            snprintf(cmd, sizeof(cmd), "shotraw %u %d %d %d %d\n", r->frame,
-                     crop.left, crop.top, crop.width, crop.height);
+            snprintf(cmd, sizeof(cmd), "shotraw %u %d %d %d %d%s", r->frame,
+                     crop.left, crop.top, crop.width, crop.height, suffix);
             say(d, cmd);
-        } else if (crop.width == W && crop.height == H) say(d, "shot\n");
+        } else if (crop.width == W && crop.height == H && suffix[0] == '\n') say(d, "shot\n");
         else {
-            snprintf(cmd, sizeof(cmd), "shot %d %d %d %d\n", crop.left, crop.top, crop.width, crop.height);
+            snprintf(cmd, sizeof(cmd), "shot %d %d %d %d%s", crop.left, crop.top, crop.width, crop.height, suffix);
             say(d, cmd);
         }
         for (int i = 0; i < 1500 && d->running &&

@@ -31,7 +31,7 @@ import java.nio.ByteOrder
 
 /**
  * The phone's cameras for the guest. The emulator's camera HAL (native/camerahal) connects to /dev/socket/aemu_cam
- * and sends "open <0 back | 1 front>", "start", "stop", "shot [left top width height]", "close"; frames go back as
+ * and sends "open <0 back | 1 front>", "start", "stop", "shot [left top width height [rotation]]", "close"; frames go back as
  *     int32 type, width, height, length + data — type 1: RGBA_8888 then NV21 (preview), type 2: JPEG (picture),
  *     type 3: NV21 only (preview, after "nv21").
  * API 36: "video 1" selects the admitted 1080p60 recording session. Type 5 carries
@@ -190,6 +190,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         private var rawReader: ImageReader? = null
         private var wantRaw = false
         private var rawShot: RawCapture? = null
+        private var shotOrientation: Int? = null
         private var controls: TargetCameraControls.Request? = null
         private var professional = false
         private var videoControls = false
@@ -301,7 +302,10 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                                         }, 5_000)
                                     }
                                 } else null
-                                shotCrop = if (api == 36) parseShotCrop(if (raw) p.drop(1) else p) else null
+                                val fields = if (raw) p.drop(1) else p
+                                shotCrop = if (api == 36) parseShotCrop(fields) else null
+                                shotOrientation = if (api == 36) fields.getOrNull(5)?.toIntOrNull()
+                                    ?.takeIf { it in 0..270 && it % 90 == 0 } else null
                                 shot = true
                                 if (video != null) device?.let { configure(it, useVideo = false) }
                             }
@@ -775,7 +779,13 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                         crop.width() * frameWidth / W, crop.height() * frameHeight / H)
                     val jpg = ByteArrayOutputStream(200_000)
                     val pixels = if (frameWidth == W && frameHeight == H) nv21 else resized(W, H)
-                    YuvImage(pixels, ImageFormat.NV21, W, H, null).compressToJpeg(Rect(0, 0, W, H), 92, jpg)
+                    val rotation = shotOrientation ?: 0
+                    val transposed = rotation == 90 || rotation == 270
+                    val jpegWidth = if (transposed) H else W
+                    val jpegHeight = if (transposed) W else H
+                    val oriented = rotateCameraJpegNv21(pixels, W, H, rotation)
+                    YuvImage(oriented, ImageFormat.NV21, jpegWidth, jpegHeight, null)
+                        .compressToJpeg(Rect(0, 0, jpegWidth, jpegHeight), 92, jpg)
                     streaming = false   // a picture stops the preview until the guest starts it again (its "start"
                     send(2, jpg.toByteArray(), jpg.size())     // may come right after the picture, so this goes first)
                     return
@@ -885,8 +895,8 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                 if (rawCapture != null) r.setTag(rawCapture)
                 val p = guestParams
                 r.set(CR.JPEG_QUALITY, (p["jpeg-quality"]?.toIntOrNull() ?: 90).coerceIn(1, 100).toByte())
-                // the guest's "rotation" (Parameters.setRotation): the turn its camera application wants in the file
-                r.set(CR.JPEG_ORIENTATION, (p["rotation"]?.toIntOrNull() ?: 0).let { (it % 360 + 360) % 360 })
+                val legacyOrientation = (p["rotation"]?.toIntOrNull() ?: 0).let { (it % 360 + 360) % 360 }
+                r.set(CR.JPEG_ORIENTATION, shotOrientation ?: legacyOrientation)
                 val tw = p["jpeg-thumbnail-width"]?.toIntOrNull() ?: 0; val th = p["jpeg-thumbnail-height"]?.toIntOrNull() ?: 0
                 r.set(CR.JPEG_THUMBNAIL_SIZE, Size(tw, th))
                 r.set(CR.JPEG_THUMBNAIL_QUALITY, (p["jpeg-thumbnail-quality"]?.toIntOrNull() ?: 90).coerceIn(1, 100).toByte())
@@ -1010,7 +1020,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         }
 
         private fun parseShotCrop(command: List<String>): Rect? {
-            if (command.size != 5) return null
+            if (command.size !in 5..6) return null
             val left = command[1].toIntOrNull() ?: return null
             val top = command[2].toIntOrNull() ?: return null
             val width = command[3].toIntOrNull() ?: return null
