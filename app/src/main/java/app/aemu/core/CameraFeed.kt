@@ -59,7 +59,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
     @Volatile var onPermissionNeeded: (() -> Unit)? = null
     private data class StillTarget(
         val id: String, val size: Size, val sensor: Rect?,
-        val controls: TargetCameraControls, val raw: TargetCameraRaw?, val previewSizes: List<Size>,
+        val controls: TargetCameraControls, val raw: TargetCameraRaw?, val previews: List<TargetCameraPhotoPreview>,
     )
     private class RawCapture(val request: Int) {
         var jpeg: ByteArray? = null
@@ -107,14 +107,6 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             ?: cameraIdList.firstOrNull()
     }
 
-    private fun photoPreviewSizes(camera: CameraCharacteristics): List<Size> =
-        camera.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            ?.getOutputSizes(ImageFormat.YUV_420_888)
-            ?.filter { it.width in (W + 1)..1440 && it.height in (H + 1)..1080 &&
-                it.width % 2 == 0 && it.height % 2 == 0 && it.width * 3 == it.height * 4 }
-            ?.distinct()
-            ?.sortedByDescending { it.width }.orEmpty()
-
     private fun publishStillSizes() {
         val cm = ctx.getSystemService(CameraManager::class.java)
         val testScene = File(paths.bin, "camera.test").isFile
@@ -135,16 +127,19 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                         .onFailure { log("camera: unable to inspect rear RAW capability: ${it.message}") }
                         .getOrNull()
                 else null
+                val previews = TargetCameraPhotoPreview.rank(
+                    streams.getOutputSizes(ImageFormat.YUV_420_888).orEmpty().map { it.width to it.height },
+                )
                 StillTarget(id, jpeg, camera.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE),
-                    TargetCameraControls(camera), raw, photoPreviewSizes(camera))
+                    TargetCameraControls(camera), raw, previews)
             }.onFailure { log("camera: unable to inspect ${if (front) "front" else "back"} JPEG sizes: ${it.message}") }.getOrNull()
         }
         val sizes = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
         targets.forEach { target -> sizes.putInt(target?.size?.width ?: W).putInt(target?.size?.height ?: H) }
         val previews = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
         targets.forEach { target ->
-            val size = target?.previewSizes?.firstOrNull()
-            previews.putInt(size?.width ?: W).putInt(size?.height ?: H)
+            val preview = target?.previews?.firstOrNull()
+            previews.putInt(preview?.width ?: W).putInt(preview?.height ?: H)
         }
         val controls = ByteBuffer.allocate(2 * TargetCameraControls.CAP_BYTES).order(ByteOrder.LITTLE_ENDIAN)
         targets.forEach { target ->
@@ -266,6 +261,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         private var sized = ByteArray(0)
         private var rgba = ByteArray(W * H * 4)
         private var previewSizeIndex = 0
+        private var photoPreview: TargetCameraPhotoPreview? = null
         private var frames = 0
         private var firstNs = 0L
         private var convNs = 0L
@@ -416,6 +412,7 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             preview = null
             reader?.close()
             reader = null
+            photoPreview = null
             still?.close()
             still = null
             rawReader?.close()
@@ -486,10 +483,11 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                     if (mode.constrained) d.createConstrainedHighSpeedCaptureSession(listOf(surface), callback, handler)
                     else d.createCaptureSession(listOf(surface), callback, handler)
                 } else {
-                    val size = stillTarget?.previewSizes?.takeIf { api == 36 && !wantRaw }
-                        ?.getOrNull(previewSizeIndex) ?: Size(W, H)
-                    detailedPreview = size.width > W
-                    val ir = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 2)
+                    val profile = stillTarget?.previews?.takeIf { api == 36 && !wantRaw }?.getOrNull(previewSizeIndex)
+                    photoPreview = profile
+                    detailedPreview = profile != null
+                    val ir = ImageReader.newInstance(profile?.sourceWidth ?: W, profile?.sourceHeight ?: H,
+                        ImageFormat.YUV_420_888, 2)
                     reader = ir
                     ir.setOnImageAvailableListener({ r ->
                         if (r === reader) r.acquireLatestImage()?.let { image ->
@@ -521,7 +519,9 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
                     }, handler)
                     val callback = captureSession(generation) { s ->
                         s.setRepeatingRequest((preview ?: request).build(), if (api == 36) previewCallback else null, handler)
-                        if (api == 36) log("camera: host photo preview ${ir.width}x${ir.height}")
+                        if (api == 36) {
+                            log("camera: host photo preview ${ir.width}x${ir.height}, Guest ${profile?.width ?: W}x${profile?.height ?: H}")
+                        }
                     }
                     d.createCaptureSession(listOfNotNull(ir.surface, st?.surface, raw?.surface), callback, handler)
                 }
@@ -698,14 +698,17 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
         private fun frame(img: Image, result: TotalCaptureResult?) {
             if (!streaming && !shot) return
             val t0 = System.nanoTime()
-            if (img.width != frameWidth || img.height != frameHeight) {
-                frameWidth = img.width
-                frameHeight = img.height
+            val profile = photoPreview
+            val width = profile?.width ?: img.width
+            val height = profile?.height ?: img.height
+            if (width != frameWidth || height != frameHeight) {
+                frameWidth = width
+                frameHeight = height
                 nv21 = ByteArray(frameWidth * frameHeight * 3 / 2)
                 zbuf = ByteArray(nv21.size)
                 rgba = ByteArray(frameWidth * frameHeight * 4)
             }
-            toNv21(img)
+            toNv21(img, profile?.left ?: 0, profile?.top ?: 0)
             if (mirror) mirrorNv21()
             process(t0, result)
         }
@@ -1039,21 +1042,23 @@ class CameraFeed(private val ctx: Context, private val paths: VmPaths, private v
             System.arraycopy(zbuf, 0, nv21, 0, zbuf.size)
         }
 
-        /** YUV_420_888 planes (any row/pixel stride) → NV21 */
-        private fun toNv21(img: Image) {
+        /** Copy the selected YUV_420_888 crop into NV21, keeping the native pixels. */
+        private fun toNv21(img: Image, left: Int, top: Int) {
             val y = img.planes[0]; val u = img.planes[1]; val v = img.planes[2]
             val yb = y.buffer; val ub = u.buffer; val vb = v.buffer
             for (row in 0 until frameHeight) {
-                yb.position(row * y.rowStride)
+                yb.position((row + top) * y.rowStride + left)
                 yb.get(nv21, row * frameWidth, minOf(frameWidth, yb.remaining()))
             }
             var o = frameWidth * frameHeight
             // Camera2 may return separate planes or either order of interleaved chroma.
             for (row in 0 until frameHeight / 2) {
-                val up = row * u.rowStride; val vp = row * v.rowStride
+                val up = (row + top / 2) * u.rowStride
+                val vp = (row + top / 2) * v.rowStride
                 for (col in 0 until frameWidth / 2) {
-                    nv21[o++] = vb.get(vp + col * v.pixelStride)
-                    nv21[o++] = ub.get(up + col * u.pixelStride)
+                    val sourceColumn = col + left / 2
+                    nv21[o++] = vb.get(vp + sourceColumn * v.pixelStride)
+                    nv21[o++] = ub.get(up + sourceColumn * u.pixelStride)
                 }
             }
         }
