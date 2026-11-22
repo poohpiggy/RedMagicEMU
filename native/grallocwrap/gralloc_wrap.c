@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <sys/stat.h>
 #include "note.h"
+#include "video_usage.h"
 #ifdef AEMU_META
 #include "../glbridge/common.h"
 extern int socket(int domain, int type, int proto);
@@ -148,8 +149,9 @@ static int w_unlock(const struct gralloc_module *m, const void *h) { (void)m; re
  * into the last bytes of the block, which is how lock_ycbcr below knows the planes: the default gralloc's handle
  * (fd, magic, flags, size, offset, base) has no room for them. */
 struct aosp_handle { int version, num_fds, num_ints, fd, magic, flags, size, offset; uint64_t base; };
-struct yuv_note { uint32_t magic; int32_t w, h; uint32_t pad; };   /* pad: 0 NV21, else YV12 with pad = its Y stride */
+struct yuv_note { uint32_t magic; int32_t w, h; uint32_t pad; };   /* pad: 0 interleaved, else YV12 with pad = its Y stride */
 #define YUV_NOTE 0x56594541u
+#define YUV_NOTE_NV12 0x4e594541u
 static struct yuv_note *note_of(const void *handle) {
     const struct aosp_handle *p = handle;
     if (!p || !p->base || p->size < 4096) return 0;
@@ -171,11 +173,12 @@ static int w_lock_ycbcr(const struct gralloc_module *m, const void *hnd, int usa
     if (!va || !n) { real->unlock(real, hnd); return -22; }
     /* The note is in shared guest memory: use a checked local copy for all plane offsets. */
     struct yuv_note note = *n;
+    const int nv12 = note.magic == YUV_NOTE_NV12 && note.pad == 0;
     uint64_t reserved = sizeof(struct yuv_note);
 #ifdef AEMU_META
     reserved = META_ROOM;
 #endif
-    if (note.magic != YUV_NOTE || note.w <= 0 || note.h <= 0 || note.w > 8192 || note.h > 8192 ||
+    if ((note.magic != YUV_NOTE && !nv12) || note.w <= 0 || note.h <= 0 || note.w > 8192 || note.h > 8192 ||
         p->size < 0 || (uint64_t)p->size < reserved) { real->unlock(real, hnd); return -22; }
     uint64_t ys = note.pad ? note.pad : (uint64_t)note.w;
     uint64_t cs = note.pad ? ((ys / 2 + 15) & ~15ULL) : ((uint64_t)(note.w + 1) / 2) * 2;
@@ -199,8 +202,9 @@ static int w_lock_ycbcr(const struct gralloc_module *m, const void *hnd, int usa
         out->chroma_step = 1;
         return 0;
     }
-    out->cr = (char *)va + ys * (uint64_t)note.h;
-    out->cb = (char *)out->cr + 1;
+    char *chroma = (char *)va + ys * (uint64_t)note.h;
+    out->cb = chroma + (nv12 ? 0 : 1);
+    out->cr = chroma + (nv12 ? 1 : 0);
     out->ystride = (unsigned long)ys;
     out->cstride = (unsigned long)cs;
     out->chroma_step = 2;
@@ -232,11 +236,18 @@ static int alloc_any(struct alloc_device *r, int w, int h, int format, int usage
     }
     if (format == HAL_PIXEL_FORMAT_YCBCR_420_888 || format == HAL_PIXEL_FORMAT_YCRCB_420_SP) {
         if (w <= 0 || h <= 0 || w > 8192 || h > 8192) return -22;
+        uint32_t layout = YUV_NOTE;
+#ifdef AEMU_VIDEO_NV12
+        if (format == HAL_PIXEL_FORMAT_YCBCR_420_888 && (usage & RME_GRALLOC_USAGE_NV12)) {
+            layout = YUV_NOTE_NV12;
+            usage &= ~RME_GRALLOC_USAGE_NV12;
+        }
+#endif
         long size = (long)w * h + 2L * ((w + 1) / 2) * ((h + 1) / 2) + (long)sizeof(struct yuv_note) + EXTRA;
         int e = r->alloc(r, (int)((size + 3) / 4), 1, HAL_PIXEL_FORMAT_RGBA_8888, usage, handle, &unused);
         if (e) return e;
         struct yuv_note *n = note_of(*handle);
-        if (n) { n->magic = YUV_NOTE; n->w = w; n->h = h; n->pad = 0; }
+        if (n) { n->magic = layout; n->w = w; n->h = h; n->pad = 0; }
         *stride = w;
         return 0;
     }

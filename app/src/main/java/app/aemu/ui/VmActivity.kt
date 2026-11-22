@@ -63,6 +63,9 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -143,6 +146,7 @@ import app.aemu.core.HostVulkanProbe
 import app.aemu.core.ImageStore
 import app.aemu.core.InputService
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.concurrent.thread
 
 /** Процесс :vm держит ровно одну машину. */
@@ -364,16 +368,23 @@ class VmActivity : ComponentActivity() {
         })
 
         registerShell()
+        if (shouldSyncHostLocation()) watchHostLocationPermission()
         if (shouldBootOnAttach(vm.state, previousBootMessage != null, VmHost.poweredOff)) startBoot()
-        else askForHostLocation()
     }
 
-    private fun askForHostLocation() {
-        if (shouldSyncHostLocation() && !hasLocationPermission()) {
-            askLocation.launch(arrayOf(
-                android.Manifest.permission.ACCESS_COARSE_LOCATION,
-                android.Manifest.permission.ACCESS_FINE_LOCATION,
-            ))
+    private fun watchHostLocationPermission() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                vm.location.permissionNeeded.collect { needed ->
+                    if (needed && !locationPermissionRequested && vm.location.shouldAskPermission()) {
+                        locationPermissionRequested = true
+                        askLocation.launch(arrayOf(
+                            android.Manifest.permission.ACCESS_COARSE_LOCATION,
+                            android.Manifest.permission.ACCESS_FINE_LOCATION,
+                        ))
+                    }
+                }
+            }
         }
     }
 
@@ -386,7 +397,6 @@ class VmActivity : ComponentActivity() {
             return
         }
         runOnUiThread { previousBootMessage = null }
-        askForHostLocation()
         vm.bootAsync()
     }
 
@@ -854,22 +864,13 @@ class VmActivity : ComponentActivity() {
 
     private val askCamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
+    private var locationPermissionRequested = false
     private val askLocation = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         if (::vm.isInitialized) vm.location.permissionChanged()
     }
 
     private fun shouldSyncHostLocation(): Boolean =
         vm.img.api == 36 && vm.img.model == "NX809J" && vm.img.abi == "arm64-v8a" && vm.engine == Engine.N64
-
-    private fun hasLocationPermission(): Boolean =
-        androidx.core.content.ContextCompat.checkSelfPermission(
-            this,
-            android.Manifest.permission.ACCESS_COARSE_LOCATION,
-        ) == android.content.pm.PackageManager.PERMISSION_GRANTED ||
-            androidx.core.content.ContextCompat.checkSelfPermission(
-                this,
-                android.Manifest.permission.ACCESS_FINE_LOCATION,
-            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
 
     private fun toast(msg: String) = runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
 

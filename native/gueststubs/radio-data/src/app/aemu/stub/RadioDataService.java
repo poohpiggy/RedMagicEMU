@@ -146,9 +146,10 @@ public final class RadioDataService extends IRadioData.Stub {
         return model.radioState() == RadioState.ON ? RadioError.NONE : RadioError.RADIO_NOT_AVAILABLE;
     }
 
-    private static SetupDataCallResult emptyCall() {
+    private static SetupDataCallResult emptyCall(long retryMillis) {
         SetupDataCallResult result = new SetupDataCallResult();
         result.cause = DataCallFailCause.ERROR_UNSPECIFIED;
+        result.suggestedRetryTime = retryMillis;
         result.ifname = "";
         result.addresses = new LinkAddress[0];
         result.dnses = new String[0];
@@ -322,7 +323,8 @@ public final class RadioDataService extends IRadioData.Stub {
             int reason, LinkAddress[] addresses, String[] dnses, int pduSessionId, SliceInfo sliceInfo,
             boolean matchAllRuleAllowed) throws RemoteException {
         if (!lteData) {
-            response().setupDataCallResponse(result(serial, RadioError.REQUEST_NOT_SUPPORTED), emptyCall());
+            // This boot mode cannot create a cellular bearer. Suppress modem-directed retries.
+            response().setupDataCallResponse(result(serial, RadioError.REQUEST_NOT_SUPPORTED), emptyCall(Long.MAX_VALUE));
             return;
         }
         int error = availability();
@@ -344,7 +346,8 @@ public final class RadioDataService extends IRadioData.Stub {
             }
         }
         if (error != RadioError.NONE || call == null) {
-            response().setupDataCallResponse(result(serial, error), emptyCall());
+            // LTE can recover after data or radio is re-enabled. Let Android choose the backoff.
+            response().setupDataCallResponse(result(serial, error), emptyCall(-1));
             return;
         }
         try {

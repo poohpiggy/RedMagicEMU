@@ -14,12 +14,16 @@ struct camera_encode_format {
     uint32_t status;
 };
 
+static inline int camera_encode_frame_rate_supported(float fps) {
+    return fps == 30.0f || fps == 50.0f || fps == 60.0f || fps == 120.0f;
+}
+
 /* Submit carries a VIDEO_SUBMIT header and waits for an available codec input
  * buffer before writing packed NV12. Receive returns one encoded access unit.
  * An end-of-stream submit has no image payload. */
 static inline int camera_encode_dimensions(const struct camera_encode_open *open) {
     return open->magic == RME_CAMERA_ENCODE_MAGIC &&
            video_dimensions(open->width, open->height) &&
-           (open->fps == 50 || open->fps == 60 || open->fps == 120) &&
+           camera_encode_frame_rate_supported(open->fps) &&
            open->bitrate >= 64000 && open->bitrate <= 128000000;
 }

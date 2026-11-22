@@ -487,7 +487,8 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         }
     }
 
-    private fun prepareGuestCameraEncoder(): Boolean {
+    /** Start the AVC bridge and report whether the camera can publish its 60 fps profile. */
+    private fun prepareGuestAvcEncoder(wantsRear1080p60: Boolean): Boolean {
         if (Build.VERSION.SDK_INT < 29 || "camera-encoder.sha256" !in ctx.assets.list("rme-video").orEmpty()) return false
         val executable = File(ctx.applicationInfo.nativeLibraryDir, TargetVideoRuntime.CAMERA_ENCODER)
         if (!executable.canExecute()) return false
@@ -496,35 +497,42 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         return try {
             if (cameraEncoderSocket.exists()) check(cameraEncoderSocket.delete()) { "cannot clear stale camera encoder socket" }
             val avc = android.media.MediaFormat.MIMETYPE_VIDEO_AVC
-            val codec = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS).codecInfos
-                .asSequence().filter { it.isEncoder && it.isHardwareAccelerated && avc in it.supportedTypes }
+            val codecs = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS).codecInfos
+                .filter { it.isEncoder && it.isHardwareAccelerated && avc in it.supportedTypes }
                 .filter {
-                    val caps = it.getCapabilitiesForType(avc)
-                    android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar in caps.colorFormats &&
-                        caps.videoCapabilities?.areSizeAndRateSupported(1920, 1080, 60.0) == true
-                }.firstOrNull { info ->
-                    val probe = startExternalProcess(ProcessBuilder(executable.absolutePath, "--probe", info.name)
-                        .redirectErrorStream(true).redirectOutput(hostLog))
-                    val finished = waitFor("host camera encoder probe", 4_000) { !probe.isAlive }
+                    android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar in
+                        it.getCapabilitiesForType(avc).colorFormats
+                }
+            val rates = if (wantsRear1080p60) listOf(60, 30) else listOf(30)
+            val selected = rates.firstNotNullOfOrNull { fps ->
+                codecs.firstOrNull { info ->
+                    if (info.getCapabilitiesForType(avc).videoCapabilities
+                            ?.areSizeAndRateSupported(1920, 1080, fps.toDouble()) != true) return@firstOrNull false
+                    val probe = startExternalProcess(
+                        ProcessBuilder(executable.absolutePath, "--probe", info.name, fps.toString())
+                            .redirectErrorStream(true).redirectOutput(hostLog),
+                    )
+                    val finished = waitFor("host AVC encoder probe", 4_000) { !probe.isAlive }
                     if (!finished) probe.destroyForcibly()
                     finished && probe.exitValue() == 0
+                }?.let { it.name to fps }
                 }
-            checkNotNull(codec) { "host hardware AVC encoder cannot open 1080p60" }
+            val (codec, fps) = checkNotNull(selected) { "host hardware AVC encoder cannot open 1080p30 or 1080p60" }
             val process = startExternalProcess(ProcessBuilder(
-                executable.absolutePath, "--serve", cameraEncoderSocket.absolutePath, AProcess.myPid().toString(), codec.name,
+                executable.absolutePath, "--serve", cameraEncoderSocket.absolutePath, AProcess.myPid().toString(), codec,
             ).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.appendTo(hostLog)))
             cameraEncoderHost = process
             val ready = waitFor("host camera encoder socket", 2_000) { cameraEncoderSocket.exists() || !process.isAlive }
             check(ready && process.isAlive && cameraEncoderSocket.exists()) { "host camera encoder did not start" }
             videoRuntime.installCameraEncoder()
-            log("camera: host AVC encoder bridge ready")
-            true
+            log("Guest video: host AVC encoder bridge ready ($codec, 1080p$fps)")
+            fps == 60
         } catch (stopped: VmLifecycle.StoppedException) {
             throw stopped
         } catch (failure: Exception) {
             cameraEncoderHost?.destroyForcibly()
             videoRuntime.restoreCameraEncoder()
-            log("camera: ${failure.message}")
+            log("Guest video encoder: ${failure.message}")
             false
         }
     }
@@ -556,11 +564,11 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         // 1. дерево
         val fixer = TreeFixer(ctx, paths, img, ::log)
         fixer.fixup()
-        val targetCamera = engine == Engine.N64 && img.api == 36 && img.model == "NX809J"
+        val targetCamera = engine == Engine.N64 && img.api == 36 && img.model == "NX809J" && img.abi == "arm64-v8a"
         val singleRearCamera = if (targetCamera) cameraModeRuntime.install() else false
         if (targetCamera) {
             videoRuntime.restoreCameraEncoder()
-            val rear1080p60 = camera.prepareRearVideo() && prepareGuestCameraEncoder()
+            val rear1080p60 = prepareGuestAvcEncoder(camera.prepareRearVideo())
             if (!rear1080p60) camera.disableRearVideo()
             TargetCameraVideoAssets.apply(paths.root, rear1080p60, camera.prepareStillProfiles()) { EngineAssets.open(ctx, it) }
             log("camera: ${if (rear1080p60) "rear 1080p60 available" else "baseline video profiles"}")
@@ -1125,6 +1133,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         }
         if (!glDone) glUp()
         log("system started: ${alive().joinToString()}")
+        watchTargetHealthStartup(r, plan)
         // M3/M5 set no boot property at all: their SurfaceFlinger's "Boot is finished" in the guest log is the sign
         if (img.api < 3) Thread {
             val f = File(paths.root, "dev/log/main"); val mark = "Boot is finished".toByteArray()
@@ -2004,6 +2013,42 @@ class GuestVm(val ctx: Context, image: GuestImage) {
 
     /** qemu maps a guest path into the tree only if the file exists there, so the shim's request file is pre-made */
     private val power: File get() = File(paths.root, "dev/aemu_power")
+
+    private fun watchTargetHealthStartup(runner: GuestRunner, plan: List<GuestService>) {
+        val health = TargetHealthStartup.select(img.api, img.model, img.abi, engine, recoveryMode, plan) ?: return
+        val zygote = synchronized(procs) { procs["zygote"] } ?: return
+        val manager = synchronized(procs) { procs["servicemanager"] } ?: return
+        val started = SystemClock.uptimeMillis()
+        lifecycle.launch("vm-health-startup") {
+            val readiness = TargetHealthStartup()
+            // Allow normal service registration, then finish before Android's startup watchdog.
+            fun checking() = !stopping && state == State.BOOTING && zygote.isAlive && manager.isAlive &&
+                SystemClock.uptimeMillis() - started < 45_000L
+            fun present(name: String) = TargetHealthStartup.servicePresent(
+                name, runner.runBounded(listOf("/system/bin/service", "check", name), 1_500L),
+            )
+            while (checking()) {
+                Thread.sleep(3_000L)
+                if (!checking()) break
+                if (SystemClock.uptimeMillis() - started < 12_000L) continue
+                val battery = present("battery")
+                val healthReady = if (battery == false && checking()) present(TargetHealthStartup.HEALTH_INTERFACE) else null
+                when (readiness.observe(battery, healthReady)) {
+                    TargetHealthStartup.Action.WAIT -> Unit
+                    TargetHealthStartup.Action.FINISH -> break
+                    TargetHealthStartup.Action.RESTART -> {
+                        lifecycle.ifRunning {
+                            if (checking()) {
+                                log("health: Guest IHealth unavailable during boot; restarting ${health.name} once")
+                                onCtlWhileRunning(true, health.name)
+                            }
+                        }
+                        break
+                    }
+                }
+            }
+        }
+    }
 
     private fun watchdog() {
         runCatching { power.writeText(""); power.setWritable(true, false) }

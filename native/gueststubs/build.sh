@@ -11,7 +11,7 @@ rm -rf build && mkdir -p build/classes
 mkdir -p build/hidden
 javac --release 8 -cp "$JAR" -d build/hidden $(find hidden -name '*.java')
 javac --release 8 -cp "build/hidden;$JAR" -d build/classes $(find src -name '*.java')
-"$D8" --min-api 17 --lib "$JAR" --output build $(find build/classes -name '*.class')
+"$D8" --min-api 17 --lib "$JAR" --classpath build/hidden --output build $(find build/classes -name '*.class')
 python -c "import zipfile;z=zipfile.ZipFile('build/stubs.jar','w',zipfile.ZIP_DEFLATED);z.write('build/classes.dex','classes.dex');z.close()"
 cp build/stubs.jar "$OUT"
 echo "готово: $OUT"

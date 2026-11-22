@@ -7,6 +7,7 @@
 #define _LIBCPP_ABI_NAMESPACE __1
 
 #include <C2ComponentFactory.h>
+#include <C2PlatformSupport.h>
 #include <SimpleC2Component.h>
 #include <android/log.h>
 #include <cstring>
@@ -15,6 +16,7 @@
 #include <optional>
 #include <vector>
 #include <video_client.h>
+#include "../grallocwrap/video_usage.h"
 
 namespace {
 
@@ -154,7 +156,16 @@ private:
         pending.erase(packet);
         std::shared_ptr<C2GraphicBlock> block;
         C2MemoryUsage usage = {C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE};
-        if (pool->fetchGraphicBlock(width, height, HAL_PIXEL_FORMAT_YV12, usage, &block) != C2_OK) {
+        uint32_t format = HAL_PIXEL_FORMAT_YV12;
+#if RME_HEVC
+        // Use the same byte-buffer layout as the AVC encoder for flexible YUV
+        // transcodes. The Surface buffer queue continues to use planar YV12.
+        if (pool->getAllocatorId() == android::C2PlatformAllocatorStore::GRALLOC) {
+            format = HAL_PIXEL_FORMAT_YCBCR_420_888;
+            usage.expected |= RME_GRALLOC_USAGE_NV12;
+        }
+#endif
+        if (pool->fetchGraphicBlock(width, height, format, usage, &block) != C2_OK) {
             return VIDEO_ERROR;
         }
         {

@@ -32,6 +32,8 @@ public final class RadioDataNoBearerTest {
         check(info[0].serial==2 && info[0].error==RadioError.NONE && ((SetupDataCallResult[])result[0]).length==0,"ON did not report empty data list");
         data.setupDataCall(3,0,null,false,0,null,null,0,null,false);
         check(info[0].serial==3 && info[0].error==RadioError.REQUEST_NOT_SUPPORTED,"data call was allowed");
+        check(((SetupDataCallResult)result[0]).suggestedRetryTime==Long.MAX_VALUE,
+                "a Guest without a cellular bearer must not schedule modem retries");
         slot.disconnect(); data.getDataCallList(4);
         check(info[0].serial==4 && info[0].error==RadioError.RADIO_NOT_AVAILABLE,"disconnected radio appeared available");
         System.out.println("RADIO_DATA_NO_BEARER_OK");

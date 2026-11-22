@@ -79,11 +79,12 @@ struct fbo { u32 type, flags; u64 binder, cookie; };   /* flat_binder_object, 64
 
 struct proc; struct thread; struct node; struct txn;
 
-enum { W_TXN = 1, W_COMPLETE, W_NODE, W_DEAD_BINDER, W_CLEAR_DONE, W_ERROR };
+enum { W_TXN = 1, W_COMPLETE, W_NODE, W_DEAD_BINDER, W_CLEAR_DONE, W_ERROR,
+       W_DEATH_IDLE, W_DEAD_BINDER_AND_CLEAR };
 struct work { struct work *next; int type, deferred; struct txn *t; struct node *node; u64 cookie; u32 err; };
 struct wq { struct work *head, *tail; };
 
-struct ref { struct proc *proc; u32 desc; struct node *node; int strong, weak, has_death; u64 death; struct ref *next_in_node; };
+struct ref { struct proc *proc; u32 desc; struct node *node; int strong, weak; struct work *death; struct ref *next_in_node; };
 struct node {
     struct proc *owner; u64 ptr, cookie; int internal_strong, local_strong, local_weak, nrefs, has_strong, has_weak, queued, has_async;
     int pend_strong, pend_weak;     /* BR_ACQUIRE / BR_INCREFS sent, not yet confirmed: the node keeps a reference of its own until then */
@@ -106,7 +107,7 @@ struct thread {
 };
 #define NHASH 256
 struct proc {
-    int pid, max_threads, requested, started, kick; u32 key; struct thread *threads; struct wq todo;
+    int pid, max_threads, requested, started, kick; u32 key; struct thread *threads; struct wq todo, delivered_deaths;
     struct ref **refs; u32 nrefs; struct node *nodes[NHASH]; struct dbuf *bufs; struct proc *next;
 };
 
@@ -295,6 +296,34 @@ static void wq_push(struct wq *q, struct work *w) { w->next = 0; if (q->tail) q-
 static struct work *wq_pop(struct wq *q) { struct work *w = q->head; if (w) { q->head = w->next; if (!q->head) q->tail = 0; } return w; }
 static struct work *mkwork(int type) { struct work *w = zalloc(sizeof *w); w->type = type; return w; }
 
+static int wq_remove(struct wq *q, struct work *work) {
+    struct work *prev = 0;
+    for (struct work *w = q->head; w; prev = w, w = w->next) {
+        if (w != work) continue;
+        if (prev) prev->next = w->next;
+        else q->head = w->next;
+        if (q->tail == w) q->tail = prev;
+        w->next = 0;
+        return 1;
+    }
+    return 0;
+}
+
+static void queue_death(struct ref *r) {
+    if (!r->death) return;
+    r->death->type = W_DEAD_BINDER;
+    wq_push(&r->proc->todo, r->death);
+}
+
+static void cancel_death(struct ref *r) {
+    struct work *death = r->death;
+    if (!death) return;
+    if (death->type == W_DEAD_BINDER && !wq_remove(&r->proc->todo, death))
+        wq_remove(&r->proc->delivered_deaths, death);
+    r->death = 0;
+    free(death);
+}
+
 static void deliver(struct thread *th);
 static void kick_proc(struct proc *p);
 
@@ -359,6 +388,7 @@ static struct ref *ref_get(struct proc *p, u32 desc) { return desc < p->nrefs ? 
 
 static void ref_delete(struct ref *r) {
     struct node *n = r->node;
+    cancel_death(r);
     struct ref **pp = &n->refs; while (*pp && *pp != r) pp = &(*pp)->next_in_node;
     if (*pp) *pp = r->next_in_node;
     n->nrefs--;
@@ -743,9 +773,12 @@ static void deliver(struct thread *th) {
         case W_COMPLETE: br[k++] = BR_TRANSACTION_COMPLETE; break;
         case W_ERROR: br[k++] = w->err; break;
         case W_NODE: w->node->queued = 0; k += emit_node(w->node, br + k); node_free_if_unused(w->node); break;
-        case W_DEAD_BINDER: br[k] = BR_DEAD_BINDER; memcpy(br + k + 1, &w->cookie, 8); k += 3;
+        case W_DEAD_BINDER:
+        case W_DEAD_BINDER_AND_CLEAR:
+            br[k] = BR_DEAD_BINDER; memcpy(br + k + 1, &w->cookie, 8); k += 3;
+            wq_push(&p->delivered_deaths, w);
             stop = 1;       /* the death recipient may make calls of its own: nothing may follow it in this batch (as in the driver) */
-            break;
+            continue;
         case W_CLEAR_DONE: br[k] = BR_CLEAR_DEATH_NOTIFICATION_DONE; memcpy(br + k + 1, &w->cookie, 8); k += 3; break;
         case W_TXN: t = w->t; break;
         }
@@ -856,18 +889,40 @@ static void do_bcs(struct thread *th, u32 *c, int words) {
         case BC_EXIT_LOOPER: th->looper |= 4; break;
         case BC_REQUEST_DEATH_NOTIFICATION: {
             struct ref *r = ref_get(p, (u32)a);
-            if (!r) break;
-            r->has_death = 1; r->death = b;
-            if (!r->node->owner) { struct work *w = mkwork(W_DEAD_BINDER); w->cookie = b; wq_push(&p->todo, w); kick_proc(p); }
+            if (!r || r->death) break;
+            r->death = mkwork(W_DEATH_IDLE);
+            r->death->cookie = b;
+            if (!r->node->owner) { queue_death(r); kick_proc(p); }
             break;
         }
         case BC_CLEAR_DEATH_NOTIFICATION: {
             struct ref *r = ref_get(p, (u32)a);
-            if (r) r->has_death = 0;
-            struct work *w = mkwork(W_CLEAR_DONE); w->cookie = b; wq_push(&th->todo, w);
+            if (!r || !r->death || r->death->cookie != b) break;
+            struct work *death = r->death;
+            r->death = 0;
+            if (death->type == W_DEAD_BINDER) {
+                // libbinder releases the weak reference when clear completes.
+                // Keep it alive until the queued or delivered death is acknowledged.
+                death->type = W_DEAD_BINDER_AND_CLEAR;
+            } else {
+                death->type = W_CLEAR_DONE;
+                wq_push(&th->todo, death);
+            }
             break;
         }
-        case BC_DEAD_BINDER_DONE: break;
+        case BC_DEAD_BINDER_DONE: {
+            struct work *death = p->delivered_deaths.head;
+            while (death && death->cookie != a) death = death->next;
+            if (!death) break;
+            wq_remove(&p->delivered_deaths, death);
+            if (death->type == W_DEAD_BINDER_AND_CLEAR) {
+                death->type = W_CLEAR_DONE;
+                wq_push(&th->todo, death);
+            } else {
+                death->type = W_DEATH_IDLE;
+            }
+            break;
+        }
         case BC_AEMU_FREE: { struct dbuf *d = (struct dbuf *)(uintptr_t)a; if (d && d->proc == p) buf_free(p, d); break; }
         case BC_AEMU_MAX_THREADS: p->max_threads = (int)a; break;
         case BC_AEMU_CTX_MGR: if (!ctx_mgr) { ctx_mgr = node_get(p, 0, 0, 1); ctx_mgr->local_strong++; ctx_mgr->has_strong = ctx_mgr->has_weak = 1; } break;
@@ -911,6 +966,8 @@ static void proc_release(struct proc *p) {
     V("pid %d died", p->pid);
     struct proc **pp = &procs; while (*pp && *pp != p) pp = &(*pp)->next; if (*pp) *pp = p->next;
     while (p->threads) thread_release(p->threads);
+    for (u32 i = 0; i < p->nrefs; i++) if (p->refs[i]) cancel_death(p->refs[i]);
+    for (struct work *w; (w = wq_pop(&p->delivered_deaths));) free(w);
     for (struct work *w; (w = wq_pop(&p->todo));) {
         if (w->type == W_TXN) txn_fail(w->t, BR_DEAD_REPLY);
         else if (w->type == W_NODE) w->node->queued = 0;
@@ -928,9 +985,7 @@ static void proc_release(struct proc *p) {
         if (n->pend_strong) { n->pend_strong = 0; n->local_strong--; }
         if (n->pend_weak) { n->pend_weak = 0; n->local_weak--; }
         for (struct work *w; (w = wq_pop(&n->async));) { txn_free(w->t); free(w); }
-        for (struct ref *r = n->refs; r; r = r->next_in_node) if (r->has_death) {
-            struct work *w = mkwork(W_DEAD_BINDER); w->cookie = r->death; wq_push(&r->proc->todo, w);
-        }
+        for (struct ref *r = n->refs; r; r = r->next_in_node) queue_death(r);
         if (ctx_mgr == n) ctx_mgr = 0;
         if (!n->nrefs && !n->local_strong) free(n);
     }

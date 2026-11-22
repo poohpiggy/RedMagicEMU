@@ -2,14 +2,19 @@
 package app.aemu.stub;
 
 import android.location.Location;
+import android.location.provider.IProviderRequestListener;
+import android.location.provider.ProviderRequest;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
 
+import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
+import java.nio.file.Paths;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.io.File;
@@ -29,6 +34,7 @@ public final class LocationStub {
     private static final String PACKAGE = "android";
     private static final long RETRY_MS = 1000;
     private static final long CHECK_MS = 1000;
+    private static final long MAX_FIX_AGE_NANOS = 30_000_000_000L;
     private static final File LOCATION_FILE = new File("/dev/aemu_location");
 
     private final Handler handler;
@@ -37,13 +43,17 @@ public final class LocationStub {
     private final Method addTestProvider;
     private final Method setTestProviderEnabled;
     private final Method setTestProviderLocation;
+    private final Method addProviderRequestListener;
+    private final Method removeProviderRequestListener;
     private final Object providerProperties;
+    private final LocationDemand demand = new LocationDemand(Paths.get("/dev/aemu_location_demand"));
 
     private IBinder binder;
     private Object manager;
+    private IProviderRequestListener demandListener;
     private boolean configured;
-    private boolean providerEnabled;
     private String lastProblem;
+    private String lastDemandProblem;
     private String lastLocation;
 
     private LocationStub() throws Exception {
@@ -60,25 +70,30 @@ public final class LocationStub {
         builderClass.getMethod("setHasSatelliteRequirement", boolean.class).invoke(builder, true);
         providerProperties = builderClass.getMethod("build").invoke(builder);
 
-        addTestProvider = Class.forName("android.location.ILocationManager").getMethod(
+        Class<?> locationManager = Class.forName("android.location.ILocationManager");
+        addTestProvider = locationManager.getMethod(
                 "addTestProvider",
                 String.class,
                 Class.forName("android.location.provider.ProviderProperties"),
                 java.util.List.class,
                 String.class,
                 String.class);
-        setTestProviderEnabled = Class.forName("android.location.ILocationManager").getMethod(
+        setTestProviderEnabled = locationManager.getMethod(
                 "setTestProviderEnabled",
                 String.class,
                 boolean.class,
                 String.class,
                 String.class);
-        setTestProviderLocation = Class.forName("android.location.ILocationManager").getMethod(
+        setTestProviderLocation = locationManager.getMethod(
                 "setTestProviderLocation",
                 String.class,
                 Location.class,
                 String.class,
                 String.class);
+        addProviderRequestListener = locationManager.getMethod(
+                "addProviderRequestListener", IProviderRequestListener.class);
+        removeProviderRequestListener = locationManager.getMethod(
+                "removeProviderRequestListener", IProviderRequestListener.class);
     }
 
     private void poll() {
@@ -93,7 +108,8 @@ public final class LocationStub {
                 }
             }
             if (manager != null && !configured) configure();
-            if (manager != null && configured) publishLocation();
+            refreshDemand();
+            if (configured && demand.isRequested()) publishLocation();
             problem(null);
         } catch (Throwable failure) {
             reset();
@@ -111,19 +127,59 @@ public final class LocationStub {
             String message = String.valueOf(unwrap(failure));
             if (!message.contains("already exists")) throw failure;
         }
+        // Observe the framework's effective GPS request after the manager exists.
+        // Enabling the test provider afterwards lets its current clients become active.
+        demandListener = new IProviderRequestListener.Stub() {
+            @Override
+            public void onProviderRequestChanged(String provider, ProviderRequest request) {
+                if (!PROVIDER.equals(provider)) return;
+                handler.post(() -> {
+                    if (demandListener == this) setDemand(request.isActive());
+                });
+            }
+        };
+        addProviderRequestListener.invoke(manager, demandListener);
         setTestProviderEnabled.invoke(manager, PROVIDER, true, PACKAGE, null);
-        providerEnabled = true;
         configured = true;
         System.out.println("aemu-location: enabled " + PROVIDER);
         System.out.flush();
     }
 
     private void reset() {
+        if (demandListener != null && binder != null && binder.isBinderAlive()) {
+            try {
+                removeProviderRequestListener.invoke(manager, demandListener);
+            } catch (ReflectiveOperationException failure) {
+                problem(unwrap(failure));
+            }
+        }
+        demandListener = null;
+        setDemand(false);
         binder = null;
         manager = null;
         configured = false;
-        providerEnabled = false;
         lastLocation = null;
+    }
+
+    private void setDemand(boolean active) {
+        if (!demand.setRequested(active)) return;
+        System.out.println("aemu-location: GPS request " + (active ? "active" : "idle"));
+        System.out.flush();
+        refreshDemand();
+    }
+
+    private void refreshDemand() {
+        try {
+            demand.refresh(SystemClock.elapsedRealtime());
+            lastDemandProblem = null;
+        } catch (IOException failure) {
+            String message = failure.toString();
+            if (!message.equals(lastDemandProblem)) {
+                lastDemandProblem = message;
+                System.out.println("aemu-location: demand write failed: " + message);
+                System.out.flush();
+            }
+        }
     }
 
     private void publishLocation() throws Exception {
@@ -135,34 +191,44 @@ public final class LocationStub {
         } catch (NoSuchFileException missing) {
             return;
         }
-        if (text.equals(lastLocation)) return;
-        if (text.equals("0")) {
-            if (providerEnabled) {
-                setTestProviderEnabled.invoke(manager, PROVIDER, false, PACKAGE, null);
-                providerEnabled = false;
-                System.out.println("aemu-location: disabled " + PROVIDER);
-                System.out.flush();
-            }
-            lastLocation = text;
-            return;
-        }
-        String[] parts = text.split("\\s+");
-        if (parts.length != 7 || !parts[0].equals("1")) return;
-        Location location = new Location(PROVIDER);
-        location.setLatitude(Double.parseDouble(parts[1]));
-        location.setLongitude(Double.parseDouble(parts[2]));
-        if (!parts[3].equals("null")) location.setAltitude(Double.parseDouble(parts[3]));
-        location.setAccuracy(Float.parseFloat(parts[4]));
-        location.setElapsedRealtimeNanos(Long.parseLong(parts[5]));
-        location.setTime(Long.parseLong(parts[6]));
-        if (!providerEnabled) {
-            setTestProviderEnabled.invoke(manager, PROVIDER, true, PACKAGE, null);
-            providerEnabled = true;
-        }
+        if (text.equals(lastLocation) || text.equals("0")) return;
+        Location location = parseLocation(text);
+        if (location == null) return;
         setTestProviderLocation.invoke(manager, PROVIDER, location, PACKAGE, null);
         lastLocation = text;
         System.out.println("aemu-location: position synchronized");
         System.out.flush();
+    }
+
+    private static Location parseLocation(String text) {
+        String[] parts = text.split("\\s+");
+        if (parts.length != 7 || !parts[0].equals("1")) return null;
+        try {
+            double latitude = Double.parseDouble(parts[1]);
+            double longitude = Double.parseDouble(parts[2]);
+            Double altitude = parts[3].equals("null") ? null : Double.valueOf(parts[3]);
+            float accuracy = Float.parseFloat(parts[4]);
+            long elapsedNanos = Long.parseLong(parts[5]);
+            long timeMillis = Long.parseLong(parts[6]);
+            long nowNanos = SystemClock.elapsedRealtimeNanos();
+            if (!Double.isFinite(latitude) || latitude < -90 || latitude > 90
+                    || !Double.isFinite(longitude) || longitude < -180 || longitude > 180
+                    || (altitude != null && !Double.isFinite(altitude))
+                    || !Float.isFinite(accuracy) || accuracy < 0
+                    || elapsedNanos <= 0 || elapsedNanos > nowNanos
+                    || nowNanos - elapsedNanos > MAX_FIX_AGE_NANOS || timeMillis <= 0) return null;
+
+            Location location = new Location(PROVIDER);
+            location.setLatitude(latitude);
+            location.setLongitude(longitude);
+            if (altitude != null) location.setAltitude(altitude);
+            location.setAccuracy(accuracy);
+            location.setElapsedRealtimeNanos(elapsedNanos);
+            location.setTime(timeMillis);
+            return location;
+        } catch (NumberFormatException malformed) {
+            return null;
+        }
     }
 
     private void problem(Throwable failure) {

@@ -1,4 +1,4 @@
-/* Guest AVC component backed by the Android host encoder for high frame rates. */
+/* Guest AVC component backed by the Android host encoder. */
 #include <__config_site>
 #undef _LIBCPP_ABI_NAMESPACE
 #define _LIBCPP_ABI_NAMESPACE __1
@@ -7,7 +7,6 @@
 #include <C2PlatformSupport.h>
 #include <SimpleC2Component.h>
 #include <android/log.h>
-#include <arm_neon.h>
 #include <atomic>
 #include <cstring>
 #include <cstdio>
@@ -17,6 +16,7 @@
 #include <sys/time.h>
 #include <sys/un.h>
 #include <vector>
+#include "camera_encode_chroma.h"
 #include "camera_encode_wire.h"
 
 namespace {
@@ -34,7 +34,7 @@ bool profile(const std::shared_ptr<C2ComponentInterface> &intf, camera_encode_op
     // Nubia passes the lower bound of its 50–60 fps sensor range to MediaRecorder.
     // The recording still carries the actual timestamps of the delivered frames.
     if (query != C2_OK || !size || !rate || !bitrate ||
-        (rate.value != 50.0f && rate.value != 60.0f && rate.value != 120.0f)) return false;
+        !camera_encode_frame_rate_supported(rate.value)) return false;
     *config = {RME_CAMERA_ENCODE_MAGIC, size.width, size.height, (uint32_t)rate.value, bitrate.value};
     return size.width >= 1920 && size.height >= 1080 && camera_encode_dimensions(config);
 }
@@ -125,10 +125,18 @@ protected:
         if (status != VIDEO_OK) { fail(work, C2_TIMED_OUT); return; }
         if (hasFrame) pending.emplace(timestamp, index);
         bool ended = false;
+        unsigned emptyPolls = 0;
         for (int retry = 0; retry < 500 && !ended; ++retry) {
             status = receive(work, pool, &ended);
             if (status == VIDEO_ERROR) { fail(work, C2_CORRUPTED); return; }
-            if (!eos && status == VIDEO_AGAIN) break;
+            if (!eos && status == VIDEO_AGAIN) {
+                // Byte-buffer input can fill the client pool before the host
+                // publishes its first sample. Keep draining briefly so a
+                // completion can release a slot without another submission.
+                if (config.fps != 30 || pending.size() < 4 || ++emptyPolls >= 32) break;
+            } else {
+                emptyPolls = 0;
+            }
         }
         if (eos && (!ended || !pending.empty())) { fail(work, C2_TIMED_OUT); return; }
         if (eos && !work->workletsProcessed) complete(work, nullptr, true, false);
@@ -167,23 +175,8 @@ private:
         uint8_t *out = input.data();
         for (uint32_t row = 0; row < config.height; ++row)
             std::memcpy(out + row * config.width, py + row * y.rowInc, config.width);
-        out += config.width * config.height;
-        for (uint32_t row = 0; row < config.height / 2; ++row) {
-            const uint8_t *su = pu + row * u.rowInc;
-            const uint8_t *sv = pv + row * v.rowInc;
-            uint32_t x = 0;
-            if (u.colInc == 1 && v.colInc == 1) {
-                for (; x + 16 <= config.width / 2; x += 16) {
-                    const uint8x16x2_t uv = {{vld1q_u8(su + x), vld1q_u8(sv + x)}};
-                    vst2q_u8(out + 2 * x, uv);
-                }
-            }
-            for (; x < config.width / 2; ++x) {
-                out[2 * x] = su[x * u.colInc];
-                out[2 * x + 1] = sv[x * v.colInc];
-            }
-            out += config.width;
-        }
+        copyCameraChroma(out + config.width * config.height, pu, pv, layout, view.crop(),
+                         config.width, config.height);
         return true;
     }
 

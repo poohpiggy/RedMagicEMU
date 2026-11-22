@@ -100,6 +100,11 @@ public final class RadioDataLteTest {
             check("0\n".equals(new String(Files.readAllBytes(gate), StandardCharsets.US_ASCII)),
                     "mobile-data-off left the Internet gate open");
 
+            data.setupDataCall(18, 0, null, false, 0, null, null, 0, null, false);
+            check(response[0].error == RadioError.INVALID_STATE, "data setup succeeded while disallowed");
+            check(((SetupDataCallResult) value[0]).suggestedRetryTime == -1,
+                    "an LTE failure should use framework backoff instead of retrying immediately");
+
             data.setDataAllowed(15, true);
             data.setupDataCall(16, 0, null, false, 0, null, null, 19, null, true);
             check(response[0].error == RadioError.NONE, "data setup after re-enable failed");

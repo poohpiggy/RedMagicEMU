@@ -1,0 +1,21 @@
+--- a/guest/vulkan_enc/DescriptorSetVirtualization.cpp
++++ b/guest/vulkan_enc/DescriptorSetVirtualization.cpp
+@@ -63,8 +63,6 @@
+ 
+     const auto& layoutInfo = *(as_goldfish_VkDescriptorSetLayout(setLayout)->layoutInfo);
+ 
+-    initDescriptorWriteTable(layoutInfo.bindings, set->allWrites);
+-
+     for (size_t i = 0; i < layoutInfo.bindings.size(); ++i) {
+         // Bindings can be sparsely defined
+         const auto& binding = layoutInfo.bindings[i];
+@@ -511,6 +509,9 @@
+         pSets[i] = newSet;
+ 
+         fillDescriptorSetInfoForPool(pool, pAllocateInfo->pSetLayouts[i], newSet);
++        // Only batched sets retain descriptor writes for submission.
++        auto* reified = as_goldfish_VkDescriptorSet(newSet)->reified;
++        initDescriptorWriteTable(reified->bindings, reified->allWrites);
+     }
+ 
+     return VK_SUCCESS;

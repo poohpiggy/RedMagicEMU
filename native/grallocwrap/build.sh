@@ -3,7 +3,7 @@
 # gralloc of the native arm64 engine (see gralloc_wrap.c): sh build.sh <kernel tag> builds it into that kernel's guest
 # files as vendor/lib64/hw/gralloc.default.so; AOSP's own module has to be there as vendor/lib64/libgralloc_aosp.so (outside hw/, where the tree fixer sets aside every gralloc but the default).
 TAG=${1:?usage: sh build.sh <kernel tag>}
-if [ "$TAG" = 36 ]; then DEFS="${DEFS:-} -DAEMU_META"; fi
+if [ "$TAG" = 36 ]; then DEFS="${DEFS:-} -DAEMU_META -DAEMU_VIDEO_NV12"; fi
 NDK=${NDK:-$ANDROID_NDK_HOME}
 BIN="$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin"
 [ -x "$BIN/clang" ] || BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"

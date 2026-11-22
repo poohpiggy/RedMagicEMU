@@ -8,9 +8,13 @@ connection/helper returns `VK_ERROR_DEVICE_LOST`, and a null native handle or
 zero host handle returns `VK_ERROR_INVALID_EXTERNAL_HANDLE`. It does not invent
 a host ID, import a buffer, alter a Guest, or replace the host's validation.
 
-The CPU-only test extracts the real entry checkpoint and supplies a fake
-gralloc helper. The unpatched version fails; the patched version rejects the
-failure cases while ordinary images and a fake nonzero helper result proceed:
+The AHardwareBuffer properties query also checks the host handle before reading
+format metadata. An AHB from the NX809J Guest allocator with no gfxstream host
+handle returns `VK_ERROR_INVALID_EXTERNAL_HANDLE` before the format lookup.
+
+The CPU-only test extracts both entry checkpoints and supplies a fake gralloc
+helper. It verifies early rejection and exercises the ordinary image path and
+the valid-handle properties path.
 
 ```sh
 python3 tools/diagnostics/gfxstream-native-buffer-validation/run.py \

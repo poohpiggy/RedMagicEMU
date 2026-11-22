@@ -52,6 +52,11 @@ for test in socket_test socket_server_test; do
 done
 "$cxx" -std=c++17 -Wall -Wextra -Werror "$here/vulkan_socket_test.cpp" -pthread -o "$out/vulkan_socket_test"
 "$out/vulkan_socket_test"
+sed -n '/^    static bool publishSharedBlob(/,/^    void on_vkGetPhysicalDeviceMemoryProperties(/p' \
+    "$here/patch_shared_memory_host.py" | sed '$d' > "$out/shared_blob_publish.inc"
+"$cxx" -std=c++17 -Wall -Wextra -Werror -rdynamic -I"$out" \
+    "$here/shared_blob_test.cpp" "$here/shared_memory.cpp" -ldl -pthread -o "$out/shared_blob_test"
+"$out/shared_blob_test"
 python3 - "$here/../../../native/hwchal/hwc.c" "$out/hwc_query.inc" <<'PY'
 from pathlib import Path
 import sys

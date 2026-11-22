@@ -12,6 +12,7 @@ original, output = map(Path, sys.argv[1:])
 source = original / "patched-source/guest/vulkan_enc"
 patched = output / "patched-source/guest/vulkan_enc"
 shutil.copytree(source, patched)
+shutil.copyfile(Path(__file__).with_name("shared_memory_wire.h"), patched / "shared_memory_wire.h")
 
 
 def replace(text, old, new):
@@ -35,13 +36,14 @@ header = replace(header, "    struct VkDeviceMemory_Info {",
 
 tracker = (source / "ResourceTracker.cpp").read_text()
 tracker = replace(tracker, '#include "ResourceTracker.h"', '''#include "ResourceTracker.h"
+#include "shared_memory_wire.h"
 #include <cerrno>
 #include <linux/dma-buf.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
-extern "C" int rme_vulkan_memory_fd(uint64_t memory, int* cached);
+extern "C" int rme_vulkan_memory_fd(uint64_t memory, int* mode);
 ''')
 tracker = replace(tracker, "bool ResourceTracker::usingDirectMapping() const { return true; }",
                   """bool ResourceTracker::usingDirectMapping() const { return true; }
@@ -49,20 +51,22 @@ tracker = replace(tracker, "bool ResourceTracker::usingDirectMapping() const { r
 struct ResourceTracker::RmeSharedMapping {
     const int fd;
     const bool cached;
+    const bool needsDmaSync;
     void* base = MAP_FAILED;
     size_t length = 0;
     VkDeviceSize mapBegin = 0;
     VkDeviceSize mapEnd = 0;
     bool cpuAccess = false;
 
-    RmeSharedMapping(int descriptor, bool useCache) : fd(descriptor), cached(useCache) {}
+    RmeSharedMapping(int descriptor, int mode) : fd(descriptor),
+        cached(mode == RME_MEMORY_CACHED), needsDmaSync(mode == RME_MEMORY_DMA_BUF) {}
     ~RmeSharedMapping() {
         unmap();
         close(fd);
     }
 
     bool sync(bool begin) {
-        if (cached || base == MAP_FAILED || begin == cpuAccess) return true;
+        if (!needsDmaSync || base == MAP_FAILED || begin == cpuAccess) return true;
         dma_buf_sync operation{};
         operation.flags = DMA_BUF_SYNC_RW | (begin ? DMA_BUF_SYNC_START : DMA_BUF_SYNC_END);
         int result;
@@ -126,8 +130,8 @@ tracker = replace(tracker, """    // Host visible memory with direct mapping
                   """    VkResult result = enc->vkAllocateMemory(device, &finalAllocInfo, pAllocator,
                                             pMemory, true);
     if (result != VK_SUCCESS) _RETURN_FAILURE_WITH_DEVICE_MEMORY_REPORT(result);
-    int cached = 0;
-    const int fd = rme_vulkan_memory_fd(get_host_u64_VkDeviceMemory(*pMemory), &cached);
+    int mode = RME_MEMORY_DMA_BUF;
+    const int fd = rme_vulkan_memory_fd(get_host_u64_VkDeviceMemory(*pMemory), &mode);
     if (fd < 0) {
         enc->vkFreeMemory(device, *pMemory, pAllocator, true);
         *pMemory = VK_NULL_HANDLE;
@@ -137,7 +141,7 @@ tracker = replace(tracker, """    // Host visible memory with direct mapping
         AutoLock<RecursiveLock> lock(mLock);
         setDeviceMemoryInfo(device, *pMemory, finalAllocInfo.allocationSize, nullptr,
                             finalAllocInfo.memoryTypeIndex, nullptr, false, ZX_HANDLE_INVALID, nullptr);
-        info_VkDeviceMemory[*pMemory].rmeMapping = std::make_shared<RmeSharedMapping>(fd, cached != 0);
+        info_VkDeviceMemory[*pMemory].rmeMapping = std::make_shared<RmeSharedMapping>(fd, mode);
     }""")
 tracker = replace(tracker, "    auto& deviceMemoryInfo = deviceMemoryInfoIt->second;",
                   """    auto& deviceMemoryInfo = deviceMemoryInfoIt->second;

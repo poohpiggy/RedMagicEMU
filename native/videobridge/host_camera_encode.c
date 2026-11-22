@@ -1,4 +1,4 @@
-/* Host AVC encoder for the NX809J Guest camera using public Android Media NDK. */
+/* Host AVC encoder for the NX809J Guest using public Android Media NDK. */
 #define _GNU_SOURCE
 #include "camera_encode_wire.h"
 
@@ -133,9 +133,15 @@ static void encode_client(int fd, const char *name, pid_t parent) {
 }
 
 int main(int argc, char **argv) {
-    if (argc == 3 && !strcmp(argv[1], "--probe")) {
+    if ((argc == 3 || argc == 4) && !strcmp(argv[1], "--probe")) {
+        uint32_t fps = 60;
+        if (argc == 4) {
+            if (!strcmp(argv[3], "30")) fps = 30;
+            else if (strcmp(argv[3], "60")) return 2;
+        }
         const struct camera_encode_open config = {
-            .magic = RME_CAMERA_ENCODE_MAGIC, .width = 1920, .height = 1080, .fps = 60, .bitrate = 20000000,
+            .magic = RME_CAMERA_ENCODE_MAGIC, .width = 1920, .height = 1080,
+            .fps = fps, .bitrate = fps == 30 ? 6220800 : 20000000,
         };
         struct camera_encode_format reply = {0};
         AMediaCodec *codec = start_encoder(argv[2], &config, &reply);

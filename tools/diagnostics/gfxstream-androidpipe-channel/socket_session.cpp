@@ -11,13 +11,21 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <vector>
+#if defined(__ANDROID__) && defined(RME_VULKAN_REPLY_PIPE_TEST)
+#include <android/log.h>
+#endif
 
 namespace rme {
 namespace {
 constexpr size_t kLimit = 65536;
 constexpr char kGles[] = "pipe:opengles";
+#ifdef RME_VULKAN_REPLY_PIPE_TEST
+constexpr char kReplyPipe[] = "pipe:RmeVulkanReplyPipe";
+constexpr char kDuplexPipe[] = "pipe:RmeVulkanDuplexPipe";
+#endif
 constexpr char kProcess[] = "pipe:GLProcessPipe";
 constexpr char kSharedMemory[] = "pipe:RmeVulkanMemory";
+constexpr char kSharedMemory2[] = "pipe:RmeVulkanMemory2";
 bool prefixOf(const std::vector<uint8_t>& bytes, const char* name, size_t n) {
     return bytes.size() <= n && (bytes.empty() || std::memcmp(bytes.data(), name, bytes.size()) == 0);
 }
@@ -97,24 +105,40 @@ bool SocketSession::pump(short events) {
         auto nul = std::find(s.in.begin(), s.in.end(), 0);
         if (nul == s.in.end()) {
             if (!prefixOf(s.in, kGles, sizeof(kGles)) &&
+#ifdef RME_VULKAN_REPLY_PIPE_TEST
+                !prefixOf(s.in, kReplyPipe, sizeof(kReplyPipe)) &&
+                !prefixOf(s.in, kDuplexPipe, sizeof(kDuplexPipe)) &&
+#endif
                 !prefixOf(s.in, kProcess, sizeof(kProcess)) &&
-                !prefixOf(s.in, kSharedMemory, sizeof(kSharedMemory))) return false;
+                !prefixOf(s.in, kSharedMemory, sizeof(kSharedMemory)) &&
+                !prefixOf(s.in, kSharedMemory2, sizeof(kSharedMemory2))) return false;
             return true;
         }
         size_t n = static_cast<size_t>(nul - s.in.begin()) + 1;
-        if (n == sizeof(kSharedMemory) && !std::memcmp(s.in.data(), kSharedMemory, n)) {
+        const bool memory_v2 = n == sizeof(kSharedMemory2) && !std::memcmp(s.in.data(), kSharedMemory2, n);
+        if (memory_v2 || (n == sizeof(kSharedMemory) && !std::memcmp(s.in.data(), kSharedMemory, n))) {
             if (s.in.size() < n + sizeof(uint64_t)) return true;
             const uint64_t owner = s.principal ? s.principal->puid() : 0;
             if (!owner || s.in.size() != n + sizeof(uint64_t)) return false;
             uint64_t memory;
             std::memcpy(&memory, s.in.data() + n, sizeof(memory));
-            bool cached = false;
-            const int fd = duplicateSharedMemory(owner, memory, &cached);
-            sendSharedMemory(s.socket, fd, cached);
+            RmeSharedMemoryMode mode = RME_MEMORY_DMA_BUF;
+            const int fd = duplicateSharedMemory(owner, memory, &mode);
+            if (!memory_v2 && mode == RME_MEMORY_COHERENT) mode = RME_MEMORY_DMA_BUF;
+            sendSharedMemory(s.socket, fd, mode);
             if (fd >= 0) close(fd);
             return false;
         }
-        if (n == sizeof(kGles) && !std::memcmp(s.in.data(), kGles, n)) s.process = false;
+#ifdef RME_VULKAN_REPLY_PIPE_TEST
+        const bool replyPipe = n == sizeof(kReplyPipe) && !std::memcmp(s.in.data(), kReplyPipe, n);
+        const bool duplexPipe = n == sizeof(kDuplexPipe) && !std::memcmp(s.in.data(), kDuplexPipe, n);
+#else
+        constexpr bool replyPipe = false;
+        constexpr bool duplexPipe = false;
+#endif
+        const bool pipeTransport = replyPipe || duplexPipe;
+        if (pipeTransport && (!s.principal || s.in.size() != n)) return false;
+        if (pipeTransport || (n == sizeof(kGles) && !std::memcmp(s.in.data(), kGles, n))) s.process = false;
         else if (n == sizeof(kProcess) && !std::memcmp(s.in.data(), kProcess, n)) s.process = true;
         else return false;
         if (s.process) {
@@ -123,9 +147,24 @@ bool SocketSession::pump(short events) {
             PrincipalScope scope(s.principal);
             // The worker validates the bound process ID before decoding Vulkan.
             const int fd = s.principal ? s.socket : -1;
-            VulkanSocketScope socketScope(fd, s.in, n);
+            auto transport = duplexPipe ? VulkanTransport::DuplexPipe :
+                             replyPipe ? VulkanTransport::ReplyPipe : VulkanTransport::Socket;
+            VulkanSocketScope socketScope(fd, s.in, n, transport);
             s.pipe = s.device.open(Service::OpenGLES);
             s.direct = socketScope.socket();
+            if (pipeTransport && !s.direct) return false;
+#if defined(__ANDROID__) && defined(RME_VULKAN_REPLY_PIPE_TEST)
+            if (replyPipe) {
+                static const int logged = __android_log_write(ANDROID_LOG_INFO, "RedMagicEMU-Vulkan",
+                                                              "Vulkan reply pipe active");
+                (void)logged;
+            }
+            if (duplexPipe) {
+                static const int logged = __android_log_write(ANDROID_LOG_INFO, "RedMagicEMU-Vulkan",
+                                                              "Vulkan duplex pipe active");
+                (void)logged;
+            }
+#endif
         }
         if (!s.pipe) return false;
         if (s.direct) {

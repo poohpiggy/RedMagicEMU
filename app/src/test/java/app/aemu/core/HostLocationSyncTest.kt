@@ -29,11 +29,38 @@ class HostLocationSyncTest {
         assertNull(HostLocationProtocol.parse("1 nope 0 null 1 1 1\n"))
     }
 
-    @Test fun locationBridgeUsesTheSameEnableGateAsMotionSensors() {
-        assertTrue(hostLocationCanListen(true, true, true, true))
-        assertFalse(hostLocationCanListen(true, true, false, true))
-        assertFalse(hostLocationCanListen(true, false, true, true))
-        assertFalse(hostLocationCanListen(false, true, true, true))
-        assertFalse(hostLocationCanListen(true, true, true, false))
+    @Test fun activeGuestRequestNeedsARunningVisibleEnabledAndPermittedBridge() {
+        assertTrue(hostLocationCanListen(true, true, true, true, true))
+        assertFalse(hostLocationCanListen(true, true, false, true, true))
+        assertFalse(hostLocationCanListen(true, false, true, true, true))
+        assertFalse(hostLocationCanListen(false, true, true, true, true))
+        assertFalse(hostLocationCanListen(true, true, true, true, false))
+    }
+
+    @Test fun idleGuestDoesNotActivateHostLocation() {
+        assertFalse(hostLocationCanListen(
+            running = true, visible = true, enabled = true, demanded = false, permission = true,
+        ))
+    }
+
+    @Test fun onlyAnUnexpiredBoundedGuestLeaseActivatesHostLocation() {
+        val now = 100_000L
+        assertTrue(HostLocationDemand.isActive("1 106000\n", now))
+        assertTrue(HostLocationDemand.isActive("1 100001\n", now))
+        assertFalse(HostLocationDemand.isActive("1 100001\n", now + 1))
+        assertFalse(HostLocationDemand.isActive("1 106001\n", now))
+        assertFalse(HostLocationDemand.isActive("1 9999999999999999999\n", now))
+        assertFalse(HostLocationDemand.isActive("1 100001\nextra", now))
+        assertFalse(HostLocationDemand.isActive("1 100001", now))
+        assertFalse(HostLocationDemand.isActive("0\n", now))
+        assertFalse(HostLocationDemand.isActive("", now))
+    }
+
+    @Test fun onlyRecentHostFixesCanBeForwarded() {
+        val now = 100_000_000_000L
+        assertTrue(HostLocationProtocol.isFresh(now - 30_000_000_000L, now))
+        assertFalse(HostLocationProtocol.isFresh(now - 30_000_000_001L, now))
+        assertFalse(HostLocationProtocol.isFresh(now + 1, now))
+        assertFalse(HostLocationProtocol.isFresh(0, 1))
     }
 }

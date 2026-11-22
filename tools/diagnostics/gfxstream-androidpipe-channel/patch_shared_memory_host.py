@@ -19,6 +19,7 @@ def replace(old, new):
 replace('#include "VkDecoderGlobalState.h"', '''#include "VkDecoderGlobalState.h"
 
 #include <android/hardware_buffer.h>
+#include <android/log.h>
 #include <cutils/native_handle.h>
 #include <dlfcn.h>
 #include <unistd.h>
@@ -111,24 +112,39 @@ replace('    void on_vkGetPhysicalDeviceMemoryProperties(\n', '''    static uint
     }
 
     static bool publishSharedBlob(AHardwareBuffer* buffer, VkDeviceSize size,
-                                  uint64_t owner, uint64_t boxed) {
+                                  uint64_t owner, uint64_t boxed,
+                                  const void* coherentMapping = nullptr) {
         AHardwareBuffer_Desc desc{};
         AHardwareBuffer_describe(buffer, &desc);
         using GetHandle = const native_handle_t* (*)(const AHardwareBuffer*);
         static const auto getHandle = reinterpret_cast<GetHandle>(
             dlsym(RTLD_DEFAULT, "AHardwareBuffer_getNativeHandle"));
         const auto* handle = getHandle ? getHandle(buffer) : nullptr;
-        // The validated Adreno BLOB layout contains data and metadata fds.
         if (desc.format != AHARDWAREBUFFER_FORMAT_BLOB || desc.width < size ||
             desc.height != 1 || desc.layers != 1 ||
             !(desc.usage & AHARDWAREBUFFER_USAGE_GPU_DATA_BUFFER) ||
-            !handle || handle->numFds != 2 || handle->numInts != 26) {
+            !handle || handle->numFds <= 0) {
             return false;
         }
-        const auto bytes = lseek(handle->data[0], 0, SEEK_END);
-        if (bytes < 0 || static_cast<VkDeviceSize>(bytes) < size) return false;
-        return lseek(handle->data[0], 0, SEEK_SET) == 0 &&
-               rme::publishSharedMemory(owner, boxed, handle->data[0]);
+        if (coherentMapping) {
+            const int fd = rme::sharedBlobDataFd(coherentMapping, size, handle->data, handle->numFds);
+            if (fd >= 0) return rme::publishSharedMemory(owner, boxed, fd, true);
+        }
+        // Native handles are vendor-defined. Match the CPU mapping of this
+        // newly allocated BLOB before handing a descriptor to the Guest.
+        void* address = nullptr;
+        const int locked = AHardwareBuffer_lock(buffer, AHARDWAREBUFFER_USAGE_CPU_READ_RARELY,
+                                                -1, nullptr, &address);
+        const int fd = locked == 0
+            ? rme::sharedBlobDataFd(address, size, handle->data, handle->numFds) : -1;
+        const int unlocked = locked == 0 ? AHardwareBuffer_unlock(buffer, nullptr) : 0;
+        if (fd < 0 || unlocked != 0) {
+            __android_log_print(ANDROID_LOG_WARN, "RedMagicEMU-Vulkan",
+                                "Shared BLOB mapping failed (fds=%d ints=%d lock=%d unlock=%d)",
+                                handle->numFds, handle->numInts, locked, unlocked);
+            return false;
+        }
+        return rme::publishSharedMemory(owner, boxed, fd);
     }
 
     void on_vkGetPhysicalDeviceMemoryProperties(
@@ -221,6 +237,7 @@ replace('        VkResult result = vk->vkAllocateMemory(device, &localAllocInfo,
         const bool cachedShare = sharedOwner && hostVisible && !rme::sharedMemoryUsesHardwareBuffer() &&
                                  !importCbInfoPtr && !createBlobInfoPtr;
         const VkDeviceSize guestSize = localAllocInfo.allocationSize;
+        bool coherentBlob = false;
         std::unique_ptr<AHardwareBuffer, decltype(&AHardwareBuffer_release)> blob(nullptr, AHardwareBuffer_release);
         VkImportAndroidHardwareBufferInfoANDROID importBlob{
             VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID};
@@ -238,6 +255,15 @@ replace('        VkResult result = vk->vkAllocateMemory(device, &localAllocInfo,
                 const VkResult allocated = allocateSharedBlob(vk, device, &localAllocInfo, &buffer);
                 blob.reset(buffer);
                 if (allocated != VK_SUCCESS) return allocated;
+#ifdef RME_VULKAN_COHERENT_AHB_TEST
+                // Temporary diagnostic build for the measured Adreno driver.
+                // Qualify the actual Vulkan mapping again for each allocation.
+                VkPhysicalDeviceProperties nativeProps{};
+                m_vk->vkGetPhysicalDeviceProperties(*physical, &nativeProps);
+                coherentBlob = nativeProps.vendorID == 0x5143 &&
+                               nativeProps.deviceID == 0x43051401 &&
+                               nativeProps.driverVersion == 0x802fa031;
+#endif
                 importBlob.buffer = buffer;
                 importBlob.pNext = localAllocInfo.pNext;
                 localAllocInfo.pNext = &importBlob;
@@ -257,7 +283,8 @@ replace('''        *pMemory = new_boxed_non_dispatchable_VkDeviceMemory(*pMemory
             const uint64_t boxed = (uint64_t)*pMemory;
             const bool published = cachedShare
                 ? rme::publishCachedSharedMemory(sharedOwner, boxed, memoryInfo.ptr, memoryInfo.size)
-                : publishSharedBlob(blob.get(), guestSize, sharedOwner, boxed);
+                : publishSharedBlob(blob.get(), guestSize, sharedOwner, boxed,
+                                    coherentBlob ? memoryInfo.ptr : nullptr);
             if (!published) {
                 freeMemoryLocked(vk, device, nativeMemory, pAllocator);
                 delete_VkDeviceMemory(*pMemory);

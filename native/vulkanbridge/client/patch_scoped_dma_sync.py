@@ -37,9 +37,9 @@ def apply(directory, trace=False):
 #include <unordered_set>
 
 static std::atomic<bool> rmeTrackDmaCommands{false};''')
-    t = replace(t, "        info_VkDeviceMemory[*pMemory].rmeMapping = std::make_shared<RmeSharedMapping>(fd, cached != 0);",
-                """        info_VkDeviceMemory[*pMemory].rmeMapping = std::make_shared<RmeSharedMapping>(fd, cached != 0);
-        if (!cached) rmeTrackDmaCommands.store(true, std::memory_order_relaxed);""")
+    t = replace(t, "        info_VkDeviceMemory[*pMemory].rmeMapping = std::make_shared<RmeSharedMapping>(fd, mode);",
+                """        info_VkDeviceMemory[*pMemory].rmeMapping = std::make_shared<RmeSharedMapping>(fd, mode);
+        if (mode == RME_MEMORY_DMA_BUF) rmeTrackDmaCommands.store(true, std::memory_order_relaxed);""")
 
     bind_functions = (
         ("vkBindBufferMemory", "VkBuffer", "buffer", "memory"),
@@ -181,7 +181,7 @@ bool ResourceTracker::syncSharedSubmission(VkQueue queue, uint32_t count, const 
         unsigned active = 0, touched = 0;
         for (const auto& [allocation, info] : info_VkDeviceMemory) {
             const auto& mapping = info.rmeMapping;
-            if (info.device == device && mapping && !mapping->cached && mapping->base != MAP_FAILED) {
+            if (info.device == device && mapping && mapping->needsDmaSync && mapping->base != MAP_FAILED) {
                 ++active;
                 if (memory.count(allocation)) ++touched;
             }
@@ -192,6 +192,8 @@ bool ResourceTracker::syncSharedSubmission(VkQueue queue, uint32_t count, const 
     for (VkDeviceMemory allocation : memory) {''')
     anchor = "bool ResourceTracker::syncSharedMemory(VkDevice device, bool cpuAccess) {"
     t = replace(t, anchor, methods + "\n" + anchor)
+    guard = anchor + "\n    AutoLock<RecursiveLock> lock(mLock);"
+    t = replace(t, guard, guard + "\n    if (!rmeTrackDmaCommands.load(std::memory_order_relaxed)) return true;")
 
     def inject(text, name, body):
         start = text.index(f" VkEncoder::{name}(")

@@ -26,6 +26,7 @@ static const VkFormat formats[] = { VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8A8
 struct ImageSlot {
     VkImage image;
     VkDeviceMemory memory;
+    VkCommandBuffer readback;
     bool acquired;
 };
 
@@ -42,7 +43,6 @@ struct Chain {
     void *pixels;
     VkFence complete;
     VkCommandPool pool;
-    VkCommandBuffer command;
     uint32_t family;
     uint32_t count;
     uint32_t next_slot;
@@ -318,53 +318,69 @@ int rme_readback_acquire(VkSwapchainKHR handle, uint64_t timeout, VkSemaphore se
 
 static VkResult setup_commands(struct Chain *chain, uint32_t family) {
     if (chain->pool && chain->family == family) return VK_SUCCESS;
-    if (chain->pool) vkDestroyCommandPool(chain->device, chain->pool, NULL);
-    chain->pool = VK_NULL_HANDLE;
+    if (chain->pool) {
+        vkDestroyCommandPool(chain->device, chain->pool, NULL);
+        chain->pool = VK_NULL_HANDLE;
+        for (uint32_t i = 0; i < chain->count; ++i) chain->slots[i].readback = VK_NULL_HANDLE;
+    }
     if (!chain->complete) {
         VkFenceCreateInfo fence = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         VkResult result = vkCreateFence(chain->device, &fence, NULL, &chain->complete);
         if (result != VK_SUCCESS) return result;
     }
     VkCommandPoolCreateInfo pool = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = family};
+        .queueFamilyIndex = family};
     VkResult result = vkCreateCommandPool(chain->device, &pool, NULL, &chain->pool);
-    if (result != VK_SUCCESS) return result;
-    VkCommandBufferAllocateInfo alloc = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool = chain->pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
-    chain->family = family;
-    return vkAllocateCommandBuffers(chain->device, &alloc, &chain->command);
+    if (result == VK_SUCCESS) chain->family = family;
+    return result;
 }
 
-static VkResult download(struct Chain *chain, VkQueue queue, VkImage image, const VkPresentInfoKHR *info) {
-    VK_FROM_HANDLE(vk_queue, vkq, queue);
-    VkResult result = setup_commands(chain, vkq->queue_family_index);
+static VkResult record_readback(struct Chain *chain, struct ImageSlot *slot) {
+    VkCommandBufferAllocateInfo alloc = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = chain->pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
+    VkCommandBuffer command;
+    VkResult result = vkAllocateCommandBuffers(chain->device, &alloc, &command);
     if (result != VK_SUCCESS) return result;
-    result = vkResetCommandBuffer(chain->command, 0);
-    if (result != VK_SUCCESS) return result;
-    VkCommandBufferBeginInfo begin = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
-    result = vkBeginCommandBuffer(chain->command, &begin);
-    if (result != VK_SUCCESS) return result;
+    VkCommandBufferBeginInfo begin = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    result = vkBeginCommandBuffer(command, &begin);
+    if (result != VK_SUCCESS) goto free_command;
     VkImageMemoryBarrier barrier = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
         .oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = image, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
-    vkCmdPipelineBarrier(chain->command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        .image = slot->image, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
         0, 0, NULL, 0, NULL, 1, &barrier);
     VkBufferImageCopy copy = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
         .imageExtent = {chain->extent.width, chain->extent.height, 1}};
-    vkCmdCopyImageToBuffer(chain->command, image, barrier.newLayout, chain->staging, 1, &copy);
+    vkCmdCopyImageToBuffer(command, slot->image, barrier.newLayout, chain->staging, 1, &copy);
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     barrier.dstAccessMask = 0;
     VkMemoryBarrier cpu = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
         .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
-    vkCmdPipelineBarrier(chain->command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
         0, 1, &cpu, 0, NULL, 1, &barrier);
-    result = vkEndCommandBuffer(chain->command);
+    result = vkEndCommandBuffer(command);
+    if (result == VK_SUCCESS) {
+        slot->readback = command;
+        return VK_SUCCESS;
+    }
+
+free_command:
+    vkFreeCommandBuffers(chain->device, chain->pool, 1, &command);
+    return result;
+}
+
+static VkResult download(struct Chain *chain, VkQueue queue, struct ImageSlot *slot, const VkPresentInfoKHR *info) {
+    VK_FROM_HANDLE(vk_queue, vkq, queue);
+    VkResult result = setup_commands(chain, vkq->queue_family_index);
     if (result != VK_SUCCESS) return result;
+    if (!slot->readback) {
+        result = record_readback(chain, slot);
+        if (result != VK_SUCCESS) return result;
+    }
     result = vkResetFences(chain->device, 1, &chain->complete);
     if (result != VK_SUCCESS) return result;
     VkPipelineStageFlags *stages = NULL;
@@ -375,7 +391,7 @@ static VkResult download(struct Chain *chain, VkQueue queue, VkImage image, cons
     }
     VkSubmitInfo submit = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .waitSemaphoreCount = info->waitSemaphoreCount,
         .pWaitSemaphores = info->pWaitSemaphores, .pWaitDstStageMask = stages,
-        .commandBufferCount = 1, .pCommandBuffers = &chain->command};
+        .commandBufferCount = 1, .pCommandBuffers = &slot->readback};
     result = vkQueueSubmit(queue, 1, &submit, chain->complete);
     free(stages);
     if (result != VK_SUCCESS) return result;
@@ -426,7 +442,7 @@ int rme_readback_present(VkQueue queue, const VkPresentInfoKHR *info, VkResult *
     if (info->swapchainCount == 1 && !info->pNext && !chain->retired) {
         uint32_t i = info->pImageIndices[0];
         if (i < chain->count && chain->slots[i].acquired) {
-            *result = download(chain, queue, chain->slots[i].image, info);
+            *result = download(chain, queue, &chain->slots[i], info);
             if (*result == VK_SUCCESS) *result = post_pixels(chain);
             chain->slots[i].acquired = false;
             if (*result != VK_SUCCESS) chain->retired = true;

@@ -1682,8 +1682,12 @@ static void on_crash(int sig, void *info, void *uc) {
     say("  backtrace:\n");
     u64 fp = c->regs[29];
     for (int i = 0; i < 24 && fp > 0x10000 && !(fp & 7); i++) {
-        u64 lr = ((u64 *)fp)[1]; u64 nfp = ((u64 *)fp)[0];
-        where(lr);
+        // A fault may have left the frame pointer in unmapped or unreadable memory.
+        u64 frame[2];
+        struct { void *b; u64 n; } l = { frame, sizeof frame }, r = { (void *)fp, sizeof frame };
+        if (S6(270 /*process_vm_readv*/, S0(172), &l, 1, &r, 1, 0) != sizeof frame) break;
+        u64 nfp = frame[0];
+        where(frame[1]);
         if (nfp <= fp) break;
         fp = nfp;
     }

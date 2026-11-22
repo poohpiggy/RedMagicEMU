@@ -1,6 +1,8 @@
 #include "shared_memory.h"
 
 #include <cerrno>
+#include <cinttypes>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -9,8 +11,13 @@
 #include <mutex>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
+#ifdef RME_VULKAN_COHERENT_AHB_TEST
+#include <android/log.h>
+#endif
 
 namespace rme {
 namespace {
@@ -19,6 +26,7 @@ struct Allocation {
     void* backing = nullptr;
     void* cache = nullptr;
     uint64_t size = 0;
+    RmeSharedMemoryMode mode = RME_MEMORY_DMA_BUF;
 };
 std::mutex memoryMutex;
 std::map<std::pair<uint64_t, uint64_t>, Allocation> allocations;
@@ -45,12 +53,65 @@ bool sharedMemoryUsesHardwareBuffer() {
     return mode() == Mode::HardwareBuffer;
 }
 
-bool publishSharedMemory(uint64_t owner, uint64_t memory, int fd) {
+int sharedBlobDataFd(const void* address, uint64_t size, const int* fds, int count) {
+    if (!address || !size || !fds || count <= 0) return -1;
+    FILE* maps = std::fopen("/proc/self/maps", "re");
+    if (!maps) return -1;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(address);
+    char* line = nullptr;
+    size_t capacity = 0;
+    int dataFd = -1;
+    while (getline(&line, &capacity, maps) >= 0) {
+        char* next;
+        const auto start = std::strtoull(line, &next, 16);
+        if (start > base) break;
+        if (start != base || *next != '-') continue;
+        uintptr_t end;
+        uint64_t offset, inode;
+        unsigned devMajor, devMinor;
+        char permissions[5];
+        if (std::sscanf(next + 1, "%" SCNxPTR " %4s %" SCNx64 " %x:%x %" SCNu64,
+                        &end, permissions, &offset, &devMajor, &devMinor, &inode) != 6 ||
+            end <= base || end - base < size || offset || !inode ||
+            permissions[0] != 'r' || permissions[3] != 's') break;
+        for (int i = 0; i < count; ++i) {
+            const int fd = fds[i];
+            struct stat backing{};
+            if (fstat(fd, &backing) != 0 || backing.st_ino != inode ||
+                major(backing.st_dev) != devMajor || minor(backing.st_dev) != devMinor) continue;
+            const int flags = fcntl(fd, F_GETFL);
+            if (flags < 0 || (flags & O_ACCMODE) != O_RDWR) continue;
+            const auto bytes = lseek(fd, 0, SEEK_END);
+            if (bytes >= 0 && static_cast<uint64_t>(bytes) >= size && lseek(fd, 0, SEEK_SET) == 0) {
+                dataFd = fd;
+                break;
+            }
+        }
+        break;
+    }
+    std::free(line);
+    std::fclose(maps);
+    return dataFd;
+}
+
+bool publishSharedMemory(uint64_t owner, uint64_t memory, int fd, bool coherent) {
     if (!owner || !memory) return false;
     const int copy = fcntl(fd, F_DUPFD_CLOEXEC, 0);
     if (copy < 0) return false;
     std::lock_guard lock(memoryMutex);
-    if (allocations.emplace(std::make_pair(owner, memory), Allocation{copy}).second) return true;
+    Allocation allocation{copy};
+    if (coherent) allocation.mode = RME_MEMORY_COHERENT;
+    if (allocations.emplace(std::make_pair(owner, memory), allocation).second) {
+#ifdef RME_VULKAN_COHERENT_AHB_TEST
+        static unsigned coherentCount = 0;
+        static unsigned fallbackCount = 0;
+        unsigned count = coherent ? ++coherentCount : ++fallbackCount;
+        if (count == 1 || count % 1024 == 0)
+            __android_log_print(ANDROID_LOG_INFO, "RedMagicEMU-Vulkan",
+                                "Shared BLOB %s count=%u", coherent ? "coherent" : "DMA-BUF fallback", count);
+#endif
+        return true;
+    }
     close(copy);
     return false;
 }
@@ -69,7 +130,8 @@ bool publishCachedSharedMemory(uint64_t owner, uint64_t memory, void* backing, u
         return false;
     }
     std::lock_guard lock(memoryMutex);
-    if (allocations.emplace(std::make_pair(owner, memory), Allocation{fd, backing, cache, size}).second) {
+    if (allocations.emplace(std::make_pair(owner, memory),
+                            Allocation{fd, backing, cache, size, RME_MEMORY_CACHED}).second) {
         caches.emplace(std::make_pair(owner, backing), memory);
         return true;
     }
@@ -91,11 +153,11 @@ void revokeSharedMemory(uint64_t owner, uint64_t memory) {
     allocations.erase(entry);
 }
 
-int duplicateSharedMemory(uint64_t owner, uint64_t memory, bool* cached) {
+int duplicateSharedMemory(uint64_t owner, uint64_t memory, RmeSharedMemoryMode* mode) {
     std::lock_guard lock(memoryMutex);
     const auto entry = allocations.find({owner, memory});
     if (entry == allocations.end()) return -1;
-    *cached = entry->second.backing != nullptr;
+    *mode = entry->second.mode;
     return fcntl(entry->second.fd, F_DUPFD_CLOEXEC, 0);
 }
 
@@ -112,8 +174,9 @@ bool copyCachedSharedMemory(uint64_t owner, void* backing, uint64_t offset, uint
     return true;
 }
 
-bool sendSharedMemory(int socket, int fd, bool cached) {
-    char status = fd < 0 ? 'N' : (cached ? 'C' : 'M');
+bool sendSharedMemory(int socket, int fd, RmeSharedMemoryMode mode) {
+    char status = fd < 0 ? 'N' : mode == RME_MEMORY_CACHED ? 'C' :
+                                mode == RME_MEMORY_COHERENT ? 'H' : 'M';
     iovec data{&status, 1};
     alignas(cmsghdr) char control[CMSG_SPACE(sizeof(int))]{};
     msghdr reply{};

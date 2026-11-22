@@ -62,19 +62,20 @@ static void bad_note(struct aosp_handle *handle, struct yuv_note *note,
     int result = w_lock_ycbcr(&HMI, handle, 3, 0, 0, 16, 16, &ignored);
     check(result == -22 && unlock_calls == before + 1, name);
 }
-static void allocation_roundtrip(int format, int expected_pad) {
+static void allocation_roundtrip(int format, int expected_pad, int nv12) {
     struct alloc_device original = {0};
     original.alloc = mock_alloc;
     struct wrap_device wrapper = {0};
     wrapper.real = &original;
     const void *out_handle = NULL;
     int stride = 0;
-    int result = d_alloc(&wrapper.dev, 640, 360, format, 0x33, &out_handle, &stride);
+    int usage = 0x33 | (nv12 ? RME_GRALLOC_USAGE_NV12 : 0);
+    int result = d_alloc(&wrapper.dev, 640, 360, format, usage, &out_handle, &stride);
     check(result == 0 && out_handle != NULL && stride == 640, "allocate YUV buffer");
     if (result || !out_handle) return;
     const struct aosp_handle *original_handle = out_handle;
     struct yuv_note *note = note_of(original_handle);
-    check(note && note->magic == YUV_NOTE && note->w == 640 && note->h == 360 &&
+    check(note && note->magic == (nv12 ? YUV_NOTE_NV12 : YUV_NOTE) && note->w == 640 && note->h == 360 &&
           note->pad == (uint32_t)expected_pad, "allocator writes correct shared YUV note");
     void *second = mmap(NULL, (size_t)original_handle->size, PROT_READ | PROT_WRITE,
                         MAP_SHARED, original_handle->fd, 0);
@@ -88,8 +89,8 @@ static void allocation_roundtrip(int format, int expected_pad) {
         if (!result) {
             size_t y = 640u * 360u;
             size_t chroma = 320u * 180u;
-            check(planes.y == second && planes.cr == (char *)second + y &&
-                  planes.cb == (char *)second + y + (expected_pad ? chroma : 1) &&
+            check(planes.y == second && planes.cr == (char *)second + y + nv12 &&
+                  planes.cb == (char *)second + y + (expected_pad ? chroma : !nv12) &&
                   planes.ystride == 640 && planes.cstride == (expected_pad ? 320u : 640u) &&
                   planes.chroma_step == (expected_pad ? 1u : 2u), "imported YUV plane layout");
             mock_unlock(&mock, &imported);
@@ -200,8 +201,9 @@ int main(void) {
     mock.lock = mock_lock;
     mock.unlock = mock_unlock;
     init();
-    allocation_roundtrip(HAL_PIXEL_FORMAT_YV12, 640);
-    allocation_roundtrip(HAL_PIXEL_FORMAT_YCBCR_420_888, 0);
+    allocation_roundtrip(HAL_PIXEL_FORMAT_YV12, 640, 0);
+    allocation_roundtrip(HAL_PIXEL_FORMAT_YCBCR_420_888, 0, 0);
+    allocation_roundtrip(HAL_PIXEL_FORMAT_YCBCR_420_888, 0, 1);
     raw16_allocation();
     yv12_write_generation();
 

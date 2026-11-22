@@ -19,3 +19,28 @@
  
      VkImageCreateInfo localCreateInfo = vk_make_orphan_copy(*pCreateInfo);
      if (localCreateInfo.sharingMode != VK_SHARING_MODE_CONCURRENT) {
+--- a/guest/vulkan_enc/AndroidHardwareBuffer.cpp
++++ b/guest/vulkan_enc/AndroidHardwareBuffer.cpp
+@@ -66,6 +66,10 @@
+ VkResult getAndroidHardwareBufferPropertiesANDROID(
+     gfxstream::Gralloc* grallocHelper, const AHardwareBuffer* buffer,
+     VkAndroidHardwareBufferPropertiesANDROID* pProperties) {
++    // A buffer from a different allocator has no gfxstream format metadata.
++    const uint32_t colorBufferHandle = grallocHelper->getHostHandle(buffer);
++    if (!colorBufferHandle) return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++
+     VkAndroidHardwareBufferFormatPropertiesANDROID* ahbFormatProps =
+         vk_find_struct<VkAndroidHardwareBufferFormatPropertiesANDROID>(pProperties);
+
+@@ -225,11 +229,6 @@
+
+         ahbFormatProps->suggestedXChromaOffset = VK_CHROMA_LOCATION_MIDPOINT;
+         ahbFormatProps->suggestedYChromaOffset = VK_CHROMA_LOCATION_MIDPOINT;
+-    }
+-
+-    uint32_t colorBufferHandle = grallocHelper->getHostHandle(buffer);
+-    if (!colorBufferHandle) {
+-        return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+     }
+
+     pProperties->allocationSize = grallocHelper->getAllocatedSize(buffer);
