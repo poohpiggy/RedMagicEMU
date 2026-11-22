@@ -40,6 +40,7 @@ SERVICE_SOURCE_PATHS = (
     GUESTSTUBS / "radio-modem-sim/src/app/aemu/stub/RadioModemService.java",
     GUESTSTUBS / "radio-modem-sim/src/app/aemu/stub/RadioSimService.java",
     GUESTSTUBS / "radio-network/src/app/aemu/stub/RadioNetworkService.java",
+    GUESTSTUBS / "radio-network/src/app/aemu/stub/ServingLteObservation.java",
     GUESTSTUBS / "radio-data/src/app/aemu/stub/RadioDataService.java",
     GUESTSTUBS / "radio-data/src/app/aemu/stub/RadioNetworkGate.java",
     GUESTSTUBS / "radio-messaging/src/app/aemu/stub/RadioMessagingService.java",

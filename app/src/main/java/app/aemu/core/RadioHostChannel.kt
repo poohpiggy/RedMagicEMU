@@ -131,7 +131,8 @@ internal class RadioHostChannel private constructor(
         }
 
         fun frame(epoch: Long, sequence: Long, kind: Int, payload: ByteArray): ByteArray {
-            require(epoch > 0 && sequence > 0 && sequence < HELLO_SEQUENCE && kind in 1..2 && payload.size in 1..256)
+            require(epoch > 0 && sequence > 0 && sequence < HELLO_SEQUENCE &&
+                (kind in 1..2 || kind == 5) && payload.size in 1..256)
             return ByteBuffer.allocate(23 + payload.size).put(byteArrayOf(82, 77, 69, 49))
                 .putLong(epoch).putLong(sequence).put(kind.toByte()).putShort(payload.size.toShort())
                 .put(payload).array()
@@ -202,6 +203,8 @@ internal class RadioHostChannel private constructor(
         if (!validNumber(number)) return RadioSubmitResult.REJECTED
         return submit(2, number.toByteArray(Charsets.US_ASCII))
     }
+
+    fun cellObservation(record: String): RadioSubmitResult = submit(5, record.toByteArray(Charsets.US_ASCII))
 
     private fun submit(kind: Int, payload: ByteArray): RadioSubmitResult = synchronized(lock) {
         val peer = socket ?: return RadioSubmitResult.UNAVAILABLE

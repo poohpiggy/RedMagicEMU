@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -39,6 +40,12 @@ internal data class HostLocationReading(
         elapsedRealtimeNanos,
         timeMillis,
     )
+
+    fun encodeGnss(speed: Float?, bearing: Float?): String {
+        val measuredSpeed = speed?.takeIf { it.isFinite() && it >= 0 }
+        val measuredBearing = bearing?.takeIf { it.isFinite() && it >= 0 && it < 360 }
+        return "2 ${encode().trimEnd().removePrefix("1 ")} $measuredSpeed $measuredBearing\n"
+    }
 }
 
 internal object HostLocationProtocol {
@@ -95,6 +102,16 @@ internal fun hostLocationCanListen(
     permission: Boolean,
 ): Boolean = running && visible && enabled && demanded && permission
 
+internal fun hostLocationProviders(sdk: Int, gnss: Boolean = false): List<String> = buildList {
+    if (gnss) {
+        add(LocationManager.GPS_PROVIDER)
+        return@buildList
+    }
+    if (sdk >= Build.VERSION_CODES.S) add(LocationManager.FUSED_PROVIDER)
+    add(LocationManager.NETWORK_PROVIDER)
+    add(LocationManager.GPS_PROVIDER)
+}
+
 /** Shares recent host fixes with the Guest while a location request is active. */
 class HostLocationBridge(
     private val context: Context,
@@ -102,6 +119,7 @@ class HostLocationBridge(
     private val log: (String) -> Unit,
     initialBridgeEnabled: Boolean = true,
 ) {
+    internal var lteLocation: HostLteLocation? = null
     private val file = File(root, "dev/aemu_location")
     private val demandFile = File(root, "dev/aemu_location_demand")
     private val lock = Any()
@@ -115,12 +133,14 @@ class HostLocationBridge(
     private var running = false
     private var visible = false
     private var demandReady = false
+    private var gnss = false
     private var last: HostLocationReading? = null
     private var lastProblem: String? = null
 
     fun start() = synchronized(lock) {
         if (running) return@synchronized
         running = true
+        gnss = false
         demandReady = try {
             Files.deleteIfExists(demandFile.toPath())
             publish(null)
@@ -136,6 +156,7 @@ class HostLocationBridge(
         running = false
         demandReady = false
         refreshLocked()
+        lteLocation?.stop()
     }
 
     fun resume(on: Boolean) = synchronized(lock) {
@@ -146,6 +167,13 @@ class HostLocationBridge(
     fun setBridgeEnabled(enabled: Boolean) = synchronized(lock) {
         if (bridgeEnabled == enabled) return@synchronized
         bridgeEnabled = enabled
+        refreshLocked()
+    }
+
+    internal fun useNativeGnss() = synchronized(lock) {
+        unregisterLocked()
+        gnss = true
+        if (publish(null)) last = null
         refreshLocked()
     }
 
@@ -160,6 +188,7 @@ class HostLocationBridge(
         val watching = running && visible && bridgeEnabled && demandReady
         val demanded = watching && hasActiveDemand()
         val granted = demanded && permissionGranted()
+        lteLocation?.setActive(demanded && fineLocationGranted())
         if (hostLocationCanListen(running, visible, bridgeEnabled, demanded, granted)) {
             startListeningLocked()
         } else {
@@ -211,13 +240,13 @@ class HostLocationBridge(
             override fun onProviderEnabled(provider: String) {}
             override fun onProviderDisabled(provider: String) {}
         }
-        val providers = listOf(LocationManager.NETWORK_PROVIDER, LocationManager.GPS_PROVIDER)
+        val providers = hostLocationProviders(Build.VERSION.SDK_INT, gnss)
         var failure: Exception? = null
         val registered = providers.filter { provider ->
             try {
                 if (!lm.isProviderEnabled(provider)) return@filter false
                 // Request timed updates even while stationary so Guest one-shot clients can get a fresh fix.
-                lm.requestLocationUpdates(provider, 5_000L, 0f, listener, demandHandler.value.looper)
+                lm.requestLocationUpdates(provider, if (gnss) 1_000L else 5_000L, 0f, listener, demandHandler.value.looper)
                 true
             } catch (error: Exception) {
                 failure = error
@@ -230,7 +259,7 @@ class HostLocationBridge(
         }
         registration = lm to listener
         problem(null)
-        log("location: host provider registered")
+        log("location: host provider registered (${registered.joinToString()})")
         for (provider in registered) {
             try {
                 lm.getLastKnownLocation(provider)?.let { accept(listener, it) }
@@ -240,11 +269,14 @@ class HostLocationBridge(
         }
     }
 
-    private fun permissionGranted(): Boolean =
-        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) ==
-            PackageManager.PERMISSION_GRANTED ||
-            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
+    private fun fineLocationGranted(): Boolean =
+        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
             PackageManager.PERMISSION_GRANTED
+
+    private fun permissionGranted(): Boolean =
+        fineLocationGranted() ||
+            (!gnss && ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED)
 
     @Suppress("DEPRECATION")
     private fun unregisterLocked() {
@@ -258,6 +290,7 @@ class HostLocationBridge(
         }
     }
 
+    @Suppress("DEPRECATION")
     private fun accept(listener: LocationListener, location: Location) {
         if (!location.hasAccuracy()) return
         val reading = HostLocationProtocol.reading(
@@ -271,22 +304,28 @@ class HostLocationBridge(
         synchronized(lock) {
             if (registration?.second !== listener) return
             if (!hasActiveDemand() || !permissionGranted()) return
+            if (gnss && (location.provider != LocationManager.GPS_PROVIDER || location.isFromMockProvider)) return
             if (!HostLocationProtocol.isFresh(reading.elapsedRealtimeNanos, SystemClock.elapsedRealtimeNanos()) ||
                 reading.elapsedRealtimeNanos <= (last?.elapsedRealtimeNanos ?: 0L)) return
-            if (publish(reading)) {
+            val record = if (gnss) reading.encodeGnss(
+                location.speed.takeIf { location.hasSpeed() },
+                location.bearing.takeIf { location.hasBearing() },
+            ) else reading.encode()
+            if (publish(record)) {
+                if (last == null) log("location: first fresh host fix accepted from ${location.provider}")
                 last = reading
                 problem(null)
             }
         }
     }
 
-    private fun publish(reading: HostLocationReading?): Boolean {
+    private fun publish(record: String?): Boolean {
         try {
             val dir = file.parentFile ?: throw IllegalArgumentException("location file has no parent")
             if (!dir.isDirectory && !dir.mkdirs()) throw java.io.IOException("location directory unavailable")
             val tmp = Files.createTempFile(dir.toPath(), ".aemu-location-", ".tmp")
             try {
-                Files.write(tmp, (reading?.encode() ?: "0\n").toByteArray(Charsets.US_ASCII))
+                Files.write(tmp, (record ?: "0\n").toByteArray(Charsets.US_ASCII))
                 if (!tmp.toFile().setReadable(true, false)) throw java.io.IOException("location file cannot be read by guest")
                 Files.move(tmp, file.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
             } finally {

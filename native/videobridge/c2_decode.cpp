@@ -9,6 +9,7 @@
 #include <C2ComponentFactory.h>
 #include <C2PlatformSupport.h>
 #include <SimpleC2Component.h>
+#include <algorithm>
 #include <android/log.h>
 #include <cstring>
 #include <dlfcn.h>
@@ -99,7 +100,8 @@ protected:
 
 private:
     int host = -1;
-    uint32_t width = 0, height = 0;
+    video_open config = {};
+    uint32_t outputWidth = 0, outputHeight = 0;
     std::vector<uint8_t> frame;
     std::multimap<int64_t, uint64_t> pending;
 
@@ -109,15 +111,26 @@ private:
         std::vector<std::unique_ptr<C2Param>> heap;
         if (intf()->query_vb({&size}, {}, C2_MAY_BLOCK, &heap) != C2_OK ||
             !video_dimensions(size.width, size.height)) return false;
-        width = size.width;
-        height = size.height;
-        frame.resize((size_t)width * height * 3 / 2);
-        video_open config = {.magic=RME_VIDEO_MAGIC, .codec=codec, .width=width, .height=height};
+        config = {.magic=RME_VIDEO_MAGIC, .codec=codec, .width=size.width, .height=size.height};
+        C2StreamMaxPictureSizeTuning::output maximum(0u, 0u, 0u);
+        if (intf()->query_vb({&maximum}, {}, C2_MAY_BLOCK, &heap) == C2_OK) {
+            const uint32_t maxWidth = std::min(maximum.width, RME_VIDEO_MAX_WIDTH) & ~1u;
+            const uint32_t maxHeight = std::min(maximum.height, RME_VIDEO_MAX_HEIGHT) & ~1u;
+            if (maxWidth >= size.width && maxHeight >= size.height) {
+                config.max_width = maxWidth;
+                config.max_height = maxHeight;
+            }
+        }
         video_format format = {};
         host = rme_video_open(socketPath, &config, nullptr, nullptr, &format);
-        if (host >= 0) __android_log_print(ANDROID_LOG_INFO, "RmeCodec2", "connected to %s %ux%u",
-                                           format.decoder, width, height);
-        return host >= 0;
+        if (host < 0) return false;
+        outputWidth = size.width;
+        outputHeight = size.height;
+        frame.resize(video_frame_size(config.max_width ? config.max_width : size.width,
+                                      config.max_height ? config.max_height : size.height));
+        __android_log_print(ANDROID_LOG_INFO, "RmeCodec2", "connected to %s %ux%u (adaptive max %ux%u)",
+                            format.decoder, size.width, size.height, config.max_width, config.max_height);
+        return true;
     }
 
     void closeHost() {
@@ -127,12 +140,14 @@ private:
         frame.clear();
     }
 
-    static void fill(const std::unique_ptr<C2Work> &work, const std::shared_ptr<C2Buffer> &buffer, bool eos) {
+    static void fill(const std::unique_ptr<C2Work> &work, const std::shared_ptr<C2Buffer> &buffer, bool eos,
+                     const C2StreamPictureSizeInfo::output *size = nullptr) {
         auto &output = work->worklets.front()->output;
         output.flags = eos ? C2FrameData::FLAG_END_OF_STREAM : (C2FrameData::flags_t)0;
         output.ordinal = work->input.ordinal;
         output.buffers.clear();
         if (buffer) output.buffers.push_back(buffer);
+        if (size) output.configUpdate.push_back(C2Param::Copy(*size));
         work->workletsProcessed = 1;
     }
 
@@ -149,7 +164,9 @@ private:
         if (state != VIDEO_OK) return state;
         if (eos) *eos = (output.flags & VIDEO_EOS) != 0;
         if (!output.size) return VIDEO_OK;
-        if (output.size != frame.size()) return VIDEO_ERROR;
+        uint32_t width, height;
+        if (!video_frame_dimensions(&output, &width, &height) ||
+            !video_output_dimensions(&config, width, height)) return VIDEO_ERROR;
         auto packet = pending.find(output.pts_us);
         if (packet == pending.end()) return VIDEO_ERROR;
         auto index = packet->second;
@@ -188,9 +205,20 @@ private:
             }
         }
         auto buffer = createGraphicBuffer(block, C2Rect(width, height));
+        C2StreamPictureSizeInfo::output size(0u, width, height);
+        const bool changed = width != outputWidth || height != outputHeight;
+        if (changed) {
+            std::vector<std::unique_ptr<C2SettingResult>> failures;
+            if (intf()->config_vb({&size}, C2_MAY_BLOCK, &failures) != C2_OK ||
+                size.width != width || size.height != height) return VIDEO_ERROR;
+            outputWidth = width;
+            outputHeight = height;
+        }
         const bool isCurrent = index == current->input.ordinal.frameIndex.peekull();
-        if (isCurrent) fill(current, buffer, (output.flags & VIDEO_EOS) != 0);
-        else finish(index, [buffer](const std::unique_ptr<C2Work> &done) { fill(done, buffer, false); });
+        if (isCurrent) fill(current, buffer, (output.flags & VIDEO_EOS) != 0, changed ? &size : nullptr);
+        else finish(index, [buffer, size, changed](const std::unique_ptr<C2Work> &done) {
+            fill(done, buffer, false, changed ? &size : nullptr);
+        });
         return VIDEO_OK;
     }
 };

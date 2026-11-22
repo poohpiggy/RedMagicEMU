@@ -44,6 +44,19 @@ class TargetAccelerometerProtocolTest {
         assertTrue(method.invoke(null, 102L, 100L, 101L) as Boolean)
     }
 
+    @Test fun uncalibratedRecordPreservesBothVectorsInGuestAxes() {
+        val method = TargetAccelerometerProtocol::class.java.methods.firstOrNull { it.name == "encodeUncalibrated" }
+        assertNotNull("uncalibrated motion encoder is missing", method)
+        for (type in intArrayOf(14, 16)) {
+            val actual = method!!.invoke(null, type, 1234L, floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f), 90) as ByteArray
+            val expected = ByteBuffer.allocate(48).order(ByteOrder.LITTLE_ENDIAN)
+                .putInt(0x334d4541).putInt(type).putLong(1234L)
+                .putFloat(2f).putFloat(-1f).putFloat(3f).putInt(0)
+                .putFloat(5f).putFloat(-4f).putFloat(6f).putInt(0).array()
+            assertArrayEquals(expected, actual)
+        }
+    }
+
     @Test fun naturalLandscapeUsesTheFixedSystemPortraitRotation() {
         val method = TargetAccelerometerProtocol::class.java.methods.firstOrNull { it.name == "mapToPortrait" }
         assertNotNull("natural orientation mapping is missing", method)

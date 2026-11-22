@@ -2,8 +2,8 @@
  * N64/API 36 AEmulator motion-sensor HAL, derived from sensors_hal.c in this
  * directory (AEmulator); the legacy ARMv7 HAL remains unchanged.
  *
- * The host writes atomic 32-byte little-endian AEM2 records into the FIFO:
- * magic, type, boot-time ns, x/y/z float32 (m/s^2), accuracy int32.
+ * AEM2 records contain the type, boot-time ns, vector and accuracy. AEM3
+ * records carry an uncalibrated vector and its bias in one atomic FIFO write.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -24,12 +24,19 @@
 #ifndef AEMU_SENSORS_STATE_PATH
 #define AEMU_SENSORS_STATE_PATH "/dev/aemu_sensor_state"
 #endif
+#ifndef AEMU_SENSORS_CAPABILITIES_PATH
+#define AEMU_SENSORS_CAPABILITIES_PATH "/dev/.aemu-sensor-caps"
+#endif
 #define EXPORT __attribute__((visibility("default")))
 #define HANDLE_ACCEL 1
 #define HANDLE_GYROSCOPE 2
 #define HANDLE_MAGNETIC_FIELD 3
-#define SENSOR_COUNT 3
+#define HANDLE_GYROSCOPE_UNCALIBRATED 4
+#define HANDLE_MAGNETIC_FIELD_UNCALIBRATED 5
+#define SENSOR_COUNT 5
+#define BASE_SENSOR_COUNT 3
 #define AEM2_MAGIC 0x324d4541u
+#define AEM3_MAGIC 0x334d4541u
 /* The reporting mode is encoded in bits 1-3. Continuous is zero; bit 0 is
  * SENSOR_FLAG_WAKE_UP and must stay clear for the framework's non-wake-up
  * fusion sensors. */
@@ -82,7 +89,9 @@ struct sensors_module {
     void (*set_operation_mode)(unsigned);
 };
 struct packet { uint32_t magic; int32_t type; int64_t timestamp; float x,y,z; int32_t accuracy; };
+struct uncalibrated_packet { struct packet motion; float bias[3]; uint32_t reserved; };
 _Static_assert(sizeof(struct packet) == 32, "AEM2 protocol layout");
+_Static_assert(sizeof(struct uncalibrated_packet) == 48, "AEM3 protocol layout");
 _Static_assert(sizeof(struct sensors_event_t) == 104, "sensors_event_t ABI");
 struct poll_device {
     struct hw_device common;
@@ -99,7 +108,7 @@ struct poll_device {
     int closing;
     int active;
     int64_t enabled_since[SENSOR_COUNT], last_event[SENSOR_COUNT], period[SENSOR_COUNT], next_sample[SENSOR_COUNT];
-    uint8_t bytes[sizeof(struct packet)];
+    uint8_t bytes[sizeof(struct uncalibrated_packet)];
     size_t used;
     uint64_t bytes_read;
     uint64_t flush_boundary[MAX_FLUSH];
@@ -134,21 +143,59 @@ static const struct sensor_t sensors[] = {
         .power=0.15f, .minDelay=20000, .stringType="android.sensor.magnetic_field", .requiredPermission="",
         .maxDelay=1000000, .flags=SENSOR_FLAG_CONTINUOUS_MODE,
     },
+    {
+        .name="AEmulator 3-axis Gyroscope", .vendor="AEmulator", .version=1,
+        .handle=HANDLE_GYROSCOPE_UNCALIBRATED, .type=16, .maxRange=32.0f, .resolution=1.0f/1024.0f,
+        .power=0.2f, .minDelay=20000, .stringType="android.sensor.gyroscope_uncalibrated", .requiredPermission="",
+        .maxDelay=1000000, .flags=SENSOR_FLAG_CONTINUOUS_MODE,
+    },
+    {
+        .name="AEmulator 3-axis Magnetometer", .vendor="AEmulator", .version=1,
+        .handle=HANDLE_MAGNETIC_FIELD_UNCALIBRATED, .type=14, .maxRange=2000.0f, .resolution=0.125f,
+        .power=0.15f, .minDelay=20000, .stringType="android.sensor.magnetic_field_uncalibrated", .requiredPermission="",
+        .maxDelay=1000000, .flags=SENSOR_FLAG_CONTINUOUS_MODE,
+    },
 };
-static int get_list(struct sensors_module *m, const struct sensor_t **list) { (void)m; *list=sensors; return SENSOR_COUNT; }
-static int handle_index(int handle) {
-    switch (handle) {
-        case HANDLE_ACCEL: return 0;
-        case HANDLE_GYROSCOPE: return 1;
-        case HANDLE_MAGNETIC_FIELD: return 2;
-        default: return -1;
+static struct sensor_t available_sensors[SENSOR_COUNT];
+static int available_count;
+static pthread_once_t available_once=PTHREAD_ONCE_INIT;
+
+static int read_capabilities(void) {
+    char record[3];
+    int fd=open(AEMU_SENSORS_CAPABILITIES_PATH,O_RDONLY|O_CLOEXEC|O_NONBLOCK|O_NOFOLLOW);
+    if (fd<0) return 0;
+    ssize_t n=read(fd,record,sizeof(record));
+    close(fd);
+    if (n!=2 || record[0]<'0' || record[0]>'3' || record[1]!='\n') return 0;
+    return record[0]-'0';
+}
+
+static void load_sensor_list(void) {
+    int mask=read_capabilities();
+    memcpy(available_sensors,sensors,BASE_SENSOR_COUNT*sizeof(sensors[0]));
+    available_count=BASE_SENSOR_COUNT;
+    for (int i=BASE_SENSOR_COUNT;i<SENSOR_COUNT;i++) {
+        if (mask & (1<<(i-BASE_SENSOR_COUNT))) available_sensors[available_count++]=sensors[i];
     }
+}
+
+static int get_list(struct sensors_module *m, const struct sensor_t **list) {
+    (void)m;
+    pthread_once(&available_once,load_sensor_list);
+    *list=available_sensors;
+    return available_count;
+}
+
+static int handle_index(int handle) {
+    return handle>=1 && handle<=SENSOR_COUNT ? handle-1 : -1;
 }
 static int type_handle(int type) {
     switch (type) {
         case 1: return HANDLE_ACCEL;
         case 4: return HANDLE_GYROSCOPE;
         case 2: return HANDLE_MAGNETIC_FIELD;
+        case 16: return HANDLE_GYROSCOPE_UNCALIBRATED;
+        case 14: return HANDLE_MAGNETIC_FIELD_UNCALIBRATED;
         default: return -1;
     }
 }
@@ -227,8 +274,15 @@ static int host_accepts(int64_t timestamp) {
 static int take_sample(struct poll_device *d, struct sensors_event_t *out) {
     struct packet p; memcpy(&p,d->bytes,sizeof(p));
     int handle=type_handle(p.type), index=handle_index(handle);
-    if (p.magic!=AEM2_MAGIC || index<0 || p.accuracy<0 || p.accuracy>3 ||
+    int uncalibrated=handle==HANDLE_GYROSCOPE_UNCALIBRATED || handle==HANDLE_MAGNETIC_FIELD_UNCALIBRATED;
+    if (p.magic!=(uncalibrated ? AEM3_MAGIC : AEM2_MAGIC) || index<0 ||
+        (!uncalibrated && (p.accuracy<0 || p.accuracy>3)) ||
         !isfinite(p.x) || !isfinite(p.y) || !isfinite(p.z)) return 0;
+    float bias[3];
+    if (uncalibrated) {
+        memcpy(bias,d->bytes+sizeof(p),sizeof(bias));
+        if (!isfinite(bias[0]) || !isfinite(bias[1]) || !isfinite(bias[2])) return 0;
+    }
     int64_t now=now_ns();
     if (now<0 || !(d->active&(1<<index)) || p.timestamp<d->enabled_since[index] ||
         p.timestamp<=d->last_event[index] ||
@@ -236,11 +290,22 @@ static int take_sample(struct poll_device *d, struct sensors_event_t *out) {
         (d->next_sample[index] && p.timestamp<d->next_sample[index])) return 0;
     memset(out,0,sizeof(*out)); out->version=sizeof(*out); out->sensor=handle; out->type=p.type;
     out->timestamp=p.timestamp; out->data[0]=p.x; out->data[1]=p.y; out->data[2]=p.z;
-    ((int8_t *)&out->data[3])[0]=(int8_t)p.accuracy;
+    if (uncalibrated) memcpy(out->data+3,bias,sizeof(bias));
+    else ((int8_t *)&out->data[3])[0]=(int8_t)p.accuracy;
     if (!d->next_sample[index]) d->next_sample[index]=p.timestamp+d->period[index];
     else d->next_sample[index]+=((p.timestamp-d->next_sample[index])/d->period[index]+1)*d->period[index];
     d->last_event[index]=p.timestamp;
     return 1;
+}
+
+static uint32_t packet_magic(const struct poll_device *d) {
+    uint32_t magic=0;
+    if (d->used>=sizeof(magic)) memcpy(&magic,d->bytes,sizeof(magic));
+    return magic;
+}
+
+static size_t packet_size(uint32_t magic) {
+    return magic==AEM3_MAGIC ? sizeof(struct uncalibrated_packet) : sizeof(struct packet);
 }
 static int finish_poll(struct poll_device *d, int result) {
     pthread_mutex_lock(&d->lock);
@@ -267,7 +332,7 @@ static int dev_poll(struct poll_device *d, struct sensors_event_t *out, int coun
             ((int32_t *)out->data)[0]=1; ((int32_t *)out->data)[1]=handle;
             pthread_mutex_unlock(&d->lock); return finish_poll(d,1);
         }
-        size_t need=sizeof(d->bytes)-d->used;
+        size_t need=packet_size(packet_magic(d))-d->used;
         if (d->flush_count) {
             uint64_t left=d->flush_boundary[d->flush_head]-d->bytes_read;
             if (left<need) need=(size_t)left;
@@ -275,9 +340,9 @@ static int dev_poll(struct poll_device *d, struct sensors_event_t *out, int coun
         ssize_t n=read(d->fd,d->bytes+d->used,need);
         if (n>0) {
             d->used+=(size_t)n; d->bytes_read+=(uint64_t)n;
-            if (d->used==sizeof(d->bytes)) {
-                uint32_t magic; memcpy(&magic,d->bytes,sizeof(magic));
-                if (magic!=AEM2_MAGIC) { memmove(d->bytes,d->bytes+1,--d->used); }
+            uint32_t magic=packet_magic(d);
+            if (d->used==packet_size(magic)) {
+                if (magic!=AEM2_MAGIC && magic!=AEM3_MAGIC) { memmove(d->bytes,d->bytes+1,--d->used); }
                 else { d->used=0; if (take_sample(d,out)) { pthread_mutex_unlock(&d->lock); return finish_poll(d,1); } }
             }
             pthread_mutex_unlock(&d->lock); continue;

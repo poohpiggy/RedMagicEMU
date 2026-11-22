@@ -7,6 +7,26 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HostLocationSyncTest {
+    @Test fun modernHostsAlsoQueryTheSystemFusedProvider() {
+        assertEquals(listOf("network", "gps"), hostLocationProviders(30))
+        assertEquals(listOf("fused", "network", "gps"), hostLocationProviders(31))
+        assertEquals(listOf("fused", "network", "gps"), hostLocationProviders(36))
+    }
+
+    @Test fun gnssBridgeOnlySubscribesToTheHostGpsProvider() {
+        assertEquals(listOf("gps"), hostLocationProviders(30, gnss = true))
+        assertEquals(listOf("gps"), hostLocationProviders(36, gnss = true))
+    }
+
+    @Test fun gnssRecordPreservesMotionWithoutInventingMissingValues() {
+        val fix = HostLocationProtocol.reading(12.25, -34.5, null, 4.5f, 99_000_000_000L, 1_790_000_000_000L)!!
+        assertEquals("2 12.25000000 -34.50000000 null 4.500 99000000000 1790000000000 2.5 133.75\n",
+            fix.encodeGnss(2.5f, 133.75f))
+        assertEquals("2 12.25000000 -34.50000000 null 4.500 99000000000 1790000000000 null null\n",
+            fix.encodeGnss(null, Float.NaN))
+        assertTrue(fix.encode().startsWith("1 "))
+    }
+
     @Test fun roundTripsHostLocationWithoutLocaleDependentNumbers() {
         val reading = HostLocationProtocol.reading(
             latitude = 30.381479,

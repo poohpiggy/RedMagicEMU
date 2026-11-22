@@ -18,9 +18,10 @@ import android.hardware.radio.modem.RadioState;
 import android.hardware.radio.network.*;
 import android.os.IBinder;
 import android.os.RemoteException;
+import android.os.SystemClock;
 import java.util.NoSuchElementException;
 
-/** Synthetic network prototype; it never queries a real host network. */
+/** Synthetic modem state with optional, authenticated location observations. */
 public final class RadioNetworkService extends IRadioNetwork.Stub {
   private volatile RadioRequestCounter requestCounter;
   void setRequestCounterForExperiment(RadioRequestCounter counter) { requestCounter = counter; }
@@ -43,6 +44,7 @@ public final class RadioNetworkService extends IRadioNetwork.Stub {
   private int allowedNetworkTypes=1<<13; // LTE only; this service does not emulate GSM/WCDMA/NR.
   private final Map<Integer,SignalThresholdInfo> criteria=new HashMap<>();
   private Callbacks callbacks;
+  private ServingLteObservation servingLte;
   public RadioNetworkService(String slot) { this(slot, null); }
   RadioNetworkService(String slot, SyntheticSingleSlot state) {
     if (!"slot1".equals(slot)) throw new IllegalArgumentException("only slot1 is supported");
@@ -202,7 +204,35 @@ public final class RadioNetworkService extends IRadioNetwork.Stub {
   @Override public void getAvailableNetworks(int serial) throws RemoteException { response().getAvailableNetworksResponse(result(serial,RadioError.REQUEST_NOT_SUPPORTED), new android.hardware.radio.network.OperatorInfo[0]); }
   @Override public void getBarringInfo(int serial) throws RemoteException { response().getBarringInfoResponse(result(serial,RadioError.REQUEST_NOT_SUPPORTED), new android.hardware.radio.network.CellIdentity(), new android.hardware.radio.network.BarringInfo[0]); }
   @Override public void getCdmaRoamingPreference(int serial) throws RemoteException { response().getCdmaRoamingPreferenceResponse(result(serial,RadioError.REQUEST_NOT_SUPPORTED), 0); }
-  @Override public void getCellInfoList(int serial) throws RemoteException { response().getCellInfoListResponse(result(serial,RadioError.REQUEST_NOT_SUPPORTED), new android.hardware.radio.network.CellInfo[0]); }
+  @Override public void getCellInfoList(int serial) throws RemoteException {
+    int error=availability();
+    response().getCellInfoListResponse(result(serial,error), currentCells());
+  }
+  private CellInfo[] currentCells() {
+    synchronized(lock) {
+      if (servingLte==null || !servingLte.fresh(SystemClock.elapsedRealtime()) ||
+          availability()!=RadioError.NONE) return new CellInfo[0];
+      return new CellInfo[]{servingLte.toCellInfo()};
+    }
+  }
+  boolean updateServingLte(byte[] record) throws RemoteException {
+    boolean clear=record.length==1 && record[0]=='0';
+    ServingLteObservation observation=clear ? null : ServingLteObservation.parse(record,SystemClock.elapsedRealtime());
+    if (!clear && observation==null) return false;
+    if (!acquireDispatch()) throw new RemoteException("cell observation dispatch busy");
+    try {
+      Callbacks target;
+      synchronized(lock) {
+        if (closed || (servingLte!=null && observation!=null && observation.observedMs<servingLte.observedMs))
+          return false;
+        servingLte=observation;
+        target=callbacks;
+      }
+      if (target!=null && !target.dead) target.indication.cellInfoList(RadioIndicationType.UNSOLICITED,currentCells());
+      return true;
+    } finally { dispatchLock.unlock(); }
+  }
+  void clearServingLte() { synchronized(lock) { servingLte=null; } }
   @Override public void getDataRegistrationState(int serial) throws RemoteException {
     int error=availability(); response().getDataRegistrationStateResponse(result(serial,error),registration(error));
   }

@@ -215,7 +215,9 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     val sensors = Sensors(ctx, paths.root, legacyVibration = false, log = ::log,
         targetProtocol = img.api == 36 && img.model == "NX809J" && img.abi == "arm64-v8a" && engine == Engine.N64,
         initialBridgeEnabled = settings.accelerometerBridge)
-    val location = HostLocationBridge(ctx, paths.root, ::log, settings.accelerometerBridge)
+    val location = HostLocationBridge(ctx, paths.root, ::log, settings.accelerometerBridge).apply {
+        if (isTargetGuest) lteLocation = HostLteLocation(ctx, ::log) { radioEvents }
+    }
     /** the phone's microphone for the guest (audio HAL input → /dev/aemu_mic) */
     val mic = AudioIn(ctx, paths.root, ::log)
     /** the phone's cameras for the guest (camera HAL → /dev/socket/aemu_cam) */
@@ -1012,6 +1014,11 @@ class GuestVm(val ctx: Context, image: GuestImage) {
 
         // 5. службы гостя по плану из init.rc прошивки
         val plan = servicePlan()
+        var nativeGnss = isTargetGuest && !recoveryMode && runCatching {
+            TargetGnssLaunch.prepare(ctx, paths.root)
+        }.onFailure { failure ->
+            log("location: GNSS preparation failed: ${failure.message}")
+        }.getOrDefault(false)
         val targetWifi = TargetWifiLaunch.select(fixer.wifiPrepared, img.api, img.model, img.abi, engine,
             File(paths.root, "system/framework/redmagic-wifi-net.jar").isFile,
             File(paths.root, "system/framework/redmagic-wifi.jar").isFile,
@@ -1044,6 +1051,10 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         var started = 0
         for (svc in plan) {
             if (stopping) return
+            if (nativeGnss && svc.argv.firstOrNull()?.substringAfterLast('/') == "android.hardware.gnss-aidl-service-qti") {
+                props.put("init.svc.${svc.name}", "stopped")
+                continue
+            }
             if (svc.onDemand) { props.put("init.svc.${svc.name}", "stopped"); continue }
             if (stopAfter != null && started++ >= stopAfter) {
                 log("stop-after $stopAfter: holding before ${svc.name}")
@@ -1061,6 +1072,19 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             if (svc.name == "zygote" && aidlRadio != null) {
                 log("radio: requesting AIDL service start; framework discovery not verified")
                 startService(aidlRadio)
+            }
+            if (svc.name == "zygote" && nativeGnss) {
+                startService(GuestService(TargetGnssLaunch.serviceName, listOf(TargetGnssLaunch.executable), optional = true))
+                val ready = TargetGnssLaunch.readyFile(paths.root)
+                nativeGnss = waitFor("Guest GNSS registration", 3_000L) {
+                    ready.isFile && synchronized(procs) { procs[TargetGnssLaunch.serviceName]?.isAlive == true }
+                }
+                if (nativeGnss) location.useNativeGnss()
+                else {
+                    killOurs(synchronized(procs) { procs.remove(TargetGnssLaunch.serviceName) })
+                    TargetGnssLaunch.clear(paths.root)
+                    log("location: restoring the compatibility provider")
+                }
             }
             // 4.2+: заглушка bluetooth_manager до зиготы (system_server с ro.kernel.qemu=1 свою не поднимает)
             if (svc.name == "zygote" && img.api >= 9 && engine != Engine.GB && File(paths.root, "system/framework/aemu-stubs.jar").isFile) {
@@ -1110,7 +1134,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             }
             // The NX809J service publishes only its network location provider, while the stock
             // compass requires "gps" during Activity startup. The stub waits for system_server.
-            if (svc.name == "zygote" && img.api == 36 && img.model == "NX809J" &&
+            if (svc.name == "zygote" && !nativeGnss && img.api == 36 && img.model == "NX809J" &&
                     img.abi == "arm64-v8a" && engine == Engine.N64 &&
                     File(paths.root, "system/framework/aemu-stubs.jar").isFile) {
                 killOurs(synchronized(procs) { procs.remove("aemu-location") })
@@ -2386,6 +2410,8 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                     }
                 }
                 props.stop(); props.stopAbstract();input.stop(); frames.stop(); wifi?.stop(); vold.stop(); if (audioDelegate.isInitialized()) audio.stop(); net.stop(); dns.stop(); events.stop(); logd.stop(); lights.stop(); sensors.stop(); location.stop(); mic.stop(); camera.stop(); overlays.stop(); GlHost.stop()
+                if (isTargetGuest) runCatching { TargetGnssLaunch.clear(paths.root) }
+                    .onFailure { log("location: GNSS runtime cleanup failed: ${it.message}") }
                 extraStubs.forEach { it.stop() }; extraStubs.clear()
                 lmk?.stop(); lmk = null
                 Keeper.release(ctx)

@@ -6,7 +6,7 @@ import java.io.File
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 
-/** AEM2 records for the NX809J/API 36 64-bit sensor HAL. */
+/** AEM2 and AEM3 records for the NX809J/API 36 64-bit sensor HAL. */
 internal object TargetAccelerometerProtocol {
     const val RECORD_SIZE = 32
     private const val MAGIC = 0x324d4541
@@ -18,6 +18,15 @@ internal object TargetAccelerometerProtocol {
         ByteBuffer.allocate(RECORD_SIZE).order(ByteOrder.LITTLE_ENDIAN)
             .putInt(MAGIC).putInt(type).putLong(timestampNanos)
             .putFloat(x).putFloat(y).putFloat(z).putInt(accuracy).array()
+
+    @JvmStatic fun encodeUncalibrated(type: Int, timestampNanos: Long, values: FloatArray, rotation: Int): ByteArray {
+        val measurement = mapToPortrait(values[0], values[1], values[2], rotation)
+        val bias = mapToPortrait(values[3], values[4], values[5], rotation)
+        return ByteBuffer.allocate(48).order(ByteOrder.LITTLE_ENDIAN)
+            .putInt(0x334d4541).putInt(type).putLong(timestampNanos)
+            .putFloat(measurement[0]).putFloat(measurement[1]).putFloat(measurement[2]).putInt(0)
+            .putFloat(bias[0]).putFloat(bias[1]).putFloat(bias[2]).putInt(0).array()
+    }
 
     @JvmStatic fun shouldForward(timestampNanos: Long, sessionStartNanos: Long, previousNanos: Long): Boolean =
         timestampNanos >= sessionStartNanos && timestampNanos > previousNanos

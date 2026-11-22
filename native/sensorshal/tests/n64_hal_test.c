@@ -25,6 +25,7 @@ int legacy_nanosleep(const struct timespec_ *a, struct timespec_ *b) { (void)a; 
 #else
 #define AEMU_SENSORS_FIFO_PATH "/tmp/rme_n64_hal_test.fifo"
 #define AEMU_SENSORS_STATE_PATH "/tmp/rme_n64_hal_test.state"
+#define AEMU_SENSORS_CAPABILITIES_PATH "/tmp/rme_n64_hal_test.capabilities"
 static int wake_fd=-1, wake_errno=0, wake_faults=0;
 static ssize_t injected_write(int fd, const void *data, size_t size) {
     if (fd==wake_fd && wake_faults>0) { wake_faults--; errno=wake_errno; return -1; }
@@ -35,6 +36,12 @@ static ssize_t injected_write(int fd, const void *data, size_t size) {
 #undef write
 struct wire_packet { uint32_t magic; int32_t type; int64_t timestamp; float x,y,z; int32_t accuracy; };
 _Static_assert(sizeof(struct wire_packet) == 32, "wire packet must be exactly 32 bytes");
+struct wire_uncalibrated {
+    struct wire_packet motion;
+    float bias[3];
+    uint32_t reserved;
+};
+_Static_assert(sizeof(struct wire_uncalibrated) == 48, "uncalibrated record must be exactly 48 bytes");
 static void state(int enabled, int64_t epoch) { FILE *f=fopen(AEMU_SENSORS_STATE_PATH,"w"); assert(f); assert(fprintf(f,"%d %lld\n",enabled,(long long)epoch)>0); assert(fclose(f)==0); }
 static int64_t now(void) { struct timespec t; assert(clock_gettime(CLOCK_BOOTTIME, &t) == 0); return (int64_t)t.tv_sec*1000000000+t.tv_nsec; }
 static void put(int fd, struct wire_packet *p) { assert(write(fd,p,sizeof(*p)) == sizeof(*p)); }
@@ -59,7 +66,15 @@ int main(void) {
     if (r != -EINVAL) { fprintf(stderr, "inactive flush: expected -EINVAL, got %d\n", r); return 1; }
 #else
     const struct sensor_t *list=NULL;
-    assert(get_list(&HMI,&list)==3 && list);
+    unlink(AEMU_SENSORS_CAPABILITIES_PATH);
+    assert(read_capabilities()==0);
+    FILE *capabilities=fopen(AEMU_SENSORS_CAPABILITIES_PATH,"w");
+    assert(capabilities && fputs("2\n",capabilities)>=0 && fclose(capabilities)==0);
+    assert(read_capabilities()==2);
+    capabilities=fopen(AEMU_SENSORS_CAPABILITIES_PATH,"w");
+    assert(capabilities && fputs("3\n",capabilities)>=0 && fclose(capabilities)==0);
+    assert(get_list(&HMI,&list)==5 && list);
+    unlink(AEMU_SENSORS_CAPABILITIES_PATH);
     assert(list[0].name && list[0].name[0]);
     assert(list[0].vendor && list[0].vendor[0]);
     assert(list[0].stringType && list[0].stringType[0]);
@@ -67,7 +82,9 @@ int main(void) {
     assert(list[0].handle==HANDLE_ACCEL && list[0].type==1);
     assert(list[1].handle==HANDLE_GYROSCOPE && list[1].type==4);
     assert(list[2].handle==HANDLE_MAGNETIC_FIELD && list[2].type==2);
-    for (int i=0;i<3;i++) {
+    assert(list[3].handle==4 && list[3].type==16);
+    assert(list[4].handle==5 && list[4].type==14);
+    for (int i=0;i<5;i++) {
         assert(list[i].flags==SENSOR_FLAG_CONTINUOUS_MODE);
         assert((list[i].flags&1u)==0);
     }
@@ -119,6 +136,24 @@ int main(void) {
     put(writer,&mag); t=start(&req); join(t);
     assert(req.n==1 && req.result.sensor==HANDLE_MAGNETIC_FIELD && req.result.type==2);
     assert(req.result.data[0]==10 && req.result.data[1]==20 && req.result.data[2]==-30);
+    for (int i=3;i<5;i++) {
+        assert(dev_activate(d,list[i].handle,1)==0);
+        struct wire_uncalibrated raw={
+            {0x334d4541,list[i].type,now(),1.5f,-2.5f,3.5f,0},
+            {0.25f,-0.5f,0.75f},0
+        };
+        struct wire_uncalibrated invalid=raw;
+        invalid.bias[1]=NAN;
+        assert(write(writer,&invalid,sizeof(invalid))==sizeof(invalid));
+        assert(write(writer,&raw,32)==32);
+        t=start(&req);
+        assert(write(writer,(const char*)&raw+32,16)==16);
+        join(t);
+        assert(req.n==1 && req.result.type==list[i].type && req.result.sensor==list[i].handle);
+        assert(req.result.timestamp==raw.motion.timestamp);
+        assert(req.result.data[0]==1.5f && req.result.data[1]==-2.5f && req.result.data[2]==3.5f);
+        assert(req.result.data[3]==0.25f && req.result.data[4]==-0.5f && req.result.data[5]==0.75f);
+    }
     /* A full wake pipe is already readable, so EAGAIN must not reject flush. */
     char byte=1;
     while (write(d->wake_write,&byte,1)==1) {}

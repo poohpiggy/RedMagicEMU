@@ -73,7 +73,8 @@ def verify_frozen_sources(sources, manifest):
     if set(files) != set(expected):
         raise ValueError("frozen AIDL file set differs from manifest")
     for name, path in files.items():
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        # Frozen snapshots use LF. Windows Git checkouts may expand those newlines.
+        digest = hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
         if digest != expected[name]:
             raise ValueError(f"frozen AIDL SHA-256 mismatch: {name}")
 

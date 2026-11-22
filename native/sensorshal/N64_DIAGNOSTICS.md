@@ -81,3 +81,9 @@ cc -std=c11 -Wall -Wextra -Werror -pthread -o /tmp/rme_n64_test native/sensorsha
 - 本轮重建后的 system/vendor 两份 HAL SHA-256 均为 `c35dc35e2d2a1efdb85fee11dc928a0e889d6d7089782bd1a72302672e147e83`；`aemu-stubs.jar` SHA-256 为 `8702b01cff582ead5011304e5d50959ebc992515b3052a3866422d7ae1b05426`。已在 `j2fxy4` 实例实际重启加载对应摘要。
 - 实机结果：指南针持续显示航向，磁场约 `42 µT`，经纬度显示宿主最后已知网络位置；用户确认“完全可用”。经纬度依赖宿主定位授权和 network/GPS 最后位置，不代表 Guest 已完成独立 GNSS 卫星解算；宿主没有海拔时界面仍显示 `--`。
 - 当前安装包为 `app/build/outputs/apk/standard/debug/app-standard-debug-location-signed.apk`，SHA-256 `52e594f185f34effb41bfbef69b0f234f0d004caf57d394839e0bea2f8694e91`。回滚必须同时撤销 HAL reporting-mode 修复、两份 HAL 资产、位置桥/GPS stub、定位权限与启动接线；只回退一端会造成航向不更新或指南针再次闪退。
+
+## 2026-11-22 未校准陀螺仪和磁力计
+
+- 宿主按 Android SensorManager 实际能力生成 Guest 运行树的 `/dev/.aemu-sensor-caps`。位 0 对应陀螺仪 `TYPE_GYROSCOPE_UNCALIBRATED`，位 1 对应磁场 `TYPE_MAGNETIC_FIELD_UNCALIBRATED`。Guest HAL 在初始化时读取一次，能力文件缺失或格式无效时仍枚举原三类传感器。
+- 原 32 字节 AEM2 事件保留。新 48 字节 AEM3 事件包含宿主原始采样时间、三轴测量和三轴偏差，两组向量使用同一宿主自然轴变换。偏差和测量均拒绝非有限值。原有传感器开关、可见性、时间戳栅栏和 flush 顺序共同作用于新通道。
+- 通过 `native/sensorshal/build_n64.py` 重建成对 N64 资产。要回退，可在关闭 Guest 后覆盖安装前一份同签名测试包，下一次启动由 APK 恢复运行树 HAL。源码回退需要同时撤销新桥接代码与两份 N64 资产，原厂固件无需改动。

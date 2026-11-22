@@ -77,7 +77,9 @@ static int exercise(AMediaExtractor *extractor, const char *socket_path) {
         if (status == VIDEO_ERROR) goto done;
         if (status == VIDEO_OK) {
             if (packet.size > 0) {
-                if (packet.size != frame_size) goto done;
+                uint32_t frame_width, frame_height;
+                if (!video_frame_dimensions(&packet, &frame_width, &frame_height) ||
+                    !video_output_dimensions(&config, frame_width, frame_height)) goto done;
                 yuv_checksum = crc32(yuv_checksum, frame, packet.size);
                 for (int row = 0; row < height; row += 3) {
                     for (int col = 0; col < width; col += 3) {

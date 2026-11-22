@@ -46,7 +46,7 @@ public final class RadioServiceMain {
         RadioDataService data=new RadioDataService("slot1",model,lteData);
         RadioMessagingService messaging=new RadioMessagingService("slot1",model);
         RadioVoiceService voice=new RadioVoiceService("slot1",64,5000,model);
-        RadioEventEndpoint endpoint=new RadioEventEndpoint(model,voice,messaging);
+        RadioEventEndpoint endpoint=new RadioEventEndpoint(model,voice,messaging,network);
         IBinder[] services=new IBinder[]{
             new RadioConfigService("slot1",model).asBinder(),
             new RadioModemService("slot1",model,imei).asBinder(),

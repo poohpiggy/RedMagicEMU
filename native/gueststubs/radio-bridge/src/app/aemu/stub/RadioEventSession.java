@@ -84,7 +84,8 @@ public final class RadioEventSession {
             if (read64(frame, 4) != epoch || lastSequence == -1L || sequence != lastSequence + 1) return null;
             int kind = frame[20] & 0xff;
             int size = ((frame[21] & 0xff) << 8) | (frame[22] & 0xff);
-            if ((kind != 1 && kind != 2 && kind != 4) || size == 0 || size > MAX_PAYLOAD || frame.length != HEADER_SIZE + size)
+            if ((kind != 1 && kind != 2 && kind != 4 && (kind != 5 || owner == null)) ||
+                    size == 0 || size > MAX_PAYLOAD || frame.length != HEADER_SIZE + size)
                 return null;
             if (kind == 4 && (size != 16 || read64(frame, HEADER_SIZE) != epoch ||
                     read64(frame, HEADER_SIZE + 8) == 0)) return null;

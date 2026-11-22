@@ -12,6 +12,7 @@ import android.os.SystemClock
 import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
+import android.util.AtomicFile
 import android.view.WindowManager
 import java.io.File
 import java.io.FileDescriptor
@@ -93,8 +94,8 @@ internal class SensorBridgeGate(initialEnabled: Boolean) {
 
 /**
  * The phone's motion sensors and vibration motor for the guest.
- *  - motion sensors: legacy accelerometer records, or typed AEM2 accelerometer/gyroscope/magnetometer
- *    records for NX809J/API 36, into /dev/aemu_sensors;
+ *  - motion sensors: legacy accelerometer records, or typed motion records for NX809J/API 36
+ *    into /dev/aemu_sensors;
  *    only while the VM screen is shown;
  *  - vibration: /sys/class/timed_output/vibrator/enable is a FIFO; libhardware_legacy / the vibrator HAL of 2.3–7.x
  *    write the duration in ms there, and the phone vibrates for that long. The FIFO requires explicit opt-in because
@@ -119,12 +120,41 @@ class Sensors(private val ctx: Context, private val root: File, legacyVibration:
     private var ownedState: OwnedState? = null
     private var stateReady = !targetProtocol
     private val targetTypes = intArrayOf(Sensor.TYPE_ACCELEROMETER, Sensor.TYPE_GYROSCOPE, Sensor.TYPE_MAGNETIC_FIELD)
+    private val optionalTypes = intArrayOf(Sensor.TYPE_GYROSCOPE_UNCALIBRATED, Sensor.TYPE_MAGNETIC_FIELD_UNCALIBRATED)
+    @Volatile private var availableUncalibrated = emptyList<Int>()
 
     private fun sensorLabel(type: Int): String = when (type) {
         Sensor.TYPE_ACCELEROMETER -> "accelerometer"
         Sensor.TYPE_GYROSCOPE -> "gyroscope"
         Sensor.TYPE_MAGNETIC_FIELD -> "magnetometer"
+        Sensor.TYPE_GYROSCOPE_UNCALIBRATED -> "uncalibrated gyroscope"
+        Sensor.TYPE_MAGNETIC_FIELD_UNCALIBRATED -> "uncalibrated magnetometer"
         else -> "sensor $type"
+    }
+
+    private fun publishCapabilities(): List<Int> {
+        val file = AtomicFile(File(root, "dev/.aemu-sensor-caps"))
+        return try {
+            val manager = ctx.getSystemService(SensorManager::class.java)
+            val available = optionalTypes.filter { manager?.getDefaultSensor(it) != null }
+            var mask = 0
+            optionalTypes.forEachIndexed { index, type ->
+                if (type in available) mask = mask or (1 shl index)
+            }
+            val stream = file.startWrite()
+            try {
+                stream.write("$mask\n".toByteArray(Charsets.US_ASCII))
+                file.finishWrite(stream)
+            } catch (failure: Exception) {
+                file.failWrite(stream)
+                throw failure
+            }
+            available
+        } catch (failure: Exception) {
+            file.delete()
+            log("sensors: cannot publish sensor capabilities: ${failure.message}")
+            emptyList()
+        }
     }
 
     private fun resetSessionLocked() {
@@ -228,7 +258,10 @@ class Sensors(private val ctx: Context, private val root: File, legacyVibration:
 
     fun start() = synchronized(lifecycleLock) {
         running = true
-        if (targetProtocol) targetRotation = targetNaturalRotation()
+        if (targetProtocol) {
+            targetRotation = targetNaturalRotation()
+            availableUncalibrated = publishCapabilities()
+        }
         stateReady = publishState(false, SystemClock.elapsedRealtimeNanos())
         channels.start()
     }
@@ -275,7 +308,7 @@ class Sensors(private val ctx: Context, private val root: File, legacyVibration:
             return
         }
         if (bridgeGate.canListen(running, visible, out != null, !targetProtocol || stateReady)) {
-            val types = if (targetProtocol) targetTypes else intArrayOf(Sensor.TYPE_ACCELEROMETER)
+            val types = if (targetProtocol) targetTypes + availableUncalibrated else intArrayOf(Sensor.TYPE_ACCELEROMETER)
             var registered = 0
             for (type in types) {
                 val sensor = sm.getDefaultSensor(type)
@@ -300,7 +333,9 @@ class Sensors(private val ctx: Context, private val root: File, legacyVibration:
     override fun onSensorChanged(e: SensorEvent) {
         val fd = out ?: return
         val type = e.sensor.type
-        if (if (targetProtocol) type !in targetTypes else type != Sensor.TYPE_ACCELEROMETER) return
+        val uncalibrated = targetProtocol && type in availableUncalibrated
+        if (if (targetProtocol) type !in targetTypes && !uncalibrated else type != Sensor.TYPE_ACCELEROMETER) return
+        if (uncalibrated && e.values.size < 6) return
         var disable = false
         synchronized(rec) {
             if (out !== fd || !bridgeGate.enabled || !running || !visible) return
@@ -309,7 +344,9 @@ class Sensors(private val ctx: Context, private val root: File, legacyVibration:
             if (targetProtocol) lastEventNanos[type] = e.timestamp
             rec.clear()
             rec.putInt(1).putFloat(e.values[0]).putFloat(e.values[1]).putFloat(e.values[2])
-            val frame = if (targetProtocol) {
+            val frame = if (uncalibrated) {
+                TargetAccelerometerProtocol.encodeUncalibrated(type, e.timestamp, e.values, targetRotation)
+            } else if (targetProtocol) {
                 val axes = TargetAccelerometerProtocol.mapToPortrait(e.values[0], e.values[1], e.values[2], targetRotation)
                 TargetAccelerometerProtocol.encode(type, e.timestamp, e.accuracy, axes[0], axes[1], axes[2])
             } else rec.array()

@@ -8,7 +8,7 @@ int rme_video_open(const char *path, const struct video_open *config, const void
                    const void *csd1, struct video_format *format) {
     struct sockaddr_un address = {.sun_family = AF_UNIX};
     if (strlen(path) >= sizeof address.sun_path ||
-        config->magic != RME_VIDEO_MAGIC || !video_dimensions(config->width, config->height) ||
+        config->magic != RME_VIDEO_MAGIC || !video_open_dimensions(config) ||
         !video_mime(config->codec) || config->csd0_size > RME_VIDEO_MAX_CONFIG ||
         config->csd1_size > RME_VIDEO_MAX_CONFIG || (config->csd0_size && !csd0) ||
         (config->csd1_size && !csd1)) return -1;
@@ -34,9 +34,15 @@ static uint32_t transact(int fd, const struct video_packet *command, const void 
                          void *frame, size_t capacity, struct video_packet *response) {
     if (video_write(fd, command, sizeof *command) != 0 ||
         video_write(fd, data, command->size) != 0 || video_read(fd, response, sizeof *response) != 0 ||
-        response->size > capacity || response->reserved ||
-        response->type > VIDEO_ERROR || (response->type != VIDEO_OK && response->size) ||
-        video_read(fd, frame, response->size) != 0) return VIDEO_ERROR;
+        response->size > capacity || response->type > VIDEO_ERROR) return VIDEO_ERROR;
+    if (response->size) {
+        uint32_t width, height;
+        if (command->type != VIDEO_RECEIVE || response->type != VIDEO_OK ||
+            !video_frame_dimensions(response, &width, &height) ||
+            video_read(fd, frame, response->size) != 0) return VIDEO_ERROR;
+    } else if (response->reserved) {
+        return VIDEO_ERROR;
+    }
     return response->type;
 }
 

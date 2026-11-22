@@ -1,0 +1,11 @@
+# NX809J Guest GNSS bridge
+
+The AIDL service reads fresh locations from the host GPS provider, including the original elapsed and wall-clock timestamps. It publishes a demand lease only while the Guest GNSS session is active. The existing instance sensor toggle, foreground state and precise-location permission govern the host subscription. The bridge reports measured position, altitude, speed and bearing when available. Raw measurements, satellite status and NMEA are outside this implementation.
+
+The executable is installed only in the NX809J API 36 ARM64 runtime copy. Startup adds the V4 VINTF fragment before the Guest service manager starts. The compatibility location provider remains the fallback when the service fails to register. Closing the Guest removes the owned manifest fragment and readiness file. For rollback after an interrupted session, remove the owned `vendor/etc/vintf/manifest/aemu-gnss.xml` runtime fragment while the Guest is stopped, then install the previous signed APK. The source firmware ZIP stays intact.
+
+## Rebuild
+
+Use NDK 28.2.13676358, SDK Build Tools 37.0.0 and `build.py`. The `--aidl-api` directory is the Android Open Source Project frozen GNSS V4 API at [hardware/interfaces](https://android.googlesource.com/platform/hardware/interfaces/+/1a56e38edc2f2f6189ef405ee1edce554e15cbc0/gnss/aidl/aidl_api/android.hardware.gnss/4/). For `--binder-headers`, combine the `android` subdirectories in [the platform Binder C++ headers](https://android.googlesource.com/platform/frameworks/native/+/4f463a6b1de9198963dc6aff74154a504ba3f8f6/libs/binder/ndk/include_cpp/) and [platform-only declarations](https://android.googlesource.com/platform/frameworks/native/+/4f463a6b1de9198963dc6aff74154a504ba3f8f6/libs/binder/ndk/include_platform/). These inputs are licensed by the Android Open Source Project under Apache 2.0. They remain build inputs. For `--platform-binder`, point to `system/lib64/libbinder_ndk.so` from the unpacked target runtime. That library is linked dynamically and stays out of the APK. Put the output at `app/src/main/assets/engines/n64-36/aemu-gnss-service`.
+
+Run the native record tests using a C11 compiler before rebuilding. The tests cover both measured and absent motion data, invalid bounds and stale or future timestamps.

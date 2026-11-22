@@ -26,6 +26,8 @@ struct decoder {
     struct video_open params;
     uint8_t *frame;
     uint8_t *sample;
+    uint32_t frame_width, frame_height;
+    size_t frame_capacity;
     size_t sample_capacity;
     bool running;
 };
@@ -33,8 +35,13 @@ struct decoder {
 static media_status_t (*next_decoder)(const AMediaFormat *, const AMediaCodecInfo **);
 static AMediaCodecType (*decoder_type)(const AMediaCodecInfo *);
 static const char *(*decoder_name)(const AMediaCodecInfo *);
+static int32_t (*decoder_feature)(const AMediaCodecInfo *, const char *);
 
-static bool has_hardware_decoder(uint32_t codec) {
+static bool supports_adaptive(const AMediaCodecInfo *entry) {
+    return decoder_feature(entry, "adaptive-playback") == 1;
+}
+
+static bool has_adaptive_hardware_decoder(uint32_t codec) {
     AMediaFormat *format = AMediaFormat_new();
     if (!format) return false;
     AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, video_mime(codec));
@@ -43,7 +50,7 @@ static bool has_hardware_decoder(uint32_t codec) {
     const AMediaCodecInfo *entry = NULL;
     bool hardware = false;
     while (next_decoder(format, &entry) == AMEDIA_OK && entry) {
-        if (decoder_type(entry) == AMediaCodecType_HARDWARE_ACCELERATED) {
+        if (decoder_type(entry) == AMediaCodecType_HARDWARE_ACCELERATED && supports_adaptive(entry)) {
             hardware = true;
             break;
         }
@@ -62,14 +69,10 @@ static void release_decoder(struct decoder *decoder) {
     free(decoder->sample);
 }
 
-static size_t frame_size(const struct decoder *decoder) {
-    return (size_t)decoder->params.width * decoder->params.height * 3 / 2;
-}
-
 static int start_decoder(int fd, struct decoder *decoder, struct video_format *reply) {
     struct video_open *open = &decoder->params;
     if (video_read(fd, open, sizeof *open) != 0 || open->magic != RME_VIDEO_MAGIC ||
-        !video_dimensions(open->width, open->height) || !video_mime(open->codec) ||
+        !video_open_dimensions(open) || !video_mime(open->codec) ||
         open->csd0_size > RME_VIDEO_MAX_CONFIG || open->csd1_size > RME_VIDEO_MAX_CONFIG) {
         return -1;
     }
@@ -80,6 +83,10 @@ static int start_decoder(int fd, struct decoder *decoder, struct video_format *r
     AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, mime);
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_WIDTH, (int32_t)open->width);
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_HEIGHT, (int32_t)open->height);
+    if (open->max_width) {
+        AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_MAX_WIDTH, (int32_t)open->max_width);
+        AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_MAX_HEIGHT, (int32_t)open->max_height);
+    }
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_COLOR_FORMAT, 0x7f420888); /* Flexible YUV420 */
     uint8_t *csd = malloc(RME_VIDEO_MAX_CONFIG);
     if (!csd) {
@@ -100,12 +107,10 @@ static int start_decoder(int fd, struct decoder *decoder, struct video_format *r
         AImageReader_getWindow(decoder->reader, &window) != AMEDIA_OK) {
         goto finish;
     }
-    decoder->frame = malloc(frame_size(decoder));
-    if (!decoder->frame) goto finish;
-
     const AMediaCodecInfo *entry = NULL;
     while (next_decoder(format, &entry) == AMEDIA_OK && entry) {
-        if (decoder_type(entry) != AMediaCodecType_HARDWARE_ACCELERATED) continue;
+        if (decoder_type(entry) != AMediaCodecType_HARDWARE_ACCELERATED ||
+            (open->max_width && !supports_adaptive(entry))) continue;
         const char *name = decoder_name(entry);
         if (!name || strlen(name) >= sizeof reply->decoder) continue;
         decoder->codec = AMediaCodec_createCodecByName(name);
@@ -152,16 +157,26 @@ static uint32_t submit(int fd, struct decoder *decoder, const struct video_packe
 static int copy_frame(struct decoder *decoder, AImage *image) {
     AImageCropRect crop = {0};
     if (AImage_getCropRect(image, &crop) != AMEDIA_OK || crop.left < 0 || crop.top < 0 ||
-        crop.right - crop.left != (int32_t)decoder->params.width ||
-        crop.bottom - crop.top != (int32_t)decoder->params.height) {
+        crop.right <= crop.left || crop.bottom <= crop.top || (crop.left & 1) || (crop.top & 1) ||
+        !video_output_dimensions(&decoder->params, (uint32_t)(crop.right - crop.left),
+                                 (uint32_t)(crop.bottom - crop.top))) {
         fprintf(stderr, "video: unexpected crop (%d,%d)-(%d,%d)\n", crop.left, crop.top, crop.right, crop.bottom);
         return -1;
+    }
+    const uint32_t frame_width = (uint32_t)(crop.right - crop.left);
+    const uint32_t frame_height = (uint32_t)(crop.bottom - crop.top);
+    const size_t frame_size = video_frame_size(frame_width, frame_height);
+    if (decoder->frame_capacity < frame_size) {
+        uint8_t *buffer = realloc(decoder->frame, frame_size);
+        if (!buffer) return -1;
+        decoder->frame = buffer;
+        decoder->frame_capacity = frame_size;
     }
     uint8_t *out = decoder->frame;
     for (int plane = 0; plane < 3; ++plane) {
         int shift = plane != 0;
-        int width = (int)decoder->params.width >> shift;
-        int height = (int)decoder->params.height >> shift;
+        int width = (int)frame_width >> shift;
+        int height = (int)frame_height >> shift;
         int32_t row_stride = 0, pixel_stride = 0, size = 0;
         uint8_t *data = NULL;
         media_status_t mapped = AImage_getPlaneData(image, plane, &data, &size);
@@ -173,9 +188,11 @@ static int copy_frame(struct decoder *decoder, AImage *image) {
                     plane, mapped, size, row_stride, row_status, pixel_stride, pixel_status);
             return -1;
         }
-        int64_t start = (int64_t)(crop.top >> shift) * row_stride + (int64_t)(crop.left >> shift) * pixel_stride;
-        int64_t end = start + (int64_t)(height - 1) * row_stride + (int64_t)(width - 1) * pixel_stride;
-        if (start < 0 || end >= size) {
+        const int64_t first_col = (int64_t)(crop.left >> shift) * pixel_stride;
+        const int64_t last_col = first_col + (int64_t)(width - 1) * pixel_stride;
+        const int64_t start = (int64_t)(crop.top >> shift) * row_stride + first_col;
+        const int64_t end = ((int64_t)(crop.top >> shift) + height - 1) * row_stride + last_col;
+        if (last_col >= row_stride || end >= size) {
             fprintf(stderr, "video: plane %d has %d bytes, needs %lld\n", plane, size, (long long)end + 1);
             return -1;
         }
@@ -185,6 +202,11 @@ static int copy_frame(struct decoder *decoder, AImage *image) {
             else for (int col = 0; col < width; ++col) out[col] = src[col * pixel_stride];
             out += width;
         }
+    }
+    if (decoder->frame_width != frame_width || decoder->frame_height != frame_height) {
+        fprintf(stderr, "video: output %ux%u\n", frame_width, frame_height);
+        decoder->frame_width = frame_width;
+        decoder->frame_height = frame_height;
     }
     return 0;
 }
@@ -221,7 +243,8 @@ static uint32_t receive(struct decoder *decoder, struct video_packet *reply) {
     if (AMediaCodec_releaseOutputBuffer(decoder->codec, (size_t)slot, has_frame) != AMEDIA_OK) return VIDEO_ERROR;
     if (has_frame) {
         if (acquire_frame(decoder) != 0) return VIDEO_ERROR;
-        reply->size = (uint32_t)frame_size(decoder);
+        reply->size = (uint32_t)video_frame_size(decoder->frame_width, decoder->frame_height);
+        reply->reserved = (decoder->frame_width << 16) | decoder->frame_height;
     }
     return VIDEO_OK;
 }
@@ -277,12 +300,13 @@ int main(int argc, char **argv) {
     next_decoder = dlsym(media, "AMediaCodecStore_findNextDecoderForFormat");
     decoder_type = dlsym(media, "AMediaCodecInfo_getMediaCodecInfoType");
     decoder_name = dlsym(media, "AMediaCodecInfo_getCanonicalName");
-    if (!next_decoder || !decoder_type || !decoder_name) {
+    decoder_feature = dlsym(media, "AMediaCodecInfo_isFeatureSupported");
+    if (!next_decoder || !decoder_type || !decoder_name || !decoder_feature) {
         fprintf(stderr, "video: Android Media NDK hardware codec discovery is unavailable\n");
         return 1;
     }
-    if (!has_hardware_decoder(VIDEO_AVC) || !has_hardware_decoder(VIDEO_HEVC)) {
-        fprintf(stderr, "video: host AVC and HEVC hardware decoders are unavailable\n");
+    if (!has_adaptive_hardware_decoder(VIDEO_AVC) || !has_adaptive_hardware_decoder(VIDEO_HEVC)) {
+        fprintf(stderr, "video: host adaptive AVC and HEVC hardware decoders are unavailable\n");
         return 1;
     }
     strcpy(address.sun_path, argv[1]);

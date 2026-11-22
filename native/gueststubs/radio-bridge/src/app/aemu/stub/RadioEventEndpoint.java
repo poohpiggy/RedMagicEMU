@@ -9,17 +9,24 @@ public final class RadioEventEndpoint {
     private final RadioVoiceService voice;
     private final RadioMessagingService messaging;
     private final SyntheticSingleSlot slot;
+    private final RadioNetworkService network;
     private final Object sessionGate = new Object();
     private boolean legacyRetired;
     private int legacyInFlight;
     private RadioEventSessionManager manager;
 
     RadioEventEndpoint(SyntheticSingleSlot slot, RadioVoiceService voice, RadioMessagingService messaging) {
+        this(slot,voice,messaging,null);
+    }
+
+    RadioEventEndpoint(SyntheticSingleSlot slot, RadioVoiceService voice, RadioMessagingService messaging,
+            RadioNetworkService network) {
         if (slot == null || voice == null || messaging == null ||
                 !voice.usesState(slot) || !messaging.usesState(slot))
             throw new IllegalArgumentException("both radio services must use the same single-slot state");
         if (!voice.claimEventEndpoint()) throw new IllegalStateException("voice event endpoint unavailable");
         this.slot = slot;
+        this.network = network;
         this.voice = voice; this.messaging = messaging;
     }
 
@@ -32,6 +39,7 @@ public final class RadioEventEndpoint {
         if (voice == null || messaging == null) throw new IllegalArgumentException("both radio models are required");
         if (!voice.claimEventEndpoint()) throw new IllegalStateException("voice event endpoint unavailable");
         this.slot = null;
+        this.network = null;
         this.voice = voice; this.messaging = messaging;
     }
 
@@ -73,6 +81,7 @@ public final class RadioEventEndpoint {
             if (manager != sessionOwner) throw new RemoteException("session owner mismatch");
         }
         if (!sessionOwner.isActive(source)) throw new RemoteException("session is not active");
+        if (network!=null) network.clearServingLte();
         voice.closeEventSession(source.epoch());
     }
 
@@ -98,6 +107,10 @@ public final class RadioEventEndpoint {
 
     private Outcome dispatchInternal(int kind, byte[] payload, long epoch, long sequence, boolean associated, boolean managed) {
         if (payload == null) return Outcome.REJECTED;
+        if (kind==5 && managed && network!=null) {
+            try { return network.updateServingLte(payload) ? Outcome.SUBMITTED : Outcome.REJECTED; }
+            catch (RemoteException | RuntimeException failure) { return Outcome.UNCERTAIN; }
+        }
         if (slot != null && !slot.canDeliverVoiceOrSms()) return Outcome.REJECTED;
         if (kind == 1) {
             if (payload.length == 0 || payload.length > 256) return Outcome.REJECTED;
