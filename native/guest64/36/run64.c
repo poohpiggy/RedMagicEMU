@@ -94,6 +94,8 @@ static int g_suid;              // saved user ID, used for unprivileged UID tran
 static u32 g_real_uid;
 static char g_qemu[512];        // qemu-arm for the firmware's 32-bit programs (AEMU64_QEMU)
 static int g_crash;
+static int g_magisk_interpreter, g_magisk_enabled;
+enum { EACCES = 13 };
 static u64 g_logdev, g_logino;      // the service log on descriptor 2 (a file or a pipe to the app)
 static int g_logpipe;
 static u64 g_inino;                 // ...and the pipe on descriptor 0
@@ -692,6 +694,18 @@ static long do_exec(const char *path, char *const argv[], char *const envp[]) {
     if (!host) return err;
     long r = S4(NR_faccessat, AT_FDCWD, host, 1 /*X_OK*/, 0);
     if (r < 0) return r;
+    int magisk_exec = g_magisk_enabled &&
+        (seq(path, "/debug_ramdisk/su") || seq(path, "/debug_ramdisk/magisk"));
+    if (magisk_exec) {
+        char magisk[PATH_MAX];
+        struct kstat executable, expected;
+        memcpy(magisk, g_root, g_rootlen);
+        memcpy(magisk + g_rootlen, "/debug_ramdisk/magisk", sizeof "/debug_ramdisk/magisk");
+        if (S4(NR_newfstatat, AT_FDCWD, host, &executable, 0) < 0 ||
+            S4(NR_newfstatat, AT_FDCWD, magisk, &expected, 0) < 0 ||
+            executable.st_dev != expected.st_dev || executable.st_ino != expected.st_ino)
+            return -EACCES;
+    }
     u64 na = 0, ne = 0;
     if (argv) while (argv[na]) na++;
     if (envp) while (envp[ne]) ne++;
@@ -699,9 +713,13 @@ static long do_exec(const char *path, char *const argv[], char *const envp[]) {
     char **v = (char **)S6(NR_mmap, 0, need, 3, 0x22, -1, 0);
     if ((u64)v >= (u64)-4095) return -ENOMEM;
     char **a = v, **e;
-    *a++ = g_self;
-    *a++ = (char *)(na ? argv[0] : path);
-    *a++ = (char *)host;
+    if (magisk_exec) {
+        *a++ = (char *)host;
+    } else {
+        *a++ = g_self;
+        *a++ = (char *)(na ? argv[0] : path);
+        *a++ = (char *)host;
+    }
     for (u64 i = 1; i < na; i++) *a++ = argv[i];
     *a++ = 0;
     e = a;
@@ -724,8 +742,16 @@ static long do_exec(const char *path, char *const argv[], char *const envp[]) {
     if (g_qemu[0]) { memcpy(e_qemu, "AEMU64_QEMU=", 12); memcpy(e_qemu + 12, g_qemu, slen(g_qemu) + 1); *a++ = e_qemu; }
     static char e_sd[540];
     if (g_sdlen) { memcpy(e_sd, "AEMU64_SDCARD=", 14); memcpy(e_sd + 14, g_sd, g_sdlen + 1); *a++ = e_sd; }
+    if (g_magisk_enabled) *a++ = "AEMU64_MAGISK_ENABLED=1";
+    if (magisk_exec) {
+        static char interpreter_env[540];
+        const char key[] = "AEMU64_MAGISK_INTERPRETER=";
+        memcpy(interpreter_env, key, sizeof key - 1);
+        memcpy(interpreter_env + sizeof key - 1, g_self, slen(g_self) + 1);
+        *a++ = interpreter_env;
+    }
     *a++ = 0;
-    r = S3(NR_execve, g_self, v, e);
+    r = S3(NR_execve, magisk_exec ? host : g_self, v, e);
     S2(NR_munmap, v, need);
     return r;
 }
@@ -888,6 +914,8 @@ static long trap(long nr, long *a, void *uc) {
 }
 
 #define PB(i) ((*pbp ? *pbp : (*pbp = pb_get())) + (i) * PATH_MAX)
+
+#include "magisk_peer_credentials.h"
 
 static long trap2(long nr, long *a, void *uc, char **pbp) {
     int err = 0;
@@ -1501,6 +1529,7 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
         if (r == 0 && a[1] == 1 && a[2] == 17 && a[3] && a[4] && *(u32 *)a[4] >= 12) {
             u32 *uc3 = (u32 *)a[3];             // struct ucred: pid, uid, gid
             char p[512], t[48];
+            if (g_magisk_interpreter) return magisk_peer_credentials(uc3);
             uc3[1] = uc3[2] = 0;
             if (ids_path(p, (long)uc3[0])) {
                 long fd = S4(NR_openat, AT_FDCWD, p, 02000000, 0);
@@ -1902,7 +1931,9 @@ void aemu_main(u64 *sp) {
     long argc = (long)sp[0];
     char **argv = (char **)(sp + 1), **envp = argv + argc + 1;
     u64 *auxv; { char **e = envp; while (*e) e++; auxv = (u64 *)(e + 1); }
-    if (argc < 3) die("usage: aemu64 <argv0> <guest program> [args…]", "");
+    const char *interpreter = env_get(envp, "AEMU64_MAGISK_INTERPRETER");
+    g_magisk_enabled = env_get(envp, "AEMU64_MAGISK_ENABLED") != 0;
+    if (!interpreter && argc < 3) die("usage: aemu64 <argv0> <guest program> [args…]", "");
 
     const char *r = env_get(envp, "AEMU64_ROOT");
     if (!r || !r[0] || slen(r) >= sizeof g_root) die("AEMU64_ROOT is not set", "");
@@ -1928,6 +1959,33 @@ void aemu_main(u64 *sp) {
     long n = S4(NR_readlinkat, AT_FDCWD, "/proc/self/exe", g_self, sizeof g_self - 1);
     if (n <= 0) die("cannot find myself", "");
     g_self[n] = 0;
+    if (interpreter) {
+        char expected[PATH_MAX];
+        struct kstat actual_stat, expected_stat;
+        static char *bootstrap[4100];
+        const char program[] = "/debug_ramdisk/magisk";
+        const char su[] = "/debug_ramdisk/su";
+        if (argc < 1 || argc > 4096 || interpreter[0] != '/' || slen(interpreter) >= sizeof g_self)
+            die("invalid Magisk test launch", "");
+        memcpy(expected, g_root, g_rootlen);
+        memcpy(expected + g_rootlen, program, sizeof program);
+        if (S4(NR_newfstatat, AT_FDCWD, "/proc/self/exe", &actual_stat, 0) < 0 ||
+            S4(NR_newfstatat, AT_FDCWD, expected, &expected_stat, 0) < 0 ||
+            actual_stat.st_dev != expected_stat.st_dev || actual_stat.st_ino != expected_stat.st_ino)
+            die("unexpected Magisk executable", "");
+        int valid_argv0 = seq(argv[0], expected);
+        memcpy(expected + g_rootlen, su, sizeof su);
+        if (!valid_argv0 && !seq(argv[0], expected)) die("invalid Magisk applet path", "");
+        memcpy(g_self, interpreter, slen(interpreter) + 1);
+        bootstrap[0] = g_self;
+        bootstrap[1] = argv[0]; // Magisk rewrites argv[0] when it becomes magiskd.
+        bootstrap[2] = "/debug_ramdisk/magisk";
+        for (int i = 1; i < argc; ++i) bootstrap[i + 2] = argv[i];
+        bootstrap[argc + 2] = 0;
+        argv = bootstrap;
+        argc += 2;
+        g_magisk_interpreter = 1;
+    }
     g_real_uid = (u32)S0(NR_getuid);
     bct_init();
     // a service starts in "/": 8.1 looks for vendor/etc/media_profiles_V1_0.xml by a relative path. Our own exec of a
@@ -2064,6 +2122,8 @@ void aemu_main(u64 *sp) {
     if (g_vibrator_preload < 0) die("vibration preload conflicts with LD_PRELOAD", "");
     if (g_vibrator_preload && env_get(envp, "AEMU64_F")) die("vibration descriptor filter unavailable after inherited exec", "");
     if ((err = load_elf(prog, &exe))) die("cannot load ", prog);
+    if (g_magisk_interpreter)
+        memcpy(exe.interp, "/system/bin/linker64", sizeof "/system/bin/linker64");
     u64 entry = exe.entry, base = 0;
     if (exe.interp[0]) {
         char ib[PATH_MAX];

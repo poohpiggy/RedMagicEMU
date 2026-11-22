@@ -240,6 +240,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     private val hostVulkan = HostVulkanVmHost(HostVulkanService(), ::log) { android.os.Process.myPid() }
     private val hostOpenCl = HostOpenClVmHost(::log)
     private val videoRuntime = TargetVideoRuntime(paths.root) { ctx.assets.open(it) }
+    private val magiskRuntime = TargetMagiskRuntime(paths)
     private val cameraModeRuntime = TargetCameraModeRuntime(paths.root) {
         EngineAssets.open(ctx, "engines/n64-36-camera-adapter/rme-camera-adapter.jar")
     }
@@ -295,6 +296,12 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                     closeExperimentalVibration()?.let { t.addSuppressed(it) }
                     closeRadioChannelForStop(radioEvents) { radioEvents = null }?.let { cleanup ->
                         log("radio: event channel cleanup failed: ${cleanup.javaClass.simpleName}")
+                    }
+                    if (admissionState.admitted) {
+                        runCatching { magiskRuntime.close() }.onFailure {
+                            t.addSuppressed(it)
+                            log("Guest Magisk cleanup unconfirmed: ${it.message}")
+                        }
                     }
                     if (!stopping) {
                         failure = t.message ?: t.toString()
@@ -564,9 +571,8 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         // 1. дерево
         val fixer = TreeFixer(ctx, paths, img, ::log)
         fixer.fixup()
-        val targetCamera = engine == Engine.N64 && img.api == 36 && img.model == "NX809J" && img.abi == "arm64-v8a"
-        val singleRearCamera = if (targetCamera) cameraModeRuntime.install() else false
-        if (targetCamera) {
+        val singleRearCamera = if (isTargetGuest) cameraModeRuntime.install() else false
+        if (isTargetGuest) {
             videoRuntime.restoreCameraEncoder()
             val rear1080p60 = prepareGuestAvcEncoder(camera.prepareRearVideo())
             if (!rear1080p60) camera.disableRearVideo()
@@ -610,8 +616,8 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         }
         val overrides = LinkedHashMap<String, String>()
         if (singleRearCamera) overrides["ro.vendor.feature.camera_system_info"] = "single"
-        // 2.3: ro.kernel.qemu=1 включает в фреймворке режим эмулятора — ставим его только mediaserver
-        overrides["ro.kernel.qemu"] = if (engine == Engine.GB) "0" else "1"
+        // The NX809J Guest uses the stock firmware's framework defaults.
+        if (!isTargetGuest) overrides["ro.kernel.qemu"] = if (engine == Engine.GB) "0" else "1"
         overrides["ro.kernel.qemu.gles"] = if (s.gpu && (s.hwui || engine == Engine.GB)) "1" else "0"
         overrides["qemu.gles"] = if (s.gpu) "1" else "0"
         if (engine == Engine.N64) {             // SwiftShader (GLES 2/3 on the CPU) where the engine has it for this release
@@ -993,6 +999,17 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         }
         projectSelection?.let { TargetCarrierProperties.requireVariantMatches(it.variant, props.get("persist.vendor.custom.variant.id")) }
 
+        magiskRuntime.close()
+        if (s.magisk) {
+            check(app.aemu.BuildConfig.MAGISK_AVAILABLE && TargetMagiskRuntime.applies(img) && linkerConfigReady) {
+                "Guest Magisk is unavailable in this build or linker configuration"
+            }
+            magiskRuntime.prepare(r.qemu)
+            r.magiskEnabled = true
+            magiskRuntime.start(r)
+            log("Guest Magisk 31.1 is ready")
+        }
+
         // 5. службы гостя по плану из init.rc прошивки
         val plan = servicePlan()
         val targetWifi = TargetWifiLaunch.select(fixer.wifiPrepared, img.api, img.model, img.abi, engine,
@@ -1291,7 +1308,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         // AudioPolicyManagerBase. Galaxy S I9000 2.1/2.2 libaudioflinger has neither that class nor
         // AudioHardwareGeneric, the emulator branch leaves mpPolicyManager null and mediaserver dies (SIGSEGV)
         // (the global copy carries ro.kernel.qemu=1 too; the check is property_get()'s length, so "0" still counts: empty)
-        if (svc.name == "mediaserver")
+        if (svc.name == "mediaserver" && !isTargetGuest)
             props = this.props.privateCopy("media", mapOf("ro.kernel.qemu" to
                 if (img.api in 8..10 && !hasPolicyBase() || TreeFixer.legacyAudioWantsNoQemu(paths.root)) "" else "1"))
         val argv = if (svc.name == "zygote" && !settings.jit && img.runtime == "dalvik")
@@ -1826,6 +1843,11 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     private fun afterBoot() {
         val r = guestRunner
         if (skipWizardNow()) return   // the system comes up again and gets here once more
+        if (r.magiskEnabled) lifecycle.launch("vm-magisk-manager") {
+            runCatching { magiskRuntime.installManager(r, shellPrefix) }
+                .onSuccess(::log)
+                .onFailure { log("Guest Magisk Manager installation failed: ${it.message}") }
+        }
         lifecycle.launch("vm-ringtone-index") {
             try {
                 val result = TargetRingtoneIndex.ensureWithRetry(img.api, img.model, img.abi, engine, { wait ->
@@ -1873,7 +1895,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             }
         }
         if (stopping) return
-        if (usesGuestStayAwake) {
+        if (isTargetGuest) {
             runCatching { guestStayAwake() }.onFailure { log("stay awake: ${it.message}") }
         } else {
             r.run(listOf("/system/bin/sh", "-c", "export PATH=/system/bin:/system/xbin:\$PATH; svc power stayon true"), 60_000)
@@ -2335,10 +2357,13 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             adb.stop()
             var videoCleanupFailure: Throwable? = null
             var cameraModeCleanupFailure: Throwable? = null
+            var magiskCleanupFailure: Throwable? = null
             if (admissionState.admitted) {
                 log("stopping system")
                 runCatching { guestRunner.run(listOf("/system/bin/sync"), 5_000, start = ::startCleanupSync) }
                 killAll()
+                magiskCleanupFailure = runCatching { magiskRuntime.close() }.exceptionOrNull()
+                magiskCleanupFailure?.let { log("Guest Magisk cleanup unconfirmed: ${it.message}") }
                 cameraModeCleanupFailure = runCatching { cameraModeRuntime.restore() }.exceptionOrNull()
                 cameraModeCleanupFailure?.let { log("Guest camera mode cleanup unconfirmed: ${it.message}") }
                 if (videoHost != null) {
@@ -2366,7 +2391,8 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                 Keeper.release(ctx)
             }
             val cleanupFailures = listOfNotNull(dnsCleanupFailure, radioCleanupFailure,
-                vibrationCleanupFailure, vulkanCleanupFailure, openClCleanupFailure, videoCleanupFailure, cameraModeCleanupFailure)
+                vibrationCleanupFailure, vulkanCleanupFailure, openClCleanupFailure, videoCleanupFailure,
+                cameraModeCleanupFailure, magiskCleanupFailure)
             cleanupFailures.firstOrNull()?.let { failure ->
                 cleanupFailures.drop(1).filter { it !== failure }.forEach(failure::addSuppressed)
                 throw failure
@@ -2451,7 +2477,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         guestRunner.run(listOf("/system/bin/sh", "-c", shellPrefix + cmd), timeoutMs).second
     }
 
-    private val usesGuestStayAwake get() =
+    private val isTargetGuest get() =
         img.api == 36 && img.model == "NX809J" && img.abi == "arm64-v8a" && engine == Engine.N64
 
     private val stayAwakeControl = GuestStayAwake { cmd ->
@@ -2461,7 +2487,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     }
 
     internal fun guestStayAwake(on: Boolean? = null): Boolean = lifecycle.run {
-        if (usesGuestStayAwake) {
+        if (isTargetGuest) {
             if (on == null) stayAwakeControl.initialize() else stayAwakeControl.set(on)
         } else {
             val ns = if (img.api >= 17) "global" else "system"

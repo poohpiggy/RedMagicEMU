@@ -333,4 +333,6 @@
     <string name="import_recovery_error">Could not check unfinished import data</string>
     <string name="instance_settings">Instance settings</string>
     <string name="about_title">About</string>
+    <string name="vs_magisk">Magisk Root</string>
+    <string name="vs_magisk_sub">Enable Magisk 31.1 in this Guest. Takes effect after restarting the instance.</string>
 </resources>

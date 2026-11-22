@@ -8,16 +8,6 @@
 
 RedMagicEMU 是一个独立维护的 Android 固件模拟器。当前支持导入 REDMAGIC NX809J 的原厂 Android 16（API 36、ARM64）固件，在 Android 宿主上运行原厂系统。宿主设备品牌不限。
 
-[下载 0.6.6-beta APK](https://github.com/poohpiggy/RedMagicEMU/releases/download/0.6.6-beta/RedMagicEMU-0.6.6-beta.apk)
-
-## 0.6.6-beta
-
-- 修复 NX809J 原厂相机启动时的预览闪退。
-- 首页以实例卡片展示固件和运行状态。导入时在卡片上显示进度，缩短了解包和校验的等待时间。
-- 可以独立重置实例数据。实例设置提供内存、分辨率和垂直同步选项，浮动菜单可以保持屏幕常亮。
-- Vulkan 支持 Android 窗口和交换链。修复安兔兔 GPU 场景启动闪退，并减少宿主与 Guest 之间的命令往返和画面拷贝开销。
-- Android 16 宿主支持相应硬件解码器时，Guest 可调用宿主解码 H.264 和 HEVC。修复媒体服务释放 Binder 描述符时的泄漏。
-
 ## 已实现的功能
 
 - **固件导入**。导入原厂 ZIP，检查归档条目、镜像大小、CRC、分区结构和固件指纹。
@@ -37,6 +27,8 @@ RedMagicEMU 是一个独立维护的 Android 固件模拟器。当前支持导�
 ```sh
 ./gradlew :app:assembleRelease
 ```
+
+构建包含 Magisk Root 的版本时，请使用 [Magisk 适配版构建说明](third_party/magisk/README.md) 中的 APK 和校验参数。
 
 ## 致谢与许可证
 

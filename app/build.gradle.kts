@@ -1,5 +1,7 @@
+import com.android.apksig.ApkVerifier
 import java.util.Properties
 import java.security.MessageDigest
+import java.util.zip.ZipFile
 
 plugins {
     id("com.android.application")
@@ -45,6 +47,64 @@ val packEngines = tasks.register("packEngines") {
 }
 tasks.named("preBuild") { dependsOn(packEngines) }
 
+val magiskApk = providers.gradleProperty("rmeMagiskApk").map { rootProject.file(it) }
+val magiskOut = layout.buildDirectory.dir("generated/magiskAssets")
+if (magiskApk.isPresent) {
+    val expectedDigest = providers.gradleProperty("rmeMagiskApkSha256").orNull
+    check(expectedDigest != null && expectedDigest.matches(Regex("[0-9a-f]{64}"))) {
+        "Set rmeMagiskApkSha256 to the verified SHA-256 of the RedMagicEMU Magisk build"
+    }
+    val packMagisk = tasks.register("packMagisk") {
+        inputs.file(magiskApk)
+        inputs.property("magiskApkSha256", expectedDigest)
+        outputs.dir(magiskOut)
+        doLast {
+            fun digest(file: File) = MessageDigest.getInstance("SHA-256").digest(file.readBytes())
+                .joinToString("") { "%02x".format(it) }
+            val apk = magiskApk.get()
+            check(digest(apk) == expectedDigest) { "RedMagicEMU Magisk APK digest mismatch" }
+            val signature = ApkVerifier.Builder(apk).build().verify()
+            check(signature.isVerified && signature.isVerifiedUsingV2Scheme) {
+                "RedMagicEMU Magisk APK must have a valid v2 signature"
+            }
+            val certificate = signature.signerCertificates.single().encoded
+            val out = magiskOut.get().dir("rme-magisk").asFile.apply { mkdirs() }
+            apk.copyTo(File(out, "manager.apk"), overwrite = true)
+            File(out, "manager.apk.sha256").writeText(expectedDigest)
+            ZipFile(apk).use { zip ->
+                check(zip.comment?.lineSequence()?.contains("versionCode=31100") == true) {
+                    "RedMagicEMU Magisk must be built from version 31.1"
+                }
+                fun extract(source: String, destination: File) {
+                    val entry = checkNotNull(zip.getEntry(source)) { "RedMagicEMU Magisk is missing $source" }
+                    zip.getInputStream(entry).use { input ->
+                        destination.outputStream().use { output -> input.copyTo(output) }
+                    }
+                }
+                val binary = File(out, "magisk")
+                extract("lib/arm64-v8a/libmagisk.so", binary)
+                val nativeBytes = binary.readBytes()
+                check((0..nativeBytes.size - certificate.size).any { start ->
+                    nativeBytes[start] == certificate[0] &&
+                        certificate.indices.all { offset -> nativeBytes[start + offset] == certificate[offset] }
+                }) { "Guest Magisk daemon does not contain the Manager certificate" }
+                File(out, "magisk.sha256").writeText(digest(binary))
+                val tools = File(out, "tools").apply { mkdirs() }
+                for (name in listOf("busybox", "magiskboot", "magiskinit", "magiskpolicy")) {
+                    extract("lib/arm64-v8a/lib$name.so", File(tools, name))
+                }
+                for (name in listOf("util_functions.sh", "boot_patch.sh", "app_functions.sh")) {
+                    extract("assets/$name", File(tools, name))
+                }
+                check(File(tools, "app_functions.sh").readText().contains(".magisk/rme-bin")) {
+                    "Magisk manager is missing the RedMagicEMU Guest environment check"
+                }
+            }
+        }
+    }
+    tasks.named("preBuild") { dependsOn(packMagisk) }
+}
+
 android {
     namespace = "app.aemu"
     compileSdk = 36
@@ -55,8 +115,9 @@ android {
         // 28: гостевые бинарники запускаются из каталога данных приложения (W^X для targetSdk>=29)
         //noinspection ExpiredTargetSdkVersion
         targetSdk = 28
-        versionCode = 20
-        versionName = "0.6.9-location-test"
+        versionCode = if (magiskApk.isPresent) 23 else 20
+        versionName = if (magiskApk.isPresent) "0.7.0-beta" else "0.6.9-location-test"
+        buildConfigField("boolean", "MAGISK_AVAILABLE", magiskApk.isPresent.toString())
         ndk { abiFilters += listOf("arm64-v8a") }
     }
 
@@ -82,6 +143,7 @@ android {
     }
 
     sourceSets["main"].assets.setSrcDirs(listOf(engineOut))
+    if (magiskApk.isPresent) sourceSets["main"].assets.srcDir(magiskOut)
     val generatedGpuBridge = rootProject.layout.buildDirectory.dir("generated/rme-gpu-bridge").get().asFile
     val gpuBridge = providers.gradleProperty("rmeGpuBridgeDir").orNull?.let(rootProject::file)
         ?: generatedGpuBridge.takeIf { File(it, "assets/rme-gpu/guest.idx").isFile }

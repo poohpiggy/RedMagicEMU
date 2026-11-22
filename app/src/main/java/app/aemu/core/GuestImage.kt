@@ -59,6 +59,7 @@ data class VmSettings(
     val qemuArgs: String = "",
     /** Per-instance virtual access point settings, not the host Wi-Fi configuration. */
     val virtualWifi: TargetVirtualWifiConfig = TargetVirtualWifiConfig(),
+    val magisk: Boolean = false,
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("width", width).put("height", height).put("density", density)
@@ -71,6 +72,7 @@ data class VmSettings(
         .put("mtMode", mtMode).put("legacyEngine", legacyEngine).put("open32", open32)
         .put("ramMb", ramMb).put("diskMb", diskMb).put("radio", radio).put("native32", native32).put("imei", imei).put("qemuArgs", qemuArgs)
         .put("virtualWifi", JSONObject().put("ssid", virtualWifi.ssid).put("rssiDbm", virtualWifi.rssiDbm))
+        .put("magisk", magisk)
 
     internal fun withNx809jDisplay(): VmSettings = copy(width = 1216, height = 2688, density = 520)
 
@@ -121,6 +123,7 @@ data class VmSettings(
                     TargetVirtualWifiConfig(wifi.optString("ssid", dWifi.ssid),
                         wifi.optInt("rssiDbm", dWifi.rssiDbm))
                 } ?: TargetVirtualWifiConfig(),
+                magisk = o.optBoolean("magisk", false),
             )
         }
     }

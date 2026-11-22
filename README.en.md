@@ -8,16 +8,6 @@
 
 RedMagicEMU is an independently maintained Android firmware emulator. It currently imports stock REDMAGIC NX809J firmware based on Android 16 (API 36, ARM64) and runs the stock system on an Android host. The host can be from any device brand.
 
-[Download the 0.6.6-beta APK](https://github.com/poohpiggy/RedMagicEMU/releases/download/0.6.6-beta/RedMagicEMU-0.6.6-beta.apk)
-
-## 0.6.6-beta
-
-- Fixed a preview crash when opening the stock NX809J camera.
-- The home screen uses instance cards to show firmware and runtime status. Cards show import progress, and optimized extraction and verification reduce the wait.
-- You can reset data for individual instances. Instance settings include memory, resolution, and vertical sync options. The floating menu can keep the screen on.
-- Vulkan supports Android windows and swapchains. This release fixes a crash on launch in an AnTuTu GPU scene and reduces command round trips and frame copying between the host and guest.
-- On Android 16 hosts with the corresponding hardware decoders, the guest can use the host to decode H.264 and HEVC. This release also fixes a Binder descriptor leak when the media service releases descriptors.
-
 ## Features
 
 - **Firmware import.** Imports the stock ZIP and checks archive entries, image sizes, CRCs, partition structure, and firmware fingerprints.
@@ -37,6 +27,8 @@ Building from source requires JDK 21, Android SDK 36, and NDK r28.
 ```sh
 ./gradlew :app:assembleRelease
 ```
+
+To include Magisk Root, use the APK and verification flags in the [Magisk build instructions](third_party/magisk/README.md).
 
 ## Credits and license
 

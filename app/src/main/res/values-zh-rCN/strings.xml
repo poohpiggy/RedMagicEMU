@@ -333,4 +333,6 @@
     <string name="import_recovery_error">无法检查未完成的导入数据</string>
     <string name="instance_settings">实例设置</string>
     <string name="about_title">关于</string>
+    <string name="vs_magisk">Magisk Root</string>
+    <string name="vs_magisk_sub">仅为这个实例启用 Magisk 31.1，重启实例后生效。</string>
 </resources>

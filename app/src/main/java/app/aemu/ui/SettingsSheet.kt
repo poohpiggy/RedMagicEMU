@@ -1,6 +1,7 @@
 package app.aemu.ui
 
 import app.aemu.R
+import app.aemu.BuildConfig
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.tween
@@ -56,6 +57,7 @@ import app.aemu.core.GuestBatteryState
 import app.aemu.core.GuestImage
 import app.aemu.core.HostBatteryProtocol
 import app.aemu.core.TargetNetworkMode
+import app.aemu.core.TargetMagiskRuntime
 import app.aemu.core.TargetWifiArtifacts
 import app.aemu.core.TargetVirtualWifiConfig
 import app.aemu.core.VmSettings
@@ -159,6 +161,13 @@ internal fun SettingsSheet(
             Text(stringResource(R.string.instance_settings), style = MaterialTheme.typography.headlineSmall)
             Text(img.name, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(16.dp))
+
+            if ((BuildConfig.MAGISK_AVAILABLE || s.magisk) && TargetMagiskRuntime.applies(img)) {
+                Toggle(stringResource(R.string.vs_magisk), stringResource(R.string.vs_magisk_sub), s.magisk) {
+                    s = s.copy(magisk = it)
+                }
+                Spacer(Modifier.height(8.dp))
+            }
 
             Text(stringResource(R.string.vs_screen), style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(8.dp))

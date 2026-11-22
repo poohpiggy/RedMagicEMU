@@ -1,0 +1,269 @@
+diff --git a/app/apk/src/main/java/com/topjohnwu/magisk/ui/home/HomeScreen.kt b/app/apk/src/main/java/com/topjohnwu/magisk/ui/home/HomeScreen.kt
+index 024fe4b..a8cb152 100644
+--- a/app/apk/src/main/java/com/topjohnwu/magisk/ui/home/HomeScreen.kt
++++ b/app/apk/src/main/java/com/topjohnwu/magisk/ui/home/HomeScreen.kt
+@@ -115,7 +115,6 @@ fun HomeScreen(
+     var managerUpdate by rememberSaveable { mutableStateOf<UpdateInfo?>(null) }
+     var showEnvFixDialog by rememberSaveable { mutableStateOf(false) }
+     var showInstallDialog by rememberSaveable { mutableStateOf(false) }
+-    var envFixCode by rememberSaveable { mutableIntStateOf(0) }
+ 
+     LaunchedEffect(uiState.showUninstall) {
+         if (uiState.showUninstall) {
+@@ -131,7 +130,6 @@ fun HomeScreen(
+     }
+     LaunchedEffect(uiState.envFixCode) {
+         if (uiState.envFixCode != 0) {
+-            envFixCode = uiState.envFixCode
+             showEnvFixDialog = true
+             viewModel.onEnvFixConsumed()
+         }
+@@ -170,16 +168,7 @@ fun HomeScreen(
+ 
+     if (showEnvFixDialog) {
+         EnvFixComposableDialog(
+-            code = envFixCode,
+             onDismiss = { showEnvFixDialog = false },
+-            onNavigateInstall = {
+-                showEnvFixDialog = false
+-                showInstallDialog = true
+-            },
+-            onFixEnv = {
+-                showEnvFixDialog = false
+-                viewModel.fixEnv()
+-            }
+         )
+     }
+ 
+@@ -191,19 +180,6 @@ fun HomeScreen(
+             TopAppBar(
+                 title = { Text(stringResource(CoreR.string.section_home)) },
+                 scrollBehavior = scrollBehavior,
+-                actions = {
+-                    if (Info.env.isActive) {
+-                        IconButton(onClick = { viewModel.onDeletePressed() }) {
+-                            Icon(
+-                                imageVector = Icons.Default.Delete,
+-                                contentDescription = stringResource(CoreR.string.uninstall_magisk_title),
+-                            )
+-                        }
+-                    }
+-                    if (Info.isRooted) {
+-                        RebootButton()
+-                    }
+-                }
+             )
+         }
+     ) { padding ->
+@@ -237,7 +213,6 @@ fun HomeScreen(
+                     modifier = Modifier.fillMaxWidth(),
+                     state = uiState.magiskState,
+                     version = uiState.magiskInstalledVersion,
+-                    onInstallClicked = { showInstallDialog = true }
+                 )
+ 
+                 StatusCard()
+@@ -248,7 +223,6 @@ fun HomeScreen(
+                     version = uiState.managerInstalledVersion,
+                     remoteVersion = uiState.managerRemoteVersion,
+                     progress = uiState.managerProgress,
+-                    onManagerPressed = viewModel::onManagerPressed,
+                 )
+             },
+             second = {
+@@ -451,17 +425,9 @@ private fun InstallButton(
+ private fun CoreCard(
+     state: HomeViewModel.State,
+     version: String,
+-    onInstallClicked: () -> Unit,
+     modifier: Modifier = Modifier,
+ ) {
+     val isInstalled = state != HomeViewModel.State.INVALID
+-    val actionLabel = when (state) {
+-        HomeViewModel.State.OUTDATED -> stringResource(CoreR.string.update)
+-        HomeViewModel.State.INVALID -> stringResource(CoreR.string.install)
+-        HomeViewModel.State.UP_TO_DATE -> stringResource(CoreR.string.reinstall)
+-        HomeViewModel.State.LOADING -> null
+-    }
+-
+     Card(
+         modifier = modifier,
+         shape = RoundedCornerShape(20.dp),
+@@ -505,14 +471,6 @@ private fun CoreCard(
+                     )
+                 }
+             }
+-
+-            if (actionLabel != null) {
+-                InstallButton(
+-                    label = actionLabel,
+-                    onClick = onInstallClicked,
+-                    isPrimary = !isInstalled,
+-                )
+-            }
+         }
+     }
+ }
+@@ -524,15 +482,8 @@ private fun AppCard(
+     version: String,
+     remoteVersion: String,
+     progress: Int,
+-    onManagerPressed: () -> Unit,
+     modifier: Modifier = Modifier,
+ ) {
+-    val actionLabel = when (state) {
+-        HomeViewModel.State.OUTDATED -> stringResource(CoreR.string.update)
+-        HomeViewModel.State.UP_TO_DATE -> stringResource(CoreR.string.reinstall)
+-        else -> null
+-    }
+-
+     Card(
+         modifier = modifier,
+         shape = RoundedCornerShape(20.dp),
+@@ -561,13 +512,6 @@ private fun AppCard(
+                         style = MaterialTheme.typography.titleLarge
+                     )
+                 }
+-
+-                if (actionLabel != null) {
+-                    InstallButton(
+-                        label = actionLabel,
+-                        onClick = onManagerPressed,
+-                    )
+-                }
+             }
+ 
+             Spacer(Modifier.height(16.dp))
+@@ -854,32 +798,13 @@ private fun ManagerInstallComposableDialog(
+ }
+ 
+ @Composable
+-private fun EnvFixComposableDialog(
+-    code: Int,
+-    onDismiss: () -> Unit,
+-    onNavigateInstall: () -> Unit,
+-    onFixEnv: () -> Unit,
+-    modifier: Modifier = Modifier
+-) {
+-    val needsFullFix = code == 2 ||
+-        Info.env.versionCode != BuildConfig.APP_VERSION_CODE ||
+-        Info.env.versionString != BuildConfig.APP_VERSION_NAME
+-
++private fun EnvFixComposableDialog(onDismiss: () -> Unit) {
+     MagiskDialog(
+-        modifier = modifier,
+         onDismissRequest = onDismiss,
+         title = stringResource(CoreR.string.env_fix_title),
+         confirmText = stringResource(android.R.string.ok),
+-        onConfirm = {
+-            if (needsFullFix) onNavigateInstall() else onFixEnv()
+-        },
+-        dismissText = stringResource(android.R.string.cancel),
+-        onDismiss = onDismiss,
++        onConfirm = onDismiss,
+     ) {
+-        Text(
+-            text = stringResource(
+-                if (needsFullFix) CoreR.string.env_full_fix_msg else CoreR.string.env_fix_msg
+-            )
+-        )
++        Text(stringResource(CoreR.string.rme_guest_env_msg))
+     }
+ }
+diff --git a/app/build-logic/src/main/java/Setup.kt b/app/build-logic/src/main/java/Setup.kt
+index 910e936..b4c48f2 100644
+--- a/app/build-logic/src/main/java/Setup.kt
++++ b/app/build-logic/src/main/java/Setup.kt
+@@ -272,7 +272,7 @@ fun Project.setupMainApk() {
+         namespace = "com.topjohnwu.magisk"
+ 
+         defaultConfig {
+-            applicationId = "com.topjohnwu.magisk"
++            applicationId = "app.redmagicemu.magisk"
+             versionName = Config.version
+             versionCode = Config.versionCode
+             ndk {
+diff --git a/app/core/build.gradle.kts b/app/core/build.gradle.kts
+index 1646bb1..2abf783 100644
+--- a/app/core/build.gradle.kts
++++ b/app/core/build.gradle.kts
+@@ -20,7 +20,7 @@ android {
+     namespace = "com.topjohnwu.magisk.core"
+ 
+     defaultConfig {
+-        buildConfigField("String", "APP_PACKAGE_NAME", "\"com.topjohnwu.magisk\"")
++        buildConfigField("String", "APP_PACKAGE_NAME", "\"app.redmagicemu.magisk\"")
+         buildConfigField("int", "APP_VERSION_CODE", "${Config.versionCode}")
+         buildConfigField("String", "APP_VERSION_NAME", "\"${Config.version}\"")
+         consumerProguardFile("proguard-rules.pro")
+diff --git a/app/core/src/main/AndroidManifest.xml b/app/core/src/main/AndroidManifest.xml
+index 600bf98..8a747fe 100644
+--- a/app/core/src/main/AndroidManifest.xml
++++ b/app/core/src/main/AndroidManifest.xml
+@@ -38,7 +38,7 @@
+         android:allowBackup="false"
+         android:enableOnBackInvokedCallback="true"
+         android:icon="@drawable/ic_launcher"
+-        android:label="Magisk"
++        android:label="Magisk for RedMagicEMU"
+         android:requestLegacyExternalStorage="true"
+         android:supportsRtl="true"
+         android:theme="@android:style/Theme.Translucent.NoTitleBar"
+diff --git a/app/core/src/main/res/values-zh-rCN/strings.xml b/app/core/src/main/res/values-zh-rCN/strings.xml
+index a0c055d..785c5f1 100644
+--- a/app/core/src/main/res/values-zh-rCN/strings.xml
++++ b/app/core/src/main/res/values-zh-rCN/strings.xml
+@@ -240,4 +240,5 @@
+     <string name="install_unknown_denied">允许安装未知应用以使用此功能</string>
+     <string name="app_not_found">找不到可处理此操作的应用</string>
+     <string name="reboot_apply_change">重启后生效</string>
++    <string name="rme_guest_env_msg">Guest 的 Magisk 环境不完整。请在 RedMagicEMU 中重新启动本实例以重新准备环境。</string>
+ </resources>
+diff --git a/app/core/src/main/res/values/strings.xml b/app/core/src/main/res/values/strings.xml
+index 3c0ed38..e668d28 100644
+--- a/app/core/src/main/res/values/strings.xml
++++ b/app/core/src/main/res/values/strings.xml
+@@ -240,4 +240,5 @@
+     <string name="reboot_apply_change">Reboot to apply changes</string>
+     <string name="running_exit_title">Execution in progress</string>
+     <string name="running_exit_msg">Are you sure you want to exit? The running operation may not complete.</string>
++    <string name="rme_guest_env_msg">The Guest Magisk environment is incomplete. Restart this instance from RedMagicEMU to prepare it again.</string>
+ </resources>
+diff --git a/native/src/include/consts.rs b/native/src/include/consts.rs
+index ebe849b..aa778f9 100644
+--- a/native/src/include/consts.rs
++++ b/native/src/include/consts.rs
+@@ -11,7 +11,7 @@ pub const APPLET_NAMES: &[&str] = &["su", "resetprop"];
+ pub use flags::*;
+ pub const MAGISK_FULL_VER: &str = concatcp!(MAGISK_VERSION, "(", MAGISK_VER_CODE, ")");
+ 
+-pub const APP_PACKAGE_NAME: &str = "com.topjohnwu.magisk";
++pub const APP_PACKAGE_NAME: &str = "app.redmagicemu.magisk";
+ 
+ pub const LOGFILE: &str = "/cache/magisk.log";
+ 
+diff --git a/scripts/app_functions.sh b/scripts/app_functions.sh
+index 7edec9b..2836e61 100644
+--- a/scripts/app_functions.sh
++++ b/scripts/app_functions.sh
+@@ -11,6 +11,7 @@ run_delay() {
+ # $1 = version string
+ # $2 = version code
+ env_check() {
++  local MAGISKBIN="$MAGISKTMP/.magisk/rme-bin"
+   for file in busybox magiskboot magiskinit util_functions.sh boot_patch.sh; do
+     [ -f "$MAGISKBIN/$file" ] || return 1
+   done
+@@ -18,7 +19,11 @@ env_check() {
+     [ -f "$MAGISKBIN/magiskpolicy" ] || return 1
+   fi
+   if [ "$2" -ge 25210 ]; then
+-    [ -b "$MAGISKTMP/.magisk/device/preinit" ] || [ -b "$MAGISKTMP/.magisk/block/preinit" ] || return 2
++    # RedMagicEMU mounts the instance's data before starting the Guest daemon.
++    local preinit="$MAGISKTMP/.magisk/preinit"
++    [ -d "$preinit" ] && [ -w "$preinit" ] && [ -x "$preinit" ] || return 2
++    [ -f "$preinit/version" ] && [ ! -L "$preinit/version" ] || return 2
++    grep -xqF "$2" "$preinit/version" || return 2
+   fi
+   grep -xqF "MAGISK_VER='$1'" "$MAGISKBIN/util_functions.sh" || return 3
+   grep -xqF "MAGISK_VER_CODE=$2" "$MAGISKBIN/util_functions.sh" || return 3

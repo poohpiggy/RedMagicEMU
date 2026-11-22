@@ -1,5 +1,13 @@
 # Changelog
 
+## RedMagicEMU 0.7.0-beta
+
+- Added opt-in Magisk Root with Magisk for RedMagicEMU 31.1 and per-instance preinit storage.
+- Verified Guest root grants and revocation on the Redmi K80.
+- Improved on-demand host location updates and Guest power service startup.
+- Optimized Vulkan readback and buffer synchronization, and improved host video decoding.
+- Removed the legacy QEMU property override for the stock NX809J Guest.
+
 ## RedMagicEMU 0.6.7-beta (unreleased)
 
 - Fixed digital zoom and the mode-switch crashes in the stock NX809J camera.

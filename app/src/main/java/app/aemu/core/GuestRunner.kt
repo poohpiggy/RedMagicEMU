@@ -23,6 +23,7 @@ class GuestRunner(
     var noTcgOpt = false
     var singleTouch = false
     var binderVerbose = false
+    internal var magiskEnabled = false
     var sdcardHost: File? = null
     /** user's extra qemu options from firmware settings: KEY=VALUE tokens become env vars, the rest go to qemu */
     var userQemuArgs: String = ""
@@ -183,6 +184,12 @@ class GuestRunner(
         for (key in VIBRATION_ENV_KEYS) {
             e.remove(key)
             extra[key]?.let { e[key] = it }
+        }
+        e.remove("AEMU64_MAGISK_ENABLED")
+        e.remove("AEMU64_MAGISK_INTERPRETER")
+        if (magiskEnabled) {
+            e["AEMU64_MAGISK_ENABLED"] = "1"
+            e["PATH"] = "/debug_ramdisk:" + e.getValue("PATH")
         }
         return e
     }

@@ -333,4 +333,6 @@
     <string name="import_recovery_error">無法檢查未完成的匯入資料</string>
     <string name="instance_settings">例項設定</string>
     <string name="about_title">關於</string>
+    <string name="vs_magisk">Magisk Root</string>
+    <string name="vs_magisk_sub">只為這個執行個體啟用 Magisk 31.1，重新啟動後生效。</string>
 </resources>
