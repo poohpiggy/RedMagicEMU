@@ -18,6 +18,24 @@ import android.view.Surface
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.io.FileDescriptor
+import kotlin.math.abs
+
+/** Keep the camera buffer in sensor coordinates so the Guest can orient it for display. */
+internal fun alignCameraVideoTexture(transform: FloatArray): Boolean {
+    if (abs(transform[1]) <= abs(transform[0]) || abs(transform[4]) <= abs(transform[5])) return false
+
+    // Compose the opposite quarter turn of the unit square into the input coordinates.
+    // This leaves the SurfaceTexture crop and texture-space flip in the sampling matrix.
+    val negativeX = transform[4] < 0f
+    for (row in 0 until 4) {
+        val x = transform[row]
+        val y = transform[row + 4]
+        transform[row] = if (negativeX) -y else y
+        transform[row + 4] = if (negativeX) x else -x
+        transform[row + 12] += if (negativeX) y else x
+    }
+    return true
+}
 
 internal class TargetCameraVideoMemory : AutoCloseable {
     private val pixels = TargetCameraVideoMode.WIDTH * TargetCameraVideoMode.HEIGHT
@@ -112,6 +130,7 @@ internal class TargetCameraVideoFrames(
         position(0)
     }
     private var lastTimestamp = 0L
+    private var loggedGeometry = false
 
     fun open(handler: Handler): Surface {
         display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
@@ -188,6 +207,10 @@ internal class TargetCameraVideoFrames(
         val slot = memory.claim()
         if (slot == -1) return
         texture.getTransformMatrix(transform)
+        if (alignCameraVideoTexture(transform) && !loggedGeometry) {
+            loggedGeometry = true
+            android.util.Log.i("RmeCameraGeometry", "Restored the sensor axes of the 1080p video texture")
+        }
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureName)
         draw(previewProgram, WIDTH, HEIGHT, memory.rgba(slot))
         draw(videoProgram, WIDTH / 4, YV12_ROWS, memory.yv12(slot))
