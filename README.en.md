@@ -13,7 +13,9 @@ RedMagicEMU is an independently maintained Android firmware emulator. It current
 - **Firmware import.** Imports the stock ZIP and checks archive entries, image sizes, CRCs, partition structure, and firmware fingerprints.
 - **Graphics and media.** Supports GLES, Vulkan window presentation, native host OpenCL, and hardware decoding for H.264 and HEVC.
 - **Instance management.** Instances are stored separately. Each supports data reset, memory settings, aspect-ratio adjustment, and guest battery settings.
-- **Device features.** Supports audio playback and recording, front and rear camera switching, standard photo capture, vibration, accelerometer, gyroscope, magnetometer, and host location. The always-on display works with the specified stock theme.
+- **Guest Root.** Magisk Root is off by default in instance settings. Once enabled, you can grant or revoke app root access in the Guest through Magisk for RedMagicEMU.
+- **Camera.** Supports switching between front and rear cameras and capturing JPEGs at native host resolutions. Compatible rear cameras can save paired RAW/DNG and JPEG captures. Rear 1080p60 recording has been tested on the Redmi K80.
+- **Device features.** Supports audio playback and recording, vibration, accelerometer, gyroscope, magnetometer, and on-demand host location updates. The always-on display works with the specified stock theme.
 - **Networking and telephony.** Supports Ethernet, virtual Wi-Fi, virtual LTE, simulated incoming calls, and SMS.
 - **Controls and files.** Supports file sharing between host and guest, APK installation, Android navigation buttons, a floating menu, screenshots, and a keep-screen-on option.
 - **Interface languages.** Supports US English, UK English, Simplified Chinese, Traditional Chinese (Taiwan), and Traditional Chinese (Hong Kong).
