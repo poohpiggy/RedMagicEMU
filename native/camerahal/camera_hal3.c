@@ -12,7 +12,8 @@
  *
  * Streams: IMPLEMENTATION_DEFINED becomes RGBA_8888 (what the software GL of the guest samples), YCbCr_420_888 is
  * NV21 in one block (the layout the engine's gralloc reports from lock_ycbcr), BLOB is the host's JPEG. A stream of
- * another size than the host's frame is filled by nearest point scaling.
+ * another size than the host's frame is filled by nearest point scaling. Ordinary video frames are center-cropped
+ * to the output stream's aspect ratio first.
  *
  * Requests are answered by one worker thread in order: it waits for the next host frame (or for the JPEG when the
  * request has a BLOB buffer), fills the buffers and returns the settings as the result with the 3A states
@@ -196,7 +197,7 @@ struct camera3 {
     int64_t control_exposure;
     char pro_command[192];
     struct pro_result next_result, frame_result, jpeg_result, result;
-    int video_enabled, video_stream, pull_video;
+    int video_enabled, video_stream, pull_video, recording;
     unsigned char *video_pixels;
     struct video_frame video_frames[VIDEO_QUEUE];
     unsigned video_head, video_tail;
@@ -721,6 +722,26 @@ static struct crop scale_crop(struct crop crop, int width, int height) {
                          crop.width * width / W, crop.height * height / H};
 }
 
+static struct crop recording_crop(struct crop crop, int width, int height) {
+    if (width <= 0 || height <= 0) return crop;
+    const int64_t source = (int64_t)crop.width * height;
+    const int64_t output = (int64_t)crop.height * width;
+    if (source < output) {
+        const int fitted = (int)(source / width) & ~1;
+        if (fitted >= 2) {
+            crop.top += ((crop.height - fitted) / 2) & ~1;
+            crop.height = fitted;
+        }
+    } else if (source > output) {
+        const int fitted = (int)(output / height) & ~1;
+        if (fitted >= 2) {
+            crop.left += ((crop.width - fitted) / 2) & ~1;
+            crop.width = fitted;
+        }
+    }
+    return crop;
+}
+
 static struct crop request_crop(const void *settings, const struct raw_profile *raw) {
     struct ro_entry entry;
     if (!settings || md_find(settings, SCALER_CROP_REGION, &entry) != 0 || entry.count != 4)
@@ -1185,6 +1206,8 @@ static void answer(struct camera3 *d, struct request *r) {
         b->status = 1;      /* CAMERA3_BUFFER_STATUS_ERROR until filled */
         void *va = 0;
         if (!g || !b->buffer || g->lock(g, *b->buffer, USAGE_SW_WRITE_OFTEN, 0, 0, (int)s->width, (int)s->height, &va) != 0 || !va) continue;
+        const struct crop stream_crop = d->recording && !video_frame
+            ? recording_crop(photo_crop, (int)s->width, (int)s->height) : photo_crop;
         if (s->format == FORMAT_BLOB) {
             /* the JPEG, and at the very end of the buffer camera3_jpeg_blob { uint16 id = 0xff, uint32 size }.
              * There is one JPEG size, so CameraService uses the advertised JPEG_MAX_SIZE.
@@ -1210,7 +1233,7 @@ static void answer(struct camera3 *d, struct request *r) {
                 : d->frame + frame_width * frame_height * 4;
             put_yv12(va, (int)s->width, (int)s->height, pixels,
                      video_frame ? VIDEO_W : frame_width, video_frame ? VIDEO_H : frame_height,
-                     video_frame ? video_crop : photo_crop, !video_frame);
+                     video_frame ? video_crop : stream_crop, !video_frame);
             b->status = 0;
         } else if (video_frame) {
             if (s->format == FORMAT_RGBA_8888) {
@@ -1221,8 +1244,8 @@ static void answer(struct camera3 *d, struct request *r) {
         } else if (d->frame) {
             if (s->format == FORMAT_YCBCR_420_888)
                 put_nv21(va, (int)s->width, (int)s->height, d->frame + frame_width * frame_height * 4,
-                         frame_width, frame_height, photo_crop);
-            else put_rgba(va, (int)s->width, (int)s->height, d->frame, frame_width, frame_height, photo_crop);
+                         frame_width, frame_height, stream_crop);
+            else put_rgba(va, (int)s->width, (int)s->height, d->frame, frame_width, frame_height, stream_crop);
             b->status = 0;
         }
         g->unlock(g, *b->buffer);
@@ -1308,6 +1331,7 @@ static int d_configure(struct camera3 *d, struct stream_config *c) {
         s->max_buffers = 4;
     }
     d->video_stream = d->video_enabled && video_stream;
+    d->recording = encoder_stream || c->mode == NUBIA_VIDEO_30_MODE || c->mode == NUBIA_VIDEO_60_MODE;
     int pro_mode = CONTROLS_NONE;
     if (c->mode == NUBIA_PRO_MODE) pro_mode = CONTROLS_PRO_PHOTO;
     else if (d->id == 0 && encoder_stream && (c->mode == NUBIA_VIDEO_30_MODE || c->mode == NUBIA_VIDEO_60_MODE))

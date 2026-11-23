@@ -211,6 +211,41 @@ static int video_frame_freshness(void) {
     return has_new_frame(&camera, 0, 0, 1, 0);
 }
 
+static int recording_aspect_case(int format, uint32_t mode, uint32_t usage, int zoomed) {
+    struct camera3 d = { .running = 1, .fd = -1, .cb = &callbacks };
+    struct stream output = { .width = W, .height = 360, .format = format, .usage = usage };
+    struct stream *streams[] = { &output };
+    struct stream_config config = { .num = 1, .streams = streams, .mode = mode };
+    if (d_configure(&d, &config)) return 1;
+
+    const void *handle = preview_handle;
+    struct request req = { .frame = 73, .nbuf = 1, .settings = &fake_metadata };
+    req.bufs[0] = (struct stream_buffer){ .stream = &output, .buffer = &handle, .acquire_fence = -1 };
+    requested_crop[0] = requested_crop[1] = 0;
+    requested_crop[2] = zoomed ? W / 2 : W;
+    requested_crop[3] = zoomed ? H / 2 : H;
+    d.frame = calloc(1, W * H * 11 / 2);
+    if (!d.frame) return 1;
+    const int first_pixel = zoomed ? 150 * W + 160 : 60 * W;
+    d.frame[first_pixel * 4] = 61;
+    d.frame[W * H * 4 + first_pixel] = 61;
+
+    struct arrival a = { &d, 1, 0, 0 };
+    long sender;
+    notified_error = notified_shutter = results = bad_result = lock_calls = 0;
+    if (pthread_create(&sender, 0, deliver, &a)) { free(d.frame); return 1; }
+    answer(&d, &req);
+    pthread_join(sender, 0);
+    free(d.frame);
+    if (notified_error || bad_result || results != 1 || preview_output[0] != 61) {
+        fprintf(stderr, "recording must center-crop 4:3 to 16:9, format=%d zoomed=%d first pixel=%d\n",
+                format, zoomed, preview_output[0]);
+        return 1;
+    }
+    if (reported_crop[2] != requested_crop[2] || reported_crop[3] != requested_crop[3]) return 1;
+    return 0;
+}
+
 static int video_descriptor_header(void) {
     int sockets[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets)) return 1;
@@ -318,6 +353,9 @@ int main(void) {
     g_gralloc = &fake_gralloc;
     if (zoom_case(FORMAT_RGBA_8888, 0) || zoom_case(FORMAT_RGBA_8888, 1) ||
         zoom_case(FORMAT_YCBCR_420_888, 0) || zoom_case(FORMAT_YCBCR_420_888, 1)) return 1;
+    if (recording_aspect_case(FORMAT_RGBA_8888, NUBIA_VIDEO_30_MODE, 0, 0) ||
+        recording_aspect_case(FORMAT_YCBCR_420_888, 0, USAGE_VIDEO_ENCODER, 1) ||
+        recording_aspect_case(FORMAT_YV12, NUBIA_VIDEO_30_MODE, USAGE_VIDEO_ENCODER, 0)) return 1;
     if (run_case(0, 0, 0, 0) || run_case(1, 0, 0, 0) || run_case(1, 0, 1, 0) ||
         run_case(1, 1, 0, 0) || run_case(1, 1, 1, 1) || run_case(1, 1, 1, 0) ||
         queue_lifetime_case() || video_frame_freshness() || video_descriptor_header() ||
