@@ -5,6 +5,8 @@ from pathlib import Path
 import re
 import sys
 
+from cached_blob_memory import apply as add_cached_blob_memory
+
 source, output = map(Path, sys.argv[1:])
 text = source.read_text()
 
@@ -314,4 +316,4 @@ replace('''    bool usingDirectMapping() const {
         '''    bool usingDirectMapping() const {
         return sharedMemoryOwner() || m_emu->features.GlDirectMem.enabled ||''')
 
-output.write_text(text)
+output.write_text(add_cached_blob_memory(text))

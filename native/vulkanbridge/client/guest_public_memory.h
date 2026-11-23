@@ -204,10 +204,19 @@ static int testMappedBuffer(PFN_vkGetInstanceProcAddr get, VkInstance instance,
     };
     CHECK(QueueSubmit(queue, 1, &submit, fence));
     CHECK(WaitForFences(device, 1, &fence, VK_TRUE, UINT64_C(5000000000)));
+#ifdef RME_TEST_CACHED_MEMORY
+    // A partial CPU write must preserve adjacent GPU writes in the same atom.
+    const uint32_t firstWord = 0xf16c3358;
+    input[0] = firstWord;
+    CHECK(FlushMappedMemoryRanges(device, 1, ranges));
+#else
+    const uint32_t firstWord = fill;
+#endif
     if (explicitCacheSync) CHECK(InvalidateMappedMemoryRanges(device, mappedCount, ranges));
     const uint32_t *output = mapped[1];
     unsigned errors = 0;
-    for (uint32_t i = 0; i < words; ++i) errors += input[i] != fill || output[i] != i * 11 + 5;
+    for (uint32_t i = 0; i < words; ++i)
+        errors += input[i] != (i == 0 ? firstWord : fill) || output[i] != i * 11 + 5;
     DestroyFence(device, fence, NULL);
     DestroyCommandPool(device, pool, NULL);
     for (size_t i = 0; i < bufferCount; ++i) {

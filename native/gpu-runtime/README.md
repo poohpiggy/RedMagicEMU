@@ -1,9 +1,11 @@
 # Android ARM64 GPU bundle
 
-The `android` directory contains the Vulkan renderer and Guest client plus the
-paired native OpenCL service and Guest client used in the validated 0.6.9 Vulkan
-test APK. This bundle includes asynchronous Vulkan readback and the optimized
-host Vulkan decoder.
+The `android` directory contains the paired Vulkan renderer and Guest client
+and the paired native OpenCL service and Guest client. It retains the
+asynchronous Vulkan readback and optimized host decoder from 0.6.9.
+For the verified Adreno 750 driver, the existing coherent Android hardware BLOB
+mapping also reports CPU cacheability. The Guest and host driver access the
+same backing memory.
 The normal APK build uses this bundle when no locally generated bundle has been
 staged. Set `-PrmeGpuBridgeDir=native/gpu-runtime/android` to select it explicitly.
 
