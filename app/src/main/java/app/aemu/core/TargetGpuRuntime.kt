@@ -3,11 +3,12 @@ package app.aemu.core
 import java.io.File
 import java.io.InputStream
 import java.nio.file.Files
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.security.MessageDigest
 
-/** The NX809J runtime copy's public Vulkan and OpenCL libraries. */
+/** Graphics libraries and feature declarations for the NX809J runtime copy. */
 internal class TargetGpuRuntime(
     private val root: File,
     private val state: File,
@@ -23,10 +24,35 @@ internal class TargetGpuRuntime(
             "system-public" to "system/etc/public.libraries.txt",
             "vendor-public" to "vendor/etc/public.libraries.txt",
         )
+        private val unavailableVulkanFeatures = """
+            <permissions>
+                <unavailable-feature name="android.hardware.vulkan.compute" />
+                <unavailable-feature name="android.hardware.vulkan.level" />
+                <unavailable-feature name="android.hardware.vulkan.version" />
+                <unavailable-feature name="android.software.vulkan.deqp.level" />
+            </permissions>
+        """.trimIndent() + "\n"
     }
 
     private val active = File(state, "active")
     private val destinations = libraries.associateWith { "system/lib64/$it" } + publicLists
+
+    fun setVulkanFeaturesVisible(visible: Boolean) {
+        // SystemConfig applies these exclusions to declarations from all Guest partitions.
+        val override = File(root, "system/etc/permissions/aemu-vulkan-unavailable.xml")
+        val path = override.toPath()
+        if (Files.exists(path, NOFOLLOW_LINKS)) {
+            check(Files.isRegularFile(path, NOFOLLOW_LINKS) && override.readText() == unavailableVulkanFeatures) {
+                "unexpected Guest Vulkan feature override at $override"
+            }
+            if (visible) check(override.delete()) { "could not remove $override" }
+        } else if (!visible) {
+            atomicWrite(override) {
+                it.writeText(unavailableVulkanFeatures)
+                check(it.setReadable(true, false)) { "could not make $override readable by Guest Android" }
+            }
+        }
+    }
 
     fun prepare(index: String, vulkan: Boolean = true, openCl: Boolean = true) {
         if (!vulkan && !openCl) {

@@ -431,6 +431,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         val assets = ctx.assets.list("rme-gpu").orEmpty()
         val packaged = "guest.idx" in assets
         val wantsVulkan = settings.gpu && settings.vulkan
+        runtime.setVulkanFeaturesVisible(wantsVulkan)
         val vulkan = if (wantsVulkan && packaged && renderer.canExecute()) {
             val sockets = File(paths.root, "dev/socket")
             sockets.mkdirs()

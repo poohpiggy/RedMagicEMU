@@ -12,6 +12,30 @@ import java.security.MessageDigest
 class TargetGpuRuntimeTest {
     @get:Rule val folder = TemporaryFolder()
 
+    @Test fun hidesOnlyVulkanFeaturesUntilTheBridgeIsEnabledAgain() {
+        val root = folder.newFolder()
+        val permissions = File(root, "system/etc/permissions").apply { mkdirs() }
+        val overlay = File(permissions, "aemu-vulkan-unavailable.xml")
+        val stock = File(root, "vendor/etc/permissions/graphics.xml").apply { parentFile!!.mkdirs() }
+        val original = """<permissions><feature name="android.hardware.vulkan.version" version="4210688" /></permissions>"""
+        stock.writeText(original)
+        val runtime = TargetGpuRuntime(root, folder.newFolder()) { error("Feature settings do not load GPU libraries") }
+
+        runtime.setVulkanFeaturesVisible(false)
+        val disabled = overlay.readText()
+        assertEquals(setOf("android.hardware.vulkan.compute", "android.hardware.vulkan.level",
+            "android.hardware.vulkan.version", "android.software.vulkan.deqp.level"),
+            Regex("""<unavailable-feature name="([^"]+)" />""").findAll(disabled).map { it.groupValues[1] }.toSet())
+        runtime.setVulkanFeaturesVisible(false)
+        assertEquals(disabled, overlay.readText())
+        assertEquals(original, stock.readText())
+
+        runtime.setVulkanFeaturesVisible(true)
+        runtime.setVulkanFeaturesVisible(true)
+        assertFalse(overlay.exists())
+        assertEquals(original, stock.readText())
+    }
+
     @Test fun exposesOpenClAndRestoresOriginalFiles() {
         val root = folder.newFolder()
         File(root, "system/lib64").mkdirs()
