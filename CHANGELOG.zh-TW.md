@@ -16,13 +16,13 @@
 
 [0.7.0-beta 發布說明](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.7.0-beta)
 
-## 0.6.9-beta · 定位、電源與 Vulkan (unreleased)
+## RedMagicEMU 0.6.9-beta (unreleased)
 
 - 定位由常駐訂閱改為依需求啟停。Guest 前景應用程式發起 GPS 請求時向主機取位置，離開應用程式或退到主機背景後釋放監聽。K80 高德收到 11 次位置更新。
 - 開機等待電池服務超時時自動恢復一次服務，K80 冷啟動和 Guest 重新啟動均約 41 秒進入系統。虛擬 Wi-Fi 和乙太網路下停止無效的蜂窩資料重試，LTE 模式交由 Android 按策略退避。
 - 復用交換鏈回讀命令，把 GPU 等待與回讀放到獨立線程，並最佳化主機 Vulkan 命令解碼。K80 的組合測試包跑完安兔兔 12.0.3，總分 1,507,188，GPU 233,389。
 
-## 0.6.8-beta · 安兔兔與轉碼 (unreleased)
+## RedMagicEMU 0.6.8-beta (unreleased)
 
 ### 圖形橋與硬體編碼
 
@@ -49,34 +49,34 @@
 
 [0.6.6-beta 發布說明](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.6.6-beta)
 
-## 0.6.5-beta · 韌體匯入 (unreleased)
+## RedMagicEMU 0.6.5-beta (unreleased)
 
 - 首頁執行個體卡片顯示匯入進度。大 ZIP 可直接從主機儲存空間讀取，解包與驗證並行推進，保留項目、大小、CRC、分割區結構和指紋檢查。
 - K80 匯入 12.41 GiB 韌體約用 75 秒，首次啟動另計約 103 秒。
 
-## 0.6.4-beta · 首頁與執行個體設定 (unreleased)
+## RedMagicEMU 0.6.4-beta (unreleased)
 
 - 改版首頁和關于頁，首頁集中展示執行個體、目標韌體和常用操作。
 - 執行個體記憶體提供 4、6、8、12、16 GB 五檔，導航鍵和垂直同步跟隨執行個體設定，下次啟動時套用儲存值。
 
-## 0.6.3-beta · 資料重置 (unreleased)
+## RedMagicEMU 0.6.3-beta (unreleased)
 
 - 在執行個體設定中加入 Guest 資料重置，保留韌體、執行個體選項和共用檔案，運行中禁止重置。
 - 相容調整原廠 `/cache` 相對連結。K80 的隔離執行個體重置後重新進入原廠歡迎頁。
 
-## RedMagicEMU 0.6.2-beta · OpenCL
+## RedMagicEMU 0.6.2-beta
 
 - 常規 APK 自動接入主機 Vulkan 和原生 OpenCL。支援 FP16、線性緩衝區異步讀回和非阻塞上傳。
 - K80 的 Adreno 750 跑通 Geekbench 6 Vulkan 和 OpenCL。性能浮窗將主機進程和驅動記憶體納入顯示。
 
 [0.6.2-beta 發布說明](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.6.2-beta)
 
-## 0.6.1-beta · Vulkan 與 GLES (unreleased)
+## RedMagicEMU 0.6.1-beta (unreleased)
 
 - 排查安兔兔 3D Lite 的 Unity 崩潰，處理 GLES 像素儲存空間、緩衝映射和重復綁定問題。隔離測試包在 K80 跑完兩個 Unity 場景。
 - 搭建主機 Vulkan 服務、Guest 協議和計算路徑。視窗、交換鏈與呈現協議在此階段進入離線測試，後續版本接入運行環境。
 
-## RedMagicEMU 0.6.0-beta · 電池與指南針
+## RedMagicEMU 0.6.0-beta
 
 - 執行個體設定和浮動選單加入電池同步，支援跟隨主機或手動設定電量和充電狀態。
 - 加速度計橋接擴展至陀螺儀、磁力計和主機位置。修正感測器標志與定位入口，恢復原廠指南針。
@@ -85,7 +85,7 @@
 
 [0.6.0-beta 發布說明](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.6.0-beta)
 
-## 0.5.0-beta · 目標韌體裁剪 (unreleased)
+## RedMagicEMU 0.5.0-beta (unreleased)
 
 ### 第一輪裁剪
 
@@ -95,45 +95,45 @@
 
 - 保留執行個體資料重置和已配對的圖形資源，刪去無實際入口的舊執行個體刪除路徑。最終選用約 41.6 MiB 的階段版本。
 
-## 0.4.0-beta · 設備能力相容調整 (unreleased)
+## RedMagicEMU 0.4.0-beta (unreleased)
 
-### 0.4.8-beta · 相機 (unreleased)
+### RedMagicEMU 0.4.8-beta (unreleased)
 
 - 驗證原廠相機取景、前後攝切換、瀏覽器調用、拍照和 DCIM 儲存。後續在 0.6.6 修復正式包的預覽閃退，在 0.6.7 擴展原生尺寸和錄影。
 
-### 0.4.7-beta · 界面與顯示 (unreleased)
+### RedMagicEMU 0.4.7-beta (unreleased)
 
 - 快速關機時，正在進行的系統鈴聲索引會正常取消。
 - Guest 增加 60、90、120、144 Hz 固定更新率檔位，並驗證四檔切換。
 
-### 0.4.6-beta · 動作感測器 (unreleased)
+### RedMagicEMU 0.4.6-beta (unreleased)
 
 - 第一輪梳理原廠 Sensors multi-HAL 的載入路徑，整理主機采樣時間和 Guest 事件接口。
 - 第二輪打通三軸加速度計。Guest 系統和一般應用程式都收到隨手機晃動變化的讀數。
 
-### 0.4.5-beta · 儲存空間 (unreleased)
+### RedMagicEMU 0.4.5-beta (unreleased)
 
 - 移除容量滑塊，保留現有執行個體的儲存空間設定。
 
-### 0.4.4-beta · 虛擬 Wi-Fi (unreleased)
+### RedMagicEMU 0.4.4-beta (unreleased)
 
 - 第一輪建立開放熱點、狀態通知和乙太網路交接原型。
 - 第二輪對齊 WLAN 設定頁、快捷面板和狀態列，修正 DNS 和啟動順序。退出飛行模式時恢復先前的 Wi-Fi 開關狀態，清理浮動選單入口。
 
-### 0.4.3-beta · LTE 信號 (unreleased)
+### RedMagicEMU 0.4.3-beta (unreleased)
 
 - 為模擬基帶補充 LTE 信號上報。Guest 狀態列顯示信號格，飛行模式往返後可恢復。
 
-### 0.4.2-beta · 螢幕待機顯示 (unreleased)
+### RedMagicEMU 0.4.2-beta (unreleased)
 
 - 為新執行個體自動準備指定鳴潮主題的螢幕待機兼容資料。實測人物前景位置、喚醒動畫和切換主題後恢復。
 
-### 0.4.1-beta · 主題 (unreleased)
+### RedMagicEMU 0.4.1-beta (unreleased)
 
 - 相容調整 NX809J 的 `ztecfg`，恢復指定鳴潮主題的原廠桌布與圖示。
 - 清理舊基帶入口，按執行個體生成虛擬 IMEI，系統界面顯示虛擬 IMEI SV。
 
-## RedMagicEMU 0.3.0-beta · 基本可用性
+## RedMagicEMU 0.3.0-beta
 
 - **1A** 從原廠桌面啟動基線出發，檢查顯示、觸摸、文字輸入、共用儲存空間和 APK 安裝。
 - **1B** 修復文字輸入路徑，接上模擬短信和來電，修正接聽、掛斷後第二次來電失敗。
@@ -142,14 +142,14 @@
 
 [0.3.0-beta 發布說明](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.3.0-beta)
 
-## RedMagicEMU 0.2.0-alpha · 首次進入原廠桌面
+## RedMagicEMU 0.2.0-alpha
 
 - 修正正常啟動誤拉起充電服務的問題，處理目標韌體的電話服務依賴，Guest 首次進入原廠桌面。
 - 實機跑通全新匯入、覆蓋安裝、Guest 重新啟動和主動關機，以及主機選單停止。
 
 [0.2.0-alpha 發布說明](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.2.0-alpha)
 
-## RedMagicEMU 0.1.0-alpha · 獨立應用程式與韌體匯入
+## RedMagicEMU 0.1.0-alpha
 
 - **1A** 建立 RedMagicEMU 應用標識、圖示、項目說明和共用目錄。
 - **1B** 建立指定 NX809J 韌體的 ZIP、分割區和指紋檢查，修正 ARM64 執行個體的 N64 引擎選擇。

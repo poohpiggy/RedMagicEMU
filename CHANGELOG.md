@@ -16,13 +16,13 @@
 
 [0.7.0-beta 发布说明](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.7.0-beta)
 
-## 0.6.9-beta · 定位、电源与 Vulkan (unreleased)
+## RedMagicEMU 0.6.9-beta (unreleased)
 
 - 定位由常驻订阅改为按需启停。Guest 前台应用发起 GPS 请求时向宿主取位置，退出应用或退到宿主后台后释放监听。K80 高德收到 11 次位置更新。
 - 开机等待电池服务超时时自动恢复一次服务，K80 冷启动和 Guest 重启均约 41 秒进入系统。虚拟 Wi-Fi 和以太网下停止无效的蜂窝数据重试，LTE 模式交由 Android 按策略退避。
 - 复用交换链回读命令，把 GPU 等待与回读放到独立线程，并优化宿主 Vulkan 命令解码。K80 的组合测试包跑完安兔兔 12.0.3，总分 1,507,188，GPU 233,389。
 
-## 0.6.8-beta · 安兔兔与转码 (unreleased)
+## RedMagicEMU 0.6.8-beta (unreleased)
 
 ### 图形桥与硬编
 
@@ -49,34 +49,34 @@
 
 [0.6.6-beta 发布说明](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.6.6-beta)
 
-## 0.6.5-beta · 固件导入 (unreleased)
+## RedMagicEMU 0.6.5-beta (unreleased)
 
 - 首页实例卡片显示导入进度。大 ZIP 可直接从宿主存储读取，解包与校验并行推进，保留条目、大小、CRC、分区结构和指纹检查。
 - K80 导入 12.41 GiB 固件约用 75 秒，首次启动另计约 103 秒。
 
-## 0.6.4-beta · 首页与实例设置 (unreleased)
+## RedMagicEMU 0.6.4-beta (unreleased)
 
 - 改版首页和关于页，首页集中展示实例、目标固件和常用操作。
 - 实例内存提供 4、6、8、12、16 GB 五档，导航键和垂直同步跟随实例设置，下次启动时应用保存值。
 
-## 0.6.3-beta · 数据重置 (unreleased)
+## RedMagicEMU 0.6.3-beta (unreleased)
 
 - 在实例设置中加入 Guest 数据重置，保留固件、实例选项和共享文件，运行中禁止重置。
 - 适配原厂 `/cache` 相对链接。K80 的隔离实例重置后重新进入原厂欢迎页。
 
-## RedMagicEMU 0.6.2-beta · OpenCL
+## RedMagicEMU 0.6.2-beta
 
 - 常规 APK 自动接入宿主 Vulkan 和原生 OpenCL。支持 FP16、线性缓冲区异步读回和非阻塞上传。
 - K80 的 Adreno 750 跑通 Geekbench 6 Vulkan 和 OpenCL。性能浮窗将宿主进程和驱动内存纳入显示。
 
 [0.6.2-beta 发布说明](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.6.2-beta)
 
-## 0.6.1-beta · Vulkan 与 GLES (unreleased)
+## RedMagicEMU 0.6.1-beta (unreleased)
 
 - 排查安兔兔 3D Lite 的 Unity 崩溃，处理 GLES 像素存储、缓冲映射和重复绑定问题。隔离测试包在 K80 跑完两个 Unity 场景。
 - 搭建宿主 Vulkan 服务、Guest 协议和计算链路。窗口、交换链与呈现协议在此阶段进入离线测试，后续版本接入运行环境。
 
-## RedMagicEMU 0.6.0-beta · 电池与指南针
+## RedMagicEMU 0.6.0-beta
 
 - 实例设置和浮动菜单加入电池同步，支持跟随宿主或手动设置电量和充电状态。
 - 加速度计桥接扩展至陀螺仪、磁力计和宿主位置。修正传感器标志与定位入口，恢复原厂指南针。
@@ -85,7 +85,7 @@
 
 [0.6.0-beta 发布说明](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.6.0-beta)
 
-## 0.5.0-beta · 目标固件裁剪 (unreleased)
+## RedMagicEMU 0.5.0-beta (unreleased)
 
 ### 第一轮裁剪
 
@@ -95,45 +95,45 @@
 
 - 保留实例数据重置和已配对的图形资源，删去无实际入口的旧实例删除路径。最终选用约 41.6 MiB 的阶段包。
 
-## 0.4.0-beta · 设备能力适配 (unreleased)
+## RedMagicEMU 0.4.0-beta (unreleased)
 
-### 0.4.8-beta · 相机 (unreleased)
+### RedMagicEMU 0.4.8-beta (unreleased)
 
 - 验证原厂相机取景、前后摄切换、浏览器调用、拍照和 DCIM 保存。后续在 0.6.6 修复正式包的预览闪退，在 0.6.7 扩展原生尺寸和录像。
 
-### 0.4.7-beta · 界面与显示 (unreleased)
+### RedMagicEMU 0.4.7-beta (unreleased)
 
 - 快速关机时，正在进行的系统铃声索引会正常取消。
 - Guest 增加 60、90、120、144 Hz 固定刷新档，并验证四档切换。
 
-### 0.4.6-beta · 运动传感器 (unreleased)
+### RedMagicEMU 0.4.6-beta (unreleased)
 
 - 第一轮梳理原厂 Sensors multi-HAL 的加载路径，整理宿主采样时间和 Guest 事件接口。
 - 第二轮打通三轴加速度计。Guest 系统和普通应用都收到随手机晃动变化的读数。
 
-### 0.4.5-beta · 存储 (unreleased)
+### RedMagicEMU 0.4.5-beta (unreleased)
 
 - 移除容量滑块，保留现有实例的存储配置。
 
-### 0.4.4-beta · 虚拟 Wi-Fi (unreleased)
+### RedMagicEMU 0.4.4-beta (unreleased)
 
 - 第一轮建立开放热点、状态通知和以太网交接原型。
 - 第二轮对齐 WLAN 设置页、快捷面板和状态栏，修正 DNS 和启动顺序。退出飞行模式时恢复先前的 Wi-Fi 开关状态，清理浮动菜单入口。
 
-### 0.4.3-beta · LTE 信号 (unreleased)
+### RedMagicEMU 0.4.3-beta (unreleased)
 
 - 为模拟基带补充 LTE 信号上报。Guest 状态栏显示信号格，飞行模式往返后可恢复。
 
-### 0.4.2-beta · 息屏显示 (unreleased)
+### RedMagicEMU 0.4.2-beta (unreleased)
 
 - 为新实例自动准备指定鸣潮主题的息屏兼容数据。实测人物前景位置、唤醒动画和切换主题后恢复。
 
-### 0.4.1-beta · 主题 (unreleased)
+### RedMagicEMU 0.4.1-beta (unreleased)
 
 - 适配 NX809J 的 `ztecfg`，恢复指定鸣潮主题的原厂壁纸与图标。
 - 清理旧基带入口，按实例生成虚拟 IMEI，系统界面显示虚拟 IMEI SV。
 
-## RedMagicEMU 0.3.0-beta · 基本可用性
+## RedMagicEMU 0.3.0-beta
 
 - **1A** 从原厂桌面启动基线出发，检查显示、触摸、文字输入、共享存储和 APK 安装。
 - **1B** 修复文字输入路径，接通模拟短信和来电，修正接听、挂断后第二次来电失败。
@@ -142,14 +142,14 @@
 
 [0.3.0-beta 发布说明](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.3.0-beta)
 
-## RedMagicEMU 0.2.0-alpha · 首次进入原厂桌面
+## RedMagicEMU 0.2.0-alpha
 
 - 修正正常启动误拉起充电服务的问题，处理目标固件的电话服务依赖，Guest 首次进入原厂桌面。
 - 实机跑通全新导入、覆盖安装、Guest 重启和主动关机，以及宿主菜单停止。
 
 [0.2.0-alpha 发布说明](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.2.0-alpha)
 
-## RedMagicEMU 0.1.0-alpha · 独立应用与固件导入
+## RedMagicEMU 0.1.0-alpha
 
 - **1A** 建立 RedMagicEMU 应用标识、图标、项目说明和共享目录。
 - **1B** 建立指定 NX809J 固件的 ZIP、分区和指纹检查，修正 ARM64 实例的 N64 引擎选择。

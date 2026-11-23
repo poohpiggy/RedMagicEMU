@@ -16,13 +16,13 @@
 
 [0.7.0-beta release notes](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.7.0-beta)
 
-## 0.6.9-beta · Location, Power, and Vulkan (unreleased)
+## RedMagicEMU 0.6.9-beta (unreleased)
 
 - Location subscriptions start on demand. A GPS request from a foreground Guest app starts host location updates. The listener is released when the app exits or the host backgrounds RedMagicEMU. Amap received 11 location updates on the K80.
 - Automatically retries starting the battery service once if it times out during boot. Both a cold boot and a Guest restart reached the system in about 41 seconds on the K80. Cellular data retries stop on virtual Wi-Fi and Ethernet. In LTE mode, Android handles retry backoff.
 - Reused swapchain readback commands, moved GPU waits and readbacks to a separate thread, and streamlined host Vulkan command decoding. The combined test build completed AnTuTu 12.0.3 on the K80 with an overall score of 1,507,188 and a GPU score of 233,389.
 
-## 0.6.8-beta · AnTuTu and Transcoding (unreleased)
+## RedMagicEMU 0.6.8-beta (unreleased)
 
 ### Graphics Bridge and Hardware Encoding
 
@@ -49,34 +49,34 @@
 
 [0.6.6-beta release notes](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.6.6-beta)
 
-## 0.6.5-beta · Firmware Import (unreleased)
+## RedMagicEMU 0.6.5-beta (unreleased)
 
 - The instance card on the home screen displays import progress. Large ZIP files can be read directly from host storage. Extraction and verification run in parallel, with checks for archive entries, file sizes, CRCs, partition structure, and firmware fingerprints.
 - Importing the 12.41 GiB firmware took about 75 seconds on the K80. The first boot took about 103 seconds after import.
 
-## 0.6.4-beta · Home Screen and Instance Settings (unreleased)
+## RedMagicEMU 0.6.4-beta (unreleased)
 
 - Redesigned the home and About screens. The home screen brings the instance, target firmware, and common actions together.
 - Added five instance memory options at 4, 6, 8, 12, and 16 GB. Navigation buttons and vertical sync are configured per instance, and the saved values apply on the next boot.
 
-## 0.6.3-beta · Data Reset (unreleased)
+## RedMagicEMU 0.6.3-beta (unreleased)
 
 - Added Guest data reset to instance settings. It preserves firmware, instance options, and shared files, and is available when the instance is stopped.
 - Adapted the stock `/cache` relative symlink. After a reset, an isolated K80 instance returned to the stock welcome screen.
 
-## RedMagicEMU 0.6.2-beta · OpenCL
+## RedMagicEMU 0.6.2-beta
 
 - Standard APK builds automatically use host Vulkan and native OpenCL. Support includes FP16, asynchronous linear buffer readback, and nonblocking uploads.
 - The K80's Adreno 750 completed Geekbench 6 Vulkan and OpenCL tests. The performance overlay includes memory used by the host process and driver.
 
 [0.6.2-beta release notes](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.6.2-beta)
 
-## 0.6.1-beta · Vulkan and GLES (unreleased)
+## RedMagicEMU 0.6.1-beta (unreleased)
 
 - Investigated the AnTuTu 3D Lite Unity crash and fixed GLES pixel storage, buffer mapping, and repeated binding issues. An isolated K80 test build completed two Unity scenes.
 - Built the host Vulkan service, Guest protocol, and compute path. Window, swapchain, and presentation protocols entered offline testing and were integrated into the runtime in a later version.
 
-## RedMagicEMU 0.6.0-beta · Battery and Compass
+## RedMagicEMU 0.6.0-beta
 
 - Added battery sync to instance settings and the floating menu. Charge level and charging status can follow the host or be set manually.
 - Extended the accelerometer bridge to include the gyroscope, magnetometer, and host location. Corrected sensor flags and the location entry point to restore the stock compass.
@@ -85,7 +85,7 @@
 
 [0.6.0-beta release notes](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.6.0-beta)
 
-## 0.5.0-beta · Target Firmware Cleanup (unreleased)
+## RedMagicEMU 0.5.0-beta (unreleased)
 
 ### First Pass
 
@@ -95,45 +95,45 @@
 
 - Kept instance data reset and the paired graphics resources, and removed a legacy instance deletion path with no entry point. Selected a build of about 41.6 MiB.
 
-## 0.4.0-beta · Device Feature Support (unreleased)
+## RedMagicEMU 0.4.0-beta (unreleased)
 
-### 0.4.8-beta · Camera (unreleased)
+### RedMagicEMU 0.4.8-beta (unreleased)
 
 - Tested the stock camera preview, front and rear camera switching, browser camera access, photo capture, and saving to DCIM. Version 0.6.6-beta fixed the preview crash in release builds, and 0.6.7-beta expanded native resolution capture and video recording.
 
-### 0.4.7-beta · Interface and Display (unreleased)
+### RedMagicEMU 0.4.7-beta (unreleased)
 
 - Quick shutdown now cancels system ringtone indexing in progress.
 - Added fixed Guest refresh rate options of 60, 90, 120, and 144 Hz and verified switching among all four.
 
-### 0.4.6-beta · Motion Sensors (unreleased)
+### RedMagicEMU 0.4.6-beta (unreleased)
 
 - The first pass mapped how the stock Sensors multi-HAL loads and established host sample timing and the Guest event interface.
 - The second pass enabled the three-axis accelerometer. The Guest system and regular apps received readings that changed as the phone moved.
 
-### 0.4.5-beta · Storage (unreleased)
+### RedMagicEMU 0.4.5-beta (unreleased)
 
 - Removed the capacity slider and preserved the storage configuration of existing instances.
 
-### 0.4.4-beta · Virtual Wi-Fi (unreleased)
+### RedMagicEMU 0.4.4-beta (unreleased)
 
 - The first pass prototyped an open hotspot, status notifications, and Ethernet handoff.
 - The second pass synchronized WLAN settings, Quick Settings, and the status bar and fixed DNS and startup ordering. Exiting airplane mode restores the previous Wi-Fi toggle state. Cleaned up the floating menu entry.
 
-### 0.4.3-beta · LTE Signal (unreleased)
+### RedMagicEMU 0.4.3-beta (unreleased)
 
 - Added LTE signal reporting to the emulated modem. The Guest status bar shows signal bars and restores them after cycling airplane mode.
 
-### 0.4.2-beta · Always-On Display (unreleased)
+### RedMagicEMU 0.4.2-beta (unreleased)
 
 - New instances automatically prepare compatibility data for the always-on display with the specified Wuthering Waves theme. Tested foreground character placement, the wake animation, and restoration after switching themes.
 
-### 0.4.1-beta · Themes (unreleased)
+### RedMagicEMU 0.4.1-beta (unreleased)
 
 - Adapted NX809J `ztecfg` to restore the stock wallpapers and icons for the specified Wuthering Waves theme.
 - Removed the legacy modem entry point. Each instance generates a virtual IMEI, and the system interface displays the virtual IMEI SV.
 
-## RedMagicEMU 0.3.0-beta · Core Functionality
+## RedMagicEMU 0.3.0-beta
 
 - **1A** Started from the stock launcher boot baseline and checked display, touch, text input, shared storage, and APK installation.
 - **1B** Fixed text input, enabled simulated SMS and incoming calls, and fixed a second incoming call failing after the first was answered and ended.
@@ -142,14 +142,14 @@
 
 [0.3.0-beta release notes](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.3.0-beta)
 
-## RedMagicEMU 0.2.0-alpha · First Boot to the Stock Launcher
+## RedMagicEMU 0.2.0-alpha
 
 - Fixed the charging service starting during a normal boot and addressed a telephony service dependency in the target firmware. The Guest reached the stock launcher for the first time.
 - Tested a fresh import, installation over an existing copy, Guest restart and shutdown, and stopping the Guest from the host menu on a physical device.
 
 [0.2.0-alpha release notes](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.2.0-alpha)
 
-## RedMagicEMU 0.1.0-alpha · Standalone App and Firmware Import
+## RedMagicEMU 0.1.0-alpha
 
 - **1A** Established the RedMagicEMU app identity, icon, project description, and shared directory.
 - **1B** Added ZIP, partition, and fingerprint checks for the specified NX809J firmware and fixed N64 engine selection for ARM64 instances.
