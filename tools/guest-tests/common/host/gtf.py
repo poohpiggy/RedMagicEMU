@@ -3,8 +3,9 @@
 # broadcast "frames" of VmActivity). Prints the guest's rate, the host's rate and the difference; over 2 fps apart
 # is a failure: the guest believes in frames nobody saw (or the other way round).
 import os, subprocess, sys, time
+from pathlib import Path
 
-W = os.environ.get("W", os.getcwd())
+GUEST_TEST = Path(__file__).resolve().with_name("gt.sh").as_posix()
 ADB = [os.path.expandvars(r"%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe")] + (["-s", os.environ["ANDROID_SERIAL"]] if os.environ.get("ANDROID_SERIAL") else [])
 
 def sh(cmd):
@@ -29,7 +30,7 @@ def main():
     tests = (sys.argv[2] if len(sys.argv) > 2 else "ui,gl1,gl2,gl3").split(",")
     fails = 0
     for t in tests:
-        subprocess.run(["sh", W.replace("E:", "/e") + "/gt.sh", i, t, "6"], env=dict(os.environ, NOWAIT="1"), capture_output=True)
+        subprocess.run(["sh", GUEST_TEST, i, t, "6"], env=dict(os.environ, NOWAIT="1"), capture_output=True)
         # (the test itself starts 0.8 s after the program; the window lies inside its 6 s)
         end = time.time() + 15
         while time.time() < end and not any(l == "test=" + t for l in report(i)): time.sleep(0.2)

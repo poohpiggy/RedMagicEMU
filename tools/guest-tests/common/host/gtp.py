@@ -2,9 +2,12 @@
 # every stage it announces (view, gl1, gl2), takes a screenshot of the phone and looks for the 16 colours of
 # the pattern, 4 x 4 cells in their order. Prints one verdict per stage; the screenshots stay as gtp-<id>-<stage>.png.
 import os, subprocess, sys, time
+from pathlib import Path
+
 from PIL import Image
 
 W = os.environ.get("W", os.getcwd())
+GUEST_TEST = Path(__file__).resolve().with_name("gt.sh").as_posix()
 ADB = [os.path.expandvars(r"%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe")] + (["-s", os.environ["ANDROID_SERIAL"]] if os.environ.get("ANDROID_SERIAL") else [])
 PATTERN = [0xff0000, 0x00ff00, 0x0000ff, 0xffff00, 0xff00ff, 0x00ffff, 0xffffff, 0x808080,
            0xff8000, 0x8000ff, 0x00ff80, 0x804000, 0x0080ff, 0xff0080, 0x80ff00, 0x404040]
@@ -75,7 +78,7 @@ def check_text(path):
 def main():
     i = sys.argv[1]
     env = dict(os.environ, NOWAIT="1")
-    subprocess.run(["sh", W.replace("E:", "/e") + "/gt.sh", i, "pattern"], env=env, capture_output=True)
+    subprocess.run(["sh", GUEST_TEST, i, "pattern"], env=env, capture_output=True)
     seen, end, fails = set(), time.time() + 60, 0
     while time.time() < end:
         lines = report(i)

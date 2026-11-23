@@ -1129,7 +1129,7 @@ class TreeFixer(
                 "gralloc.default.so" to "system/lib/hw/gralloc.default.so",
             )
             Engine.N64 -> return installNative64()
-        } + (if (kk32) listOf("aemu-noshot.apk" to "vendor/overlay/aemu-noshot.apk") else emptyList())   // no task thumbnails (tools/noshot-overlay)
+        } + (if (kk32) listOf("aemu-noshot.apk" to "vendor/overlay/aemu-noshot.apk") else emptyList())   // no task thumbnails (tools/overlays/disable-task-thumbnails)
         File(root, "system/bin/fbpaint").delete()
         // a static network debugging tool shipped by older versions; nothing runs it
         File(root, "system/bin/netprobe").delete()

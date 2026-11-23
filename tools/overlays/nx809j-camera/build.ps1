@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 $buildTools = Join-Path $Sdk "build-tools/36.0.0"
 $androidJar = Join-Path $Sdk "platforms/android-36/android.jar"
-$engines = Join-Path $PSScriptRoot "../../app/src/main/assets/engines"
+$engines = Join-Path $PSScriptRoot "../../../app/src/main/assets/engines"
 if ($DisableRaw -and $Rear1080p60) { throw "Build the video and RAW overlays separately" }
 $layer = if ($DisableRaw) { "n64-36-camera-no-raw" } elseif ($Rear1080p60) { "n64-36-camera-1080p60" } else { "n64-36" }
 $variant = if ($DisableRaw) { "-no-raw" } else { "" }

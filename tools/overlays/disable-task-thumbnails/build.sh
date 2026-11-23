@@ -12,5 +12,5 @@ rm -rf build && mkdir -p build
 "${BT}aapt2" link -o build/base.apk --manifest AndroidManifest.xml -I "$JAR" build/res.zip
 "${BT}zipalign" -f 4 build/base.apk build/aligned.apk
 "$SIGN" sign --ks "${KEYSTORE:-$(cygpath -m "$HOME" 2>/dev/null || echo "$HOME")/.android/debug.keystore}" --ks-pass pass:android --key-pass pass:android --out build/aemu-noshot.apk build/aligned.apk
-cp build/aemu-noshot.apk ../../app/src/main/assets/engines/kk/aemu-noshot.apk
+cp build/aemu-noshot.apk ../../../app/src/main/assets/engines/kk/aemu-noshot.apk
 ls -la build/aemu-noshot.apk
