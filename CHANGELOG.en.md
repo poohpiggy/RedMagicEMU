@@ -95,7 +95,7 @@
 
 - Kept instance data reset and the paired graphics resources, and removed a legacy instance deletion path with no entry point. Selected a build of about 41.6 MiB.
 
-## RedMagicEMU 0.4.0-beta (unreleased)
+## RedMagicEMU 0.4.x (unreleased)
 
 ### RedMagicEMU 0.4.8-beta (unreleased)
 

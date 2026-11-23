@@ -95,7 +95,7 @@
 
 - 保留執行個體資料重置和已配對的圖形資源，刪去無實際入口的舊執行個體刪除路徑。最終選用約 41.6 MiB 的階段版本。
 
-## RedMagicEMU 0.4.0-beta (unreleased)
+## RedMagicEMU 0.4.x (unreleased)
 
 ### RedMagicEMU 0.4.8-beta (unreleased)
 

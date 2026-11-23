@@ -95,7 +95,7 @@
 
 - 保留实例数据重置和已配对的图形资源，删去无实际入口的旧实例删除路径。最终选用约 41.6 MiB 的阶段包。
 
-## RedMagicEMU 0.4.0-beta (unreleased)
+## RedMagicEMU 0.4.x (unreleased)
 
 ### RedMagicEMU 0.4.8-beta (unreleased)
 
