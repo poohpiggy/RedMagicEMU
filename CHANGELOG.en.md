@@ -2,9 +2,11 @@
 
 [简体中文](CHANGELOG.md) · [繁體中文](CHANGELOG.zh-TW.md) · **English**
 
-## RedMagicEMU 0.7.1-beta (unreleased)
+## RedMagicEMU 0.7.1-beta
 
 - Fixed firmware imports that failed with `Invalid instance directory` when the Android host used the standard alias for app data.
+
+[0.7.1-beta release notes](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.7.1-beta)
 
 ## RedMagicEMU 0.7.0-beta
 

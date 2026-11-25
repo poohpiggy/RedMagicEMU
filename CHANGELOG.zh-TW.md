@@ -2,9 +2,11 @@
 
 [简体中文](CHANGELOG.md) · **繁體中文** · [English](CHANGELOG.en.md)
 
-## RedMagicEMU 0.7.1-beta (unreleased)
+## RedMagicEMU 0.7.1-beta
 
 - 修正部分主機手機匯入韌體時出現 `Invalid instance directory` 的問題，支援 Android 的標準應用程式資料目錄別名。
+
+[0.7.1-beta 發布說明](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.7.1-beta)
 
 ## RedMagicEMU 0.7.0-beta
 
