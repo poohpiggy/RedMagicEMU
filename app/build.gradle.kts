@@ -115,8 +115,8 @@ android {
         // 28: гостевые бинарники запускаются из каталога данных приложения (W^X для targetSdk>=29)
         //noinspection ExpiredTargetSdkVersion
         targetSdk = 28
-        versionCode = if (magiskApk.isPresent) 24 else 20
-        versionName = if (magiskApk.isPresent) "0.7.1-beta" else "0.6.9-location-test"
+        versionCode = if (magiskApk.isPresent) 25 else 20
+        versionName = if (magiskApk.isPresent) "0.7.2-beta" else "0.6.9-location-test"
         buildConfigField("boolean", "MAGISK_AVAILABLE", magiskApk.isPresent.toString())
         ndk { abiFilters += listOf("arm64-v8a") }
     }

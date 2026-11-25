@@ -2,6 +2,10 @@
 
 [简体中文](CHANGELOG.md) · **繁體中文** · [English](CHANGELOG.en.md)
 
+## RedMagicEMU 0.7.2-beta (unreleased)
+
+- 為目標 NX809J Guest 啟用原生虛擬競技鍵通道，在右上角浮動選單新增「競技鍵」開關，並同步解鎖控制中心「遊戲空間」磁貼與遊戲空間內原生退出按鈕。K80 實測透過浮動選單順暢退出與重新進入遊戲空間。
+
 ## RedMagicEMU 0.7.1-beta
 
 - 修正部分主機手機匯入韌體時出現 `Invalid instance directory` 的問題，支援主機 Android 為應用程式資料目錄提供的路徑別名。

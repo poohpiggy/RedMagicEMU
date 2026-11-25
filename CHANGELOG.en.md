@@ -2,6 +2,10 @@
 
 [简体中文](CHANGELOG.md) · [繁體中文](CHANGELOG.zh-TW.md) · **English**
 
+## RedMagicEMU 0.7.2-beta (unreleased)
+
+- Enabled RedMagicOS's native virtual game-key path on the target NX809J Guest, added a **Game Switch** toggle to the top-right floating menu, and unlocked both the Control Center Game Space tile and the in-Game Space exit button. Verified entering and exiting Game Space via the floating menu on the K80.
+
 ## RedMagicEMU 0.7.1-beta
 
 - Fixed firmware imports that failed with `Invalid instance directory` when the Android host used a path alias for the app data directory.

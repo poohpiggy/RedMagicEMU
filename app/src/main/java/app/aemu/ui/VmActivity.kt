@@ -193,6 +193,7 @@ class VmActivity : ComponentActivity() {
     private val batterySyncRuntime = java.util.concurrent.atomic.AtomicBoolean(true)
     private var guestAwake by mutableStateOf<Boolean?>(null)
     private var guestAwakeBusy by mutableStateOf(false)
+    private var gameSwitchBusy by mutableStateOf(false)
     private var navBarOn by mutableStateOf(true)
     private var navBarBusy by mutableStateOf(false)
     private val logLines = mutableStateListOf<String>()
@@ -547,6 +548,23 @@ class VmActivity : ComponentActivity() {
                     navBarOn = on
                     Toast.makeText(this, if (on) R.string.nav_bar_shown else R.string.nav_bar_hidden, Toast.LENGTH_SHORT).show()
                 } else Toast.makeText(this, R.string.nav_bar_save_failed, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun toggleGameSwitch() {
+        if (gameSwitchBusy) return
+        gameSwitchBusy = true
+        thread {
+            val result = runCatching { vm.toggleGameSwitch() }
+            runOnUiThread {
+                gameSwitchBusy = false
+                if (result.isSuccess) {
+                    val on = result.getOrThrow()
+                    Toast.makeText(this, if (on) R.string.game_switch_on else R.string.game_switch_off, Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, R.string.game_switch_failed, Toast.LENGTH_LONG).show()
+                }
             }
         }
     }
@@ -1413,6 +1431,12 @@ class VmActivity : ComponentActivity() {
                         onClick = { menu = false; vm.input.press(InputService.KEY_POWER) })
                     DropdownMenuItem(text = { Text(stringResource(R.string.m_power_menu)) }, leadingIcon = { Icon(Icons.Rounded.Menu, null) },
                         onClick = { menu = false; vm.input.press(InputService.KEY_POWER, 1500) })
+                    if (!vm.recoveryMode && app.aemu.core.TargetGameKeyProperty.applies(vm.img.api, vm.img.model, vm.img.abi, vm.engine)) {
+                        DropdownMenuItem(text = { Text(stringResource(R.string.m_game_switch)) },
+                            leadingIcon = { Icon(Icons.Rounded.Gamepad, null) },
+                            enabled = running && !gameSwitchBusy,
+                            onClick = { menu = false; toggleGameSwitch() })
+                    }
                     DropdownMenuItem(text = { Text(stringResource(R.string.nav_bar_toggle)) },
                         leadingIcon = { Icon(Icons.Rounded.ViewCompact, null) }, enabled = !navBarBusy,
                         onClick = { menu = false; setNavBarVisible(!navBarOn) })

@@ -787,6 +787,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         overrides["qemu.hw.mainkeys"] = if (s.showNavBar && !(engine == Engine.N64 && kernel.navBarRequired)) "1" else "0"
         TargetRadioLaunch.applyBootProperties(radioBackend, overrides)
         TargetRichTapProperty.apply(img.api, img.model, img.abi, engine, overrides)
+        TargetGameKeyProperty.apply(img.api, img.model, img.abi, engine, overrides)
         // отладка: run/props.extra — строки ключ=значение поверх всего остального
         File(paths.bin, "props.extra").takeIf { it.isFile }?.readLines()?.forEach { l ->
             val k = l.substringBefore('=').trim()
@@ -2498,6 +2499,17 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         val (code, output) = guestRunner.run(listOf("/system/bin/sh", "-c", shellPrefix + cmd), 15_000)
         check(code == 0) { "Guest settings command failed ($code): ${output.trim().take(200)}" }
         output
+    }
+
+    private val gameSwitchControl = GuestGameSwitch { cmd ->
+        val (code, output) = guestRunner.run(listOf("/system/bin/sh", "-c", shellPrefix + cmd), 15_000)
+        check(code == 0) { "Guest settings command failed ($code): ${output.trim().take(200)}" }
+        output
+    }
+
+    internal fun toggleGameSwitch(): Boolean = lifecycle.run {
+        check(isTargetGuest) { "Game Switch is only supported on the target NX809J Guest" }
+        gameSwitchControl.toggle()
     }
 
     internal fun guestStayAwake(on: Boolean? = null): Boolean = lifecycle.run {

@@ -167,6 +167,10 @@
     <string name="vs_qemu_args">Extra qemu options</string>
     <string name="vs_qemu_args_sub">Example: -d unimp DHD_TBFLUSH=2 (NAME=value becomes an environment variable)</string>
     <string name="m_power_menu">电源菜单</string>
+    <string name="m_game_switch">竞技键</string>
+    <string name="game_switch_on">竞技键已开启</string>
+    <string name="game_switch_off">竞技键已关闭</string>
+    <string name="game_switch_failed">无法切换竞技键</string>
     <string name="m_keyboard">显示/隐藏键盘</string>
     <string name="m_paste">粘贴剪贴板文本</string>
     <string name="m_sms">虚拟短信</string>
