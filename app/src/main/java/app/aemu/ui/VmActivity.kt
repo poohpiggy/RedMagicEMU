@@ -1765,8 +1765,24 @@ class VmActivity : ComponentActivity() {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(stringResource(R.string.log), style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f),
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    IconButton(onClick = { copyLog(list.toList()) }) { Icon(Icons.Rounded.ContentCopy, stringResource(R.string.log_copy)) }
-                    IconButton(onClick = { pendingExport = list.toList(); exportLog.launch("RedMagicEMU-${vm.img.id}-${if (guestTab) "logcat" else "host"}.log") }) {
+                    IconButton(onClick = {
+                        if (guestTab) {
+                            val fallback = list.toList()
+                            thread {
+                                val diag = GuestLog.exportDiagnosticLog(vm.paths.root, vm.paths.bin).ifEmpty { fallback }
+                                runOnUiThread { copyLog(diag) }
+                            }
+                        } else copyLog(list.toList())
+                    }) { Icon(Icons.Rounded.ContentCopy, stringResource(R.string.log_copy)) }
+                    IconButton(onClick = {
+                        val fallback = list.toList()
+                        pendingExportProvider = if (guestTab) {
+                            { GuestLog.exportDiagnosticLog(vm.paths.root, vm.paths.bin).ifEmpty { fallback } }
+                        } else {
+                            { fallback }
+                        }
+                        exportLog.launch("RedMagicEMU-${vm.img.id}-${if (guestTab) "logcat" else "host"}.log")
+                    }) {
                         Icon(Icons.Rounded.Download, stringResource(R.string.log_export))
                     }
                     FilledTonalIconButton(onClick = onClose) { Icon(Icons.Rounded.Close, stringResource(R.string.close)) }
@@ -1875,12 +1891,15 @@ class VmActivity : ComponentActivity() {
         }
     }
 
-    private var pendingExport: List<String> = emptyList()
+    private var pendingExportProvider: (() -> List<String>)? = null
     private val exportLog = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
         if (uri == null) return@registerForActivityResult
-        val lines = pendingExport
+        val provider = pendingExportProvider ?: return@registerForActivityResult
         thread {
-            val ok = runCatching { contentResolver.openOutputStream(uri)!!.bufferedWriter().use { w -> lines.forEach { w.write(it); w.write("\n") } } }.isSuccess
+            val ok = runCatching {
+                val lines = provider()
+                contentResolver.openOutputStream(uri)!!.bufferedWriter().use { w -> lines.forEach { w.write(it); w.write("\n") } }
+            }.isSuccess
             runOnUiThread { Toast.makeText(this, if (ok) R.string.log_exported else R.string.log_export_failed, Toast.LENGTH_SHORT).show() }
         }
     }

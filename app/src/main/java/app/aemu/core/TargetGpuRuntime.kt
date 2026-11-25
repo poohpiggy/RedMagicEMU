@@ -139,3 +139,6 @@ internal class TargetGpuRuntime(
         }
     }
 }
+
+internal fun guestVulkanFeaturesVisible(vulkanReady: Boolean, librariesPrepared: Boolean): Boolean =
+    vulkanReady && librariesPrepared

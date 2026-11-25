@@ -431,7 +431,6 @@ class GuestVm(val ctx: Context, image: GuestImage) {
         val assets = ctx.assets.list("rme-gpu").orEmpty()
         val packaged = "guest.idx" in assets
         val wantsVulkan = settings.gpu && settings.vulkan
-        runtime.setVulkanFeaturesVisible(wantsVulkan)
         val vulkan = if (wantsVulkan && packaged && renderer.canExecute()) {
             val sockets = File(paths.root, "dev/socket")
             sockets.mkdirs()
@@ -452,6 +451,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                 false
             }
             if (prepared) {
+                runtime.setVulkanFeaturesVisible(guestVulkanFeaturesVisible(vulkanReady = vulkan, librariesPrepared = true))
                 val bridges = listOfNotNull("Vulkan".takeIf { vulkan }, "OpenCL".takeIf { openCl })
                 log("Guest ${bridges.joinToString(" and ")} libraries prepared")
                 if (openCl && nativeOpenCl) hostOpenCl.start(paths.root, runner)
@@ -459,6 +459,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             }
         }
         runtime.restore()
+        runtime.setVulkanFeaturesVisible(false)
         if (wantsVulkan && (!packaged || !renderer.canExecute())) lifecycle.launch("vulkan-host") {
             if (BuildConfig.DEBUG && renderer.isFile) {
                 hostVulkan.startRenderer(nativeDir, settings.width, settings.height, settings.density)
@@ -1687,7 +1688,11 @@ class GuestVm(val ctx: Context, image: GuestImage) {
             if (!stopping) {
                 log("· $name exited, code $code")
                 // (a process the engine stopped itself - boot animation, planned restart - is not a crash)
-                if (code != 0 && !ourKills.remove(p)) LogCap.crash(paths, name, code, if (name == "zygote" && code == 137) systemServerDeath() else null)
+                if (code != 0 && !ourKills.remove(p)) {
+                    val death = if (name == "zygote" && code == 137) systemServerDeath() else null
+                    if (name == "zygote" && code == 137) log("· zygote 137 detail: ${formatZygote137Detail(death)}")
+                    LogCap.crash(paths, name, code, death)
+                }
             }
             // a restarted service is already running again under this name
             synchronized(procs) { if (procs[name].let { it == null || it === p }) props.put("init.svc.$name", "stopped") }
@@ -2123,7 +2128,8 @@ class GuestVm(val ctx: Context, image: GuestImage) {
                     }
                     if (name == "zygote" || name == "zygote_secondary") {
                         if (state != State.FAILED && bootDoneAt == 0L && !(everBooted && zygoteRestarts < 6)) {
-                            failure = "$name exited (code $code)" + if (code == 137) " — killed: the phone ran out of memory, or system_server died and took zygote with it (see the guest log)" else ""
+                            val death = if (code == 137) systemServerDeath() else null
+                            failure = "$name exited (code $code)" + if (code == 137) " — ${formatZygote137Detail(death)}" else ""
                             // (not "No original dex files found": our own `input`/`wm` helpers log that for unrelated jars)
                             if (code == 137 && guestLogHas("ClassNotFoundException: com.android.server.SystemServer"))
                                 failure = "system_server cannot start: the precompiled code of the framework (system/framework/oat) is missing from this container — import the firmware again"
@@ -2248,26 +2254,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
      * dalvik_system_Zygote.c before 5.0). The reason is in the guest log: the uncaught exception (RuntimeInit's
      * "FATAL EXCEPTION IN SYSTEM PROCESS"), the watchdog ("WATCHDOG KILLING SYSTEM PROCESS") or a native crash.
      */
-    private fun systemServerDeath(): String? = runCatching {
-        val markers = listOf("FATAL EXCEPTION IN SYSTEM PROCESS", "WATCHDOG KILLING SYSTEM PROCESS", ">>> system_server <<<")
-        var best: Pair<Long, String>? = null
-        for (buf in listOf("main", "system", "crash")) {
-            val f = File(paths.root, "dev/log/$buf")
-            if (!f.isFile) continue
-            val len = f.length(); val n = minOf(len, 2_000_000L).toInt()
-            val b = ByteArray(n)
-            java.io.RandomAccessFile(f, "r").use { r -> r.seek(len - n); r.readFully(b) }
-            val t = String(b, Charsets.ISO_8859_1)
-            for (m in markers) {
-                val i = t.lastIndexOf(m); if (i < 0) continue
-                // the ring is raw logger entries: keep the printable text after the marker
-                val tail = t.substring(i, minOf(t.length, i + 600)).map { if (it in ' '..'~') it else ' ' }.joinToString("")
-                    .replace(Regex(" {2,}"), " ").take(240)
-                if (best == null || f.lastModified() > best!!.first) best = f.lastModified() to tail
-            }
-        }
-        best?.second
-    }.getOrNull()
+    private fun systemServerDeath(): String? = GuestLog.systemServerDeath(paths.root)
     private var wizardSkipped = false
 
     private fun restartZygote() {
