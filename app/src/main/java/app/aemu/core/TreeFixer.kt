@@ -2012,6 +2012,7 @@ class TreeFixer(
         // core, and its only pool thread waited for the tasks it had queued behind itself)
         for (n in 0 until cpus) File(cpu, "cpu$n/online").let { if (!it.isFile) { it.parentFile?.mkdirs(); it.writeText("1\n") } }
         File(root, "sys/class/net/lo").mkdirs()
+        prepareGuestThermalSysfs(root)
         // the headset jack (switch class, drivers/switch/switch_class.c: name, state; 0 = nothing plugged), present on
         // phones of every generation: HeadsetObserver/WiredAccessoryManager read it, and Samsung 2.1 mediaserver
         // (initialize_database) fcloses the result of fopen("/sys/class/switch/h2w/state") unchecked
@@ -2705,4 +2706,19 @@ class TreeFixer(
             "mnt", "mnt/asec", "mnt/obb", "mnt/secure", "mnt/secure/asec", "mnt/shell", "mnt/media_rw", "storage",
         )
     }
+}
+
+/**
+ * Provide an empty, app-readable Guest `/sys/class/thermal` directory so `run64`'s `xl()` maps
+ * `/sys/class/thermal` inside the Guest root instead of falling through to the host's sysfs.
+ * On hosts whose SELinux/DAC policy allows `stat` but denies `readdir` on `/sys/class/thermal`,
+ * NX809J's `cubeserver.jar` (`cn.nubia.server.cube.datacenter.xml.e.<clinit>`) calls
+ * `File("/sys/class/thermal/").listFiles().length` without a null check, throwing an uncaught
+ * `ExceptionInInitializerError` on `nbopt:data_center` and killing `system_server` (zygote 137).
+ */
+internal fun prepareGuestThermalSysfs(root: File): File {
+    val thermal = File(root, "sys/class/thermal")
+    if (thermal.exists() && !thermal.isDirectory) thermal.delete()
+    thermal.mkdirs()
+    return thermal
 }

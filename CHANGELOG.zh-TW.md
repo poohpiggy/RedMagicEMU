@@ -2,10 +2,14 @@
 
 [简体中文](CHANGELOG.md) · **繁體中文** · [English](CHANGELOG.en.md)
 
-## RedMagicEMU 0.7.2-beta (unreleased)
+## RedMagicEMU 0.7.2-beta
 
 - 為目標 NX809J Guest 啟用原生虛擬競技鍵通道，在右上角浮動選單新增「競技鍵」開關，並同步解鎖控制中心「遊戲空間」磁貼與遊戲空間內原生退出按鈕。K80 實測透過浮動選單順暢退出與重新進入遊戲空間。
 - 修正 Vulkan 用戶端交換鏈與描述符更新相容性問題：補充 `VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT` 交換鏈用途支援，修正 `vkUpdateDescriptorSetWithTemplate` 下 Mesa `VkBuffer` 解包，並清理描述符更新中按規範應忽略的指標與控制代碼。K80 實測遊戲空間內的紅魔姬及 AR 相機模式可正常進入且不再閃退。
+- 修正部分主機手機（如禁止一般應用程式列舉 `/sys/class/thermal/` 的聯發科等機型）啟動 NX809J Guest 時，`CubeService`（`nbopt:data_center`）在靜態初始化中因 `listFiles()` 回傳 `null` 觸發未捕獲 `ExceptionInInitializerError` 導致 `system_server` 崩潰（`zygote code 137`）的問題：為 Guest 提供應用程式可讀取的空 `/sys/class/thermal` 目錄，避免回退讀取主機溫控節點。
+- 放寬 `zygote code 137` 崩潰摘要截斷上限（由 240 字元擴展至 1024 字元），便於在主機日誌和 `crashes.log` 中保留完整的 `Caused by` 堆疊。
+
+[0.7.2-beta 發布說明](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.7.2-beta)
 
 ## RedMagicEMU 0.7.1-beta
 

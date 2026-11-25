@@ -78,8 +78,8 @@ object GuestLog {
             val t = String(b, Charsets.ISO_8859_1)
             for (m in markers) {
                 val i = t.lastIndexOf(m); if (i < 0) continue
-                val tail = t.substring(i, minOf(t.length, i + 600)).map { if (it in ' '..'~') it else ' ' }.joinToString("")
-                    .replace(Regex(" {2,}"), " ").take(240)
+                val tail = t.substring(i, minOf(t.length, i + 2048)).map { if (it in ' '..'~') it else ' ' }.joinToString("")
+                    .replace(Regex(" {2,}"), " ").take(1024)
                 if (best == null || f.lastModified() > best!!.first) best = f.lastModified() to tail
             }
         }

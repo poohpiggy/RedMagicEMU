@@ -79,6 +79,37 @@ class GuestDiagnosticsTest {
         assertNull(GuestLog.systemServerDeath(root))
     }
 
+    @Test fun systemServerDeathPreservesCausedByPastPrevious240CharCap() {
+        val root = folder.newFolder("root")
+        val logDir = File(root, "dev/log").apply { mkdirs() }
+        val stack = buildString {
+            append("FATAL EXCEPTION IN SYSTEM PROCESS: nbopt:data_center\n")
+            append("java.lang.ExceptionInInitializerError\n")
+            append("\tat java.lang.reflect.Constructor.newInstance0(Native Method)\n")
+            append("\tat java.lang.reflect.Constructor.newInstance(Constructor.java:343)\n")
+            append("\tat cn.nubia.server.cube.datacenter.xml.m.g(Unknown Source:8)\n")
+            append("\tat cn.nubia.server.cube.datacenter.xml.h.a(Unknown Source:105)\n")
+            append("Caused by: java.lang.NullPointerException: Attempt to get length of null array\n")
+            append("\tat cn.nubia.server.cube.datacenter.xml.e.i(Unknown Source:38)\n")
+        }
+        File(logDir, "crash").writeBytes(encodeRecord(6, "AndroidRuntime", stack))
+
+        val death = GuestLog.systemServerDeath(root)
+        assertNotNull(death)
+        assertTrue(death!!.contains("Caused by: java.lang.NullPointerException"))
+        assertTrue(death.contains("cn.nubia.server.cube.datacenter.xml.e.i"))
+    }
+
+    @Test fun prepareGuestThermalSysfsCreatesReadableEmptyDirectory() {
+        val root = folder.newFolder("root")
+        val thermal = prepareGuestThermalSysfs(root)
+        assertTrue(thermal.isDirectory)
+        assertEquals(File(root, "sys/class/thermal"), thermal)
+        val entries = thermal.listFiles()
+        assertNotNull(entries)
+        assertEquals(0, entries!!.size)
+    }
+
     @Test fun vulkanFeatureVisibilityHidesVulkanWhenRendererFailedOrLibrariesNotPrepared() {
         assertEquals(true, guestVulkanFeaturesVisible(vulkanReady = true, librariesPrepared = true))
         assertEquals(false, guestVulkanFeaturesVisible(vulkanReady = false, librariesPrepared = true))

@@ -2,10 +2,14 @@
 
 [简体中文](CHANGELOG.md) · [繁體中文](CHANGELOG.zh-TW.md) · **English**
 
-## RedMagicEMU 0.7.2-beta (unreleased)
+## RedMagicEMU 0.7.2-beta
 
 - Enabled RedMagicOS's native virtual game-key path on the target NX809J Guest, added a **Game Switch** toggle to the top-right floating menu, and unlocked both the Control Center Game Space tile and the in-Game Space exit button. Verified entering and exiting Game Space via the floating menu on the K80.
 - Fixed Vulkan client swapchain and descriptor-update compatibility: advertised and accepted `VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT` on readback swapchains, unwrapped Mesa `VkBuffer` handles in `vkUpdateDescriptorSetWithTemplate` on Android, and sanitized ignored descriptor pointers/handles in `vkUpdateDescriptorSets` and template updates. Verified RedMagic Mora and its AR camera mode open without crashing from Game Space on the K80.
+- Fixed NX809J Guest boot crashes (`zygote code 137`) on hosts whose SELinux/DAC policy blocks ordinary apps from listing `/sys/class/thermal/` (such as some MediaTek devices), where `CubeService` (`nbopt:data_center`) threw an uncaught `ExceptionInInitializerError` when `listFiles()` returned `null`: Guest now gets an app-readable empty `/sys/class/thermal` directory instead of falling through to the host's thermal nodes.
+- Expanded the `zygote code 137` crash summary limit from 240 to 1024 characters so host logs and `crashes.log` preserve full `Caused by` stack traces.
+
+[0.7.2-beta release notes](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.7.2-beta)
 
 ## RedMagicEMU 0.7.1-beta
 
