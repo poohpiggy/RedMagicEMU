@@ -474,24 +474,45 @@ class FirstRingtoneInitStoreTest {
         }
 
         val aliasedInstance = alias.resolve(appData.relativize(instance))
-        FirstRingtoneInitStore.open(aliasedInstance.toFile(), "abcdef", data).use { it.createFresh() }
+        FirstRingtoneInitStore.open(aliasedInstance.toFile(), "abcdef", alias.resolve("app.redmagicemu")).use { it.createFresh() }
         FirstRingtoneInitStore.open(instance.toFile(), "abcdef").use {
             assertEquals(FirstRingtoneInitStore.Status.FRESH, it.status())
         }
     }
 
-    @Test fun rejectsAndroidUserZeroAliasToAnUnexpectedDirectory() {
+    @Test fun rejectsAliasOutsideTheAppDataPathSuppliedByAndroid() {
         val data = Files.createDirectory(tmp().resolve("data"))
         val user = Files.createDirectory(data.resolve("user"))
         val otherData = Files.createDirectory(data.resolve("other"))
-        val instance = Files.createDirectory(otherData.resolve("abcdef"))
+        val instance = Files.createDirectories(otherData.resolve("app.redmagicemu/files/images/abcdef"))
         val alias = user.resolve("0")
         createLink(alias, otherData)
 
         assertThrows(IOException::class.java) {
-            FirstRingtoneInitStore.open(alias.resolve("abcdef").toFile(), "abcdef", data).use { it.createFresh() }
+            val trustedAppData = data.resolve("data/app.redmagicemu")
+            FirstRingtoneInitStore.open(alias.resolve(otherData.relativize(instance)).toFile(), "abcdef", trustedAppData)
+                .use { it.createFresh() }
         }
         assertFalse(Files.exists(instance.resolve(FirstRingtoneInitStore.FRESH_FILE)))
+    }
+
+    @Test fun opensInstanceThroughTheHostApplicationDataParentAlias() {
+        val parent = tmp()
+        val realContainer = Files.createDirectory(parent.resolve("internal-storage"))
+        val instance = Files.createDirectories(realContainer.resolve("app.redmagicemu/files/images/abcdef"))
+        val alias = parent.resolve("host-app-storage")
+        createLink(alias, realContainer)
+        Files.newDirectoryStream(instance).use {
+            Assume.assumeTrue("filesystem lacks anchored directory operations", it is java.nio.file.SecureDirectoryStream<*>)
+        }
+
+        val appData = alias.resolve("app.redmagicemu")
+        FirstRingtoneInitStore.open(appData.resolve("files/images/abcdef").toFile(), "abcdef", appData).use {
+            it.createFresh()
+        }
+        FirstRingtoneInitStore.open(instance.toFile(), "abcdef").use {
+            assertEquals(FirstRingtoneInitStore.Status.FRESH, it.status())
+        }
     }
 
     @Test fun rejectsLinkedInstanceBelowTheAndroidUserZeroAlias() {
@@ -505,7 +526,24 @@ class FirstRingtoneInitStoreTest {
 
         val aliasedInstance = alias.resolve("app.redmagicemu/files/images/abcdef")
         assertThrows(IOException::class.java) {
-            FirstRingtoneInitStore.open(aliasedInstance.toFile(), "abcdef", data).use { it.createFresh() }
+            FirstRingtoneInitStore.open(aliasedInstance.toFile(), "abcdef", alias.resolve("app.redmagicemu"))
+                .use { it.createFresh() }
+        }
+        assertFalse(Files.exists(other.resolve(FirstRingtoneInitStore.FRESH_FILE)))
+    }
+
+    @Test fun rejectsASymlinkAtTheAppDataDirectoryItself() {
+        val parent = tmp()
+        val realContainer = Files.createDirectory(parent.resolve("internal-storage"))
+        val other = Files.createDirectories(parent.resolve("other/files/images/abcdef"))
+        val alias = parent.resolve("host-app-storage")
+        createLink(alias, realContainer)
+        createLink(realContainer.resolve("app.redmagicemu"), parent.resolve("other"))
+
+        val appData = alias.resolve("app.redmagicemu")
+        assertThrows(IOException::class.java) {
+            FirstRingtoneInitStore.open(appData.resolve("files/images/abcdef").toFile(), "abcdef", appData)
+                .use { it.createFresh() }
         }
         assertFalse(Files.exists(other.resolve(FirstRingtoneInitStore.FRESH_FILE)))
     }

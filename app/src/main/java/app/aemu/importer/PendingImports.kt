@@ -195,7 +195,12 @@ internal object PendingImports {
         true
     }
 
-    class Lease internal constructor(private val images: File, val dir: File, private val channel: FileChannel, private val lock: FileLock) : Closeable {
+    class Lease internal constructor(
+        internal val images: File,
+        val dir: File,
+        private val channel: FileChannel,
+        private val lock: FileLock,
+    ) : Closeable {
         private var closed = false
         private var committed = false
         private var preserveOnClose = false

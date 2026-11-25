@@ -81,11 +81,11 @@ object ImageStore {
         SafeMetadataStore.write(dir, img.toJson().toString(2).toByteArray(Charsets.UTF_8))
     }
 
-    fun newId(ctx: Context): String {
+    internal fun newId(images: File): String {
         val abc = "abcdefghijkmnpqrstuvwxyz23456789"
         while (true) {
             val id = (1..6).map { abc.random() }.joinToString("")
-            if (!File(imagesDir(ctx), id).exists()) return id
+            if (!File(images, id).exists()) return id
         }
     }
 
@@ -97,7 +97,7 @@ object ImageStore {
             requireGuestStopped(ctx)
             if (!lease.isValid()) throw IOException("Instance runtime lease changed")
             GuestDataReset.clear(instance) {
-                FirstRingtoneInitStore.open(instance, id).use { it.createFresh() }
+                FirstRingtoneInitStore.open(instance, id, ctx.dataDir.toPath()).use { it.createFresh() }
                 BootHistory(ctx.filesDir).reset(id)
             }
         }

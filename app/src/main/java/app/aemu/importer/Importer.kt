@@ -16,6 +16,7 @@ import app.aemu.core.TreeFixer
 import app.aemu.core.VmPaths
 import app.aemu.core.RecoveryImage
 import app.aemu.core.InstanceAdmission
+import app.aemu.core.InstancePathSafety
 import app.aemu.core.FirstRingtoneInitStore
 import app.aemu.core.EngineAssets
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
@@ -122,7 +123,7 @@ class Importer(
     }.getOrNull()
 
     fun import(uri: Uri, name: String): GuestImage {
-        val images = ImageStore.imagesDir(ctx)
+        val images = InstancePathSafety.prepareImportImagesDir(ctx.filesDir.toPath(), ctx.dataDir.toPath())
         PendingImports.cleanAbandoned(images)
         val required = 512L * 1024 * 1024
         if (images.usableSpace < required) throw IOException("Not enough free space to stage the target firmware")
@@ -202,7 +203,7 @@ class Importer(
     ): GuestImage {
         val pending = lease.dir
         onProgress("Checking firmware package", -1f)
-        val id = ImageStore.newId(ctx)
+        val id = ImageStore.newId(lease.images)
         paths = VmPaths(ctx, id, File(pending, id))
         if (!paths.dir.mkdir()) throw IOException("Cannot create a private instance")
         root = paths.root

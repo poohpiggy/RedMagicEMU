@@ -251,9 +251,9 @@ internal class FirstRingtoneInitStore internal constructor(
         private val BOOT_ID = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
         /** Fails closed if anchored directory operations or directory fsync are unavailable. */
-        fun open(instance: File, id: String, androidDataRoot: Path = Paths.get("/data")): FirstRingtoneInitStore {
+        fun open(instance: File, id: String, appDataDir: Path? = null): FirstRingtoneInitStore {
             if (!ImageId.valid(id) || instance.name != id) throw IOException("Invalid instance identity")
-            return FirstRingtoneInitStore(id, SecureIo.open(instance.toPath(), androidDataRoot))
+            return FirstRingtoneInitStore(id, SecureIo.open(instance.toPath(), appDataDir))
         }
     }
 
@@ -305,8 +305,8 @@ internal class FirstRingtoneInitStore internal constructor(
         override fun close() = dir.close()
 
         companion object {
-            fun open(path: Path, androidDataRoot: Path): SecureIo {
-                val absolute = resolveAndroidUserZeroAlias(path.toAbsolutePath().normalize(), androidDataRoot)
+            fun open(path: Path, appDataDir: Path?): SecureIo {
+                val absolute = InstancePathSafety.resolveHostAppDataPath(path.toAbsolutePath().normalize(), appDataDir)
                 val expected = checkedIdentity(absolute)
                 val opened = Files.newDirectoryStream(absolute)
                 if (opened !is SecureDirectoryStream<Path>) {
@@ -323,23 +323,9 @@ internal class FirstRingtoneInitStore internal constructor(
                 }
             }
 
-            private fun resolveAndroidUserZeroAlias(path: Path, dataRoot: Path): Path {
-                val user = dataRoot.resolve("user")
-                val alias = user.resolve("0")
-                if (!path.startsWith(alias) || !Files.isDirectory(user, NOFOLLOW_LINKS) || !Files.isSymbolicLink(alias))
-                    return path
-                // Android exposes user 0's credential-encrypted data through this system alias.
-                val target = dataRoot.resolve("data")
-                if (Files.readSymbolicLink(alias) != target) return path
-                return target.resolve(alias.relativize(path))
-            }
-
             private fun checkedIdentity(absolute: Path): Any {
-                var current = absolute.root ?: throw IOException("Missing root")
-                for (part in absolute) {
-                    current = current.resolve(part)
-                    if (Files.isSymbolicLink(current) || !Files.isDirectory(current, NOFOLLOW_LINKS))
-                        throw IOException("Invalid instance directory")
+                InstancePathSafety.invalidDirectoryComponent(absolute)?.let {
+                    throw IOException("Invalid instance directory: ${it.fileName}")
                 }
                 val attrs = Files.readAttributes(absolute, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
                 return attrs.fileKey() ?: throw IOException("Directory identity unavailable")

@@ -1939,7 +1939,7 @@ class GuestVm(val ctx: Context, image: GuestImage) {
     private fun initializeFirstRingtones(runner: GuestRunner) {
         if (img.api != 36 || img.model != "NX809J" || img.abi != "arm64-v8a" || engine != Engine.N64) return
         try {
-            FirstRingtoneInitStore.open(paths.dir, img.id).use { store ->
+            FirstRingtoneInitStore.open(paths.dir, img.id, ctx.dataDir.toPath()).use { store ->
                 val result = FirstRingtoneScan.execute(
                     store, img.api, img.model, img.abi, engine, systemAudioIndexed = true,
                     pause = { wait ->
