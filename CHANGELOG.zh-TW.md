@@ -6,6 +6,9 @@
 
 - 修正部分主機手機匯入韌體時出現 `Invalid instance directory` 的問題，支援主機 Android 為應用程式資料目錄提供的路徑別名。
 - 匯入前檢查應用程式資料目錄和 `files/images`，發現異常時指出具體目錄。
+- 當主機 Vulkan 渲染器啟動失敗或 GPU 函式庫準備回滾時，自動撤下 Guest 的 Vulkan 能力宣告，不影響 GLES 與 OpenCL。
+- `zygote` 以 `code 137` 結束時，在主機日誌和錯誤訊息中直接輸出 `system_server` 崩潰摘要，未發現崩潰痕跡時提示排查主機記憶體或 Android 子行程限制。
+- 增強無 Root 情境下的 Guest 日誌複製與匯出，合併輸出 `crashes.log` 與 `crash`、`system`、`main` 日誌緩衝。
 
 [0.7.1-beta 發布說明](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.7.1-beta)
 

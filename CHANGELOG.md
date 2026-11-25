@@ -6,6 +6,9 @@
 
 - 修复部分宿主手机导入固件时报 `Invalid instance directory` 的问题，兼容宿主 Android 为应用数据目录提供的路径别名。
 - 导入前检查应用数据目录和 `files/images`，发现异常时指出具体目录。
+- 当宿主 Vulkan 渲染器启动失败或 GPU 库准备回滚时，自动撤下 Guest 的 Vulkan 能力声明，不影响 GLES 与 OpenCL。
+- `zygote` 以 `code 137` 退出时，在宿主日志和报错信息中直接输出 `system_server` 崩溃摘要，未发现崩溃痕迹时提示排查宿主内存或 Android 子进程限制。
+- 增强无 Root 场景下的 Guest 日志复制与导出，合并输出 `crashes.log` 与 `crash`、`system`、`main` 日志缓冲。
 
 [0.7.1-beta 发布说明](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.7.1-beta)
 

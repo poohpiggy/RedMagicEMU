@@ -6,6 +6,9 @@
 
 - Fixed firmware imports that failed with `Invalid instance directory` when the Android host used a path alias for the app data directory.
 - Firmware import checks the app data directory and `files/images` before extraction and identifies the affected directory if a check fails.
+- Automatically hides Guest Vulkan capability declarations when the host Vulkan renderer fails to start or GPU library preparation rolls back, leaving GLES and OpenCL unaffected.
+- Surfaces the `system_server` crash summary directly in the host log and failure message when `zygote` exits with `code 137`, or points to host memory and Android child-process limits when no crash marker is present.
+- Expands non-root Guest log copy and export to include `crashes.log` alongside the `crash`, `system`, and `main` log buffers.
 
 [0.7.1-beta release notes](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.7.1-beta)
 
