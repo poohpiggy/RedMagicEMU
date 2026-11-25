@@ -16,6 +16,7 @@ RedMagicEMU is an independently maintained Android firmware emulator. It current
 - **Guest Root.** Magisk Root is off by default in instance settings. Once enabled, you can grant or revoke app root access in the Guest through Magisk for RedMagicEMU.
 - **Camera.** Supports switching between front and rear cameras and capturing JPEGs at native host resolutions. Compatible rear cameras can save paired RAW/DNG and JPEG captures. Rear 1080p60 recording has been tested on the Redmi K80.
 - **Device features.** Supports audio playback and recording, vibration, accelerometer, gyroscope, magnetometer, and on-demand host location updates. The always-on display works with the specified stock theme.
+- **Game Space and RedMagic Mora.** Supports the virtual Game Switch (floating menu toggle and Control Center Game Space tile) to enter and exit Game Space cleanly; RedMagic Mora and its AR camera mode work inside Game Space.
 - **Networking and telephony.** Supports Ethernet, virtual Wi-Fi, virtual LTE, simulated incoming calls, and SMS.
 - **Controls and files.** Supports file sharing between host and guest, APK installation, Android navigation buttons, a floating menu, screenshots, and a keep-screen-on option.
 - **Interface languages.** Supports US English, UK English, Simplified Chinese, Traditional Chinese (Taiwan), and Traditional Chinese (Hong Kong).
