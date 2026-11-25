@@ -5,6 +5,7 @@
 ## RedMagicEMU 0.7.2-beta (unreleased)
 
 - 為目標 NX809J Guest 啟用原生虛擬競技鍵通道，在右上角浮動選單新增「競技鍵」開關，並同步解鎖控制中心「遊戲空間」磁貼與遊戲空間內原生退出按鈕。K80 實測透過浮動選單順暢退出與重新進入遊戲空間。
+- 修正 Vulkan 用戶端交換鏈與描述符更新相容性問題：補充 `VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT` 交換鏈用途支援，修正 `vkUpdateDescriptorSetWithTemplate` 下 Mesa `VkBuffer` 解包，並清理描述符更新中按規範應忽略的指標與控制代碼。K80 實測遊戲空間內的紅魔姬及 AR 相機模式可正常進入且不再閃退。
 
 ## RedMagicEMU 0.7.1-beta
 

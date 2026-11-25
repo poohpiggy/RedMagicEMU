@@ -5,6 +5,7 @@
 ## RedMagicEMU 0.7.2-beta (unreleased)
 
 - Enabled RedMagicOS's native virtual game-key path on the target NX809J Guest, added a **Game Switch** toggle to the top-right floating menu, and unlocked both the Control Center Game Space tile and the in-Game Space exit button. Verified entering and exiting Game Space via the floating menu on the K80.
+- Fixed Vulkan client swapchain and descriptor-update compatibility: advertised and accepted `VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT` on readback swapchains, unwrapped Mesa `VkBuffer` handles in `vkUpdateDescriptorSetWithTemplate` on Android, and sanitized ignored descriptor pointers/handles in `vkUpdateDescriptorSets` and template updates. Verified RedMagic Mora and its AR camera mode open without crashing from Game Space on the K80.
 
 ## RedMagicEMU 0.7.1-beta
 

@@ -173,6 +173,88 @@ tracker = replace(tracker, """void ResourceTracker::on_vkUnmapMemory(void*, VkDe
         info->second.ptr = nullptr;
     }
 }""")
+tracker = replace(tracker, """    size_t imageInfosNeeded = 0;
+    for (uint32_t i = 0; i < descriptorWriteCount; ++i) {
+        if (!isDescriptorTypeImageInfo(transformedWrites[i].descriptorType)) continue;
+        if (!transformedWrites[i].pImageInfo) continue;
+
+        imageInfosNeeded += transformedWrites[i].descriptorCount;
+    }""", """    size_t imageInfosNeeded = 0;
+    for (uint32_t i = 0; i < descriptorWriteCount; ++i) {
+        const VkDescriptorType descType = transformedWrites[i].descriptorType;
+        if (!isDescriptorTypeImageInfo(descType)) transformedWrites[i].pImageInfo = nullptr;
+        if (!isDescriptorTypeBufferInfo(descType)) transformedWrites[i].pBufferInfo = nullptr;
+        if (!isDescriptorTypeBufferView(descType)) transformedWrites[i].pTexelBufferView = nullptr;
+        if (!isDescriptorTypeImageInfo(descType)) continue;
+        if (!transformedWrites[i].pImageInfo) continue;
+
+        imageInfosNeeded += transformedWrites[i].descriptorCount;
+    }""")
+tracker = replace(tracker, """            for (uint32_t j = 0; j < transformedWrites[i].descriptorCount; ++j) {
+                if (isImmutableSampler) {
+                    transformedImageInfos[imageInfoIndex].sampler = 0;
+                }
+                transformedImageInfos[imageInfoIndex] =
+                    filterNonexistentSampler(transformedImageInfos[imageInfoIndex]);
+                ++imageInfoIndex;
+            }""", """            const VkDescriptorType descType = transformedWrites[i].descriptorType;
+            const bool usesSampler = descType == VK_DESCRIPTOR_TYPE_SAMPLER ||
+                                     descType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            for (uint32_t j = 0; j < transformedWrites[i].descriptorCount; ++j) {
+                if (!usesSampler || isImmutableSampler) {
+                    transformedImageInfos[imageInfoIndex].sampler = VK_NULL_HANDLE;
+                }
+                if (descType == VK_DESCRIPTOR_TYPE_SAMPLER) {
+                    transformedImageInfos[imageInfoIndex].imageView = VK_NULL_HANDLE;
+                }
+                transformedImageInfos[imageInfoIndex] =
+                    filterNonexistentSampler(transformedImageInfos[imageInfoIndex]);
+                ++imageInfoIndex;
+            }""")
+tracker = replace(tracker, """            for (uint32_t j = 0; j < descCount; ++j) {
+                const VkDescriptorImageInfo* user =
+                    (const VkDescriptorImageInfo*)(userBuffer + offset + j * stride);
+
+                memcpy(((uint8_t*)imageInfos) + currImageInfoOffset, user,
+                       sizeof(VkDescriptorImageInfo));
+                currImageInfoOffset += sizeof(VkDescriptorImageInfo);
+            }""", """            const bool usesSampler = descType == VK_DESCRIPTOR_TYPE_SAMPLER ||
+                                     descType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            const bool isImmutableSampler =
+                descriptorBindingIsImmutableSampler(descriptorSet, dstBinding);
+            {
+                AutoLock<RecursiveLock> imgLock(mLock);
+                for (uint32_t j = 0; j < descCount; ++j) {
+                    const VkDescriptorImageInfo* user =
+                        (const VkDescriptorImageInfo*)(userBuffer + offset + j * stride);
+                    VkDescriptorImageInfo* dst =
+                        (VkDescriptorImageInfo*)(((uint8_t*)imageInfos) + currImageInfoOffset);
+                    memcpy(dst, user, sizeof(VkDescriptorImageInfo));
+                    if (!usesSampler || isImmutableSampler) {
+                        dst->sampler = VK_NULL_HANDLE;
+                    }
+                    if (descType == VK_DESCRIPTOR_TYPE_SAMPLER) {
+                        dst->imageView = VK_NULL_HANDLE;
+                    }
+                    *dst = filterNonexistentSampler(*dst);
+                    currImageInfoOffset += sizeof(VkDescriptorImageInfo);
+                }
+            }""")
+tracker = replace(tracker, """#if defined(__linux__) && !defined(VK_USE_PLATFORM_ANDROID_KHR)
+                // Convert mesa to internal for objects in the user buffer
+                VkDescriptorBufferInfo* internalBufferInfo =
+                    (VkDescriptorBufferInfo*)(((uint8_t*)bufferInfos) + currBufferInfoOffset);
+                VK_FROM_HANDLE(gfxstream_vk_buffer, gfxstream_buffer, internalBufferInfo->buffer);
+                internalBufferInfo->buffer = gfxstream_buffer->internal_object;
+#endif""", """#if defined(__linux__)
+                // Convert mesa to internal for objects in the user buffer
+                VkDescriptorBufferInfo* internalBufferInfo =
+                    (VkDescriptorBufferInfo*)(((uint8_t*)bufferInfos) + currBufferInfoOffset);
+                if (internalBufferInfo->buffer != VK_NULL_HANDLE) {
+                    VK_FROM_HANDLE(gfxstream_vk_buffer, gfxstream_buffer, internalBufferInfo->buffer);
+                    internalBufferInfo->buffer = gfxstream_buffer->internal_object;
+                }
+#endif""")
 (patched / "ResourceTracker.cpp").write_text(tracker)
 
 encoder = (source / "VkEncoder.cpp").read_text()
