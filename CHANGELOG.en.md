@@ -2,6 +2,10 @@
 
 [简体中文](CHANGELOG.md) · [繁體中文](CHANGELOG.zh-TW.md) · **English**
 
+## RedMagicEMU 0.7.1-beta (unreleased)
+
+- Fixed firmware imports that failed with `Invalid instance directory` when the Android host used the standard alias for app data.
+
 ## RedMagicEMU 0.7.0-beta
 
 - Added Magisk Root to instance settings. It is off by default. Enabling it and restarting the Guest activates the bundled Magisk for RedMagicEMU 31.1. Each instance retains its configuration and preinit data. On the K80, tested granting and revoking root access for regular apps and booting the Guest after disabling Root.

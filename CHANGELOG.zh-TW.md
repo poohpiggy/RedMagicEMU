@@ -2,6 +2,10 @@
 
 [简体中文](CHANGELOG.md) · **繁體中文** · [English](CHANGELOG.en.md)
 
+## RedMagicEMU 0.7.1-beta (unreleased)
+
+- 修正部分主機手機匯入韌體時出現 `Invalid instance directory` 的問題，支援 Android 的標準應用程式資料目錄別名。
+
 ## RedMagicEMU 0.7.0-beta
 
 - 執行個體設定新增預設關閉的 Magisk Root。開啟後重新啟動 Guest 即可使用內建的 Magisk for RedMagicEMU 31.1，設定和 preinit 資料隨執行個體儲存。K80 實測通過一般應用程式授權、撤銷，以及關閉 Root 後的啟動。

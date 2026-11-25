@@ -457,9 +457,61 @@ class FirstRingtoneInitStoreTest {
     @Test fun rejectsSymlinkedInstanceDirectory() {
         val parent = tmp(); val actual = Files.createDirectory(parent.resolve("actual"))
         val link = parent.resolve("abcdef")
-        try { Files.createSymbolicLink(link, actual) } catch (e: Exception) { Assume.assumeNoException(e) }
+        createLink(link, actual)
         assertThrows(IOException::class.java) { FirstRingtoneInitStore.open(link.toFile(), "abcdef") }
         assertEquals(0L, Files.list(actual).use { it.count() })
+    }
+
+    @Test fun opensInstanceThroughAndroidUserZeroDataAlias() {
+        val data = Files.createDirectory(tmp().resolve("data"))
+        val user = Files.createDirectory(data.resolve("user"))
+        val appData = Files.createDirectory(data.resolve("data"))
+        val instance = Files.createDirectories(appData.resolve("app.redmagicemu/files/images/abcdef"))
+        val alias = user.resolve("0")
+        createLink(alias, appData)
+        Files.newDirectoryStream(instance).use {
+            Assume.assumeTrue("filesystem lacks anchored directory operations", it is java.nio.file.SecureDirectoryStream<*>)
+        }
+
+        val aliasedInstance = alias.resolve(appData.relativize(instance))
+        FirstRingtoneInitStore.open(aliasedInstance.toFile(), "abcdef", data).use { it.createFresh() }
+        FirstRingtoneInitStore.open(instance.toFile(), "abcdef").use {
+            assertEquals(FirstRingtoneInitStore.Status.FRESH, it.status())
+        }
+    }
+
+    @Test fun rejectsAndroidUserZeroAliasToAnUnexpectedDirectory() {
+        val data = Files.createDirectory(tmp().resolve("data"))
+        val user = Files.createDirectory(data.resolve("user"))
+        val otherData = Files.createDirectory(data.resolve("other"))
+        val instance = Files.createDirectory(otherData.resolve("abcdef"))
+        val alias = user.resolve("0")
+        createLink(alias, otherData)
+
+        assertThrows(IOException::class.java) {
+            FirstRingtoneInitStore.open(alias.resolve("abcdef").toFile(), "abcdef", data).use { it.createFresh() }
+        }
+        assertFalse(Files.exists(instance.resolve(FirstRingtoneInitStore.FRESH_FILE)))
+    }
+
+    @Test fun rejectsLinkedInstanceBelowTheAndroidUserZeroAlias() {
+        val data = Files.createDirectory(tmp().resolve("data"))
+        val user = Files.createDirectory(data.resolve("user"))
+        val images = Files.createDirectories(data.resolve("data/app.redmagicemu/files/images"))
+        val other = Files.createDirectory(data.resolve("other"))
+        val alias = user.resolve("0")
+        createLink(alias, data.resolve("data"))
+        createLink(images.resolve("abcdef"), other)
+
+        val aliasedInstance = alias.resolve("app.redmagicemu/files/images/abcdef")
+        assertThrows(IOException::class.java) {
+            FirstRingtoneInitStore.open(aliasedInstance.toFile(), "abcdef", data).use { it.createFresh() }
+        }
+        assertFalse(Files.exists(other.resolve(FirstRingtoneInitStore.FRESH_FILE)))
+    }
+
+    private fun createLink(link: Path, target: Path) {
+        try { Files.createSymbolicLink(link, target) } catch (e: Exception) { Assume.assumeNoException(e) }
     }
 
     @Test fun directoryReplacementAfterOpenMustNotAuthorizeClaimForOldInode() {
