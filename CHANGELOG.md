@@ -4,7 +4,8 @@
 
 ## RedMagicEMU 0.7.1-beta
 
-- 修复部分宿主手机导入固件时报 `Invalid instance directory` 的问题，兼容 Android 的标准应用数据目录别名。
+- 修复部分宿主手机导入固件时报 `Invalid instance directory` 的问题，兼容宿主 Android 为应用数据目录提供的路径别名。
+- 导入前检查应用数据目录和 `files/images`，发现异常时指出具体目录。
 
 [0.7.1-beta 发布说明](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.7.1-beta)
 

@@ -4,7 +4,8 @@
 
 ## RedMagicEMU 0.7.1-beta
 
-- Fixed firmware imports that failed with `Invalid instance directory` when the Android host used the standard alias for app data.
+- Fixed firmware imports that failed with `Invalid instance directory` when the Android host used a path alias for the app data directory.
+- Firmware import checks the app data directory and `files/images` before extraction and identifies the affected directory if a check fails.
 
 [0.7.1-beta release notes](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.7.1-beta)
 

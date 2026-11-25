@@ -4,7 +4,8 @@
 
 ## RedMagicEMU 0.7.1-beta
 
-- 修正部分主機手機匯入韌體時出現 `Invalid instance directory` 的問題，支援 Android 的標準應用程式資料目錄別名。
+- 修正部分主機手機匯入韌體時出現 `Invalid instance directory` 的問題，支援主機 Android 為應用程式資料目錄提供的路徑別名。
+- 匯入前檢查應用程式資料目錄和 `files/images`，發現異常時指出具體目錄。
 
 [0.7.1-beta 發布說明](https://github.com/poohpiggy/RedMagicEMU/releases/tag/0.7.1-beta)
 
